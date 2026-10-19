@@ -516,23 +516,16 @@ struct GuardianSettingsForm: View {
 
     private func uploadProject() async {
         guard let client = guardian.client, let project = model.project else { return }
-        var files: [String: String] = [:]
-        if let enumerator = FileManager.default.enumerator(at: project, includingPropertiesForKeys: nil) {
-            while let next = enumerator.nextObject() {
-                guard let url = next as? URL else { continue }
-                let path = String(url.path.dropFirst(project.path.count + 1))
-                let skipped = ["node_modules/", ".git/", ".build/", "dist/", ".venv/", "__pycache__/", ".next/"]
-                    .contains { path.contains($0) }
-                guard !skipped, url.isFileURL,
-                      let text = try? String(contentsOf: url, encoding: .utf8),
-                      text.utf8.count < 400_000 else { continue }
-                files[path] = text
-                if files.count >= 2_000 { break }
-            }
+        status = "Reading the project's files…"
+        // Never the files that hold keys or passwords (.env, *.pem, id_rsa …), build output or dependencies.
+        let manifest = await Task.detached(priority: .userInitiated) { GuardianProjects.collect(project) }.value
+        guard !manifest.files.isEmpty else {
+            status = "That folder has no text files to upload."
+            return
         }
         do {
-            try await client.putProject(name: project.lastPathComponent, files: files)
-            status = "Uploaded \(files.count) files from \(project.lastPathComponent) to Guardian."
+            try await client.putProject(name: project.lastPathComponent, files: manifest.files)
+            status = manifest.summary(project: project.lastPathComponent)
         } catch {
             status = (error as? GuardianError)?.errorDescription ?? error.localizedDescription
         }

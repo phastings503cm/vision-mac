@@ -366,3 +366,39 @@ extension GuardianHarnessTests {
         XCTAssertEqual(GuardianLimit(kind: "requests", window: "run", used: 2, max: 2, unit: "streams").usage, "2 of 2 streams")
     }
 }
+
+/// A code project upload never takes the files that hold keys, build output or binaries (Windows' rule).
+final class GuardianProjectsTests: XCTestCase {
+    func testAnUploadLeavesOutKeysBuildOutputAndBinaries() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("vision-upload-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        func write(_ path: String, _ data: Data) throws {
+            let url = root.appendingPathComponent(path)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: url)
+        }
+        try write("Sources/main.swift", Data("print(1)\n".utf8))
+        try write("README.md", Data("# Ledger\n".utf8))
+        try write(".env", Data("API_KEY=sk-live-123\n".utf8))
+        try write(".env.local", Data("X=1\n".utf8))
+        try write(".env.example", Data("API_KEY=\n".utf8))
+        try write("certs/server.pem", Data("-----BEGIN".utf8))
+        try write("deploy/id_ed25519", Data("key".utf8))
+        try write("node_modules/x/index.js", Data("x".utf8))
+        try write(".build/debug.yaml", Data("x".utf8))
+        try write("logo.png", Data([0x89, 0x50, 0x00, 0x47]))
+        try write("big.txt", Data(String(repeating: "a", count: 400_000).utf8))
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("outside"),
+                                                   withDestinationURL: FileManager.default.temporaryDirectory)
+        let manifest = GuardianProjects.collect(root)
+        XCTAssertEqual(Set(manifest.files.keys), ["Sources/main.swift", "README.md", ".env.example"])
+        XCTAssertEqual(manifest.skippedSecret, 4)
+        XCTAssertEqual(manifest.skippedBinary, 1)
+        XCTAssertEqual(manifest.skippedLarge, 1)
+        XCTAssertEqual(manifest.summary(project: "ledger"),
+                       "Uploaded 3 files from ledger to Guardian. Left out: 4 files with keys, 1 binary, 1 over 400 KB.")
+        XCTAssertTrue(GuardianProjects.isCredentialFile("credentials.json"))
+        XCTAssertTrue(GuardianProjects.isCredentialFile("Signing.P12"))
+        XCTAssertFalse(GuardianProjects.isCredentialFile("keyboard.swift"))
+    }
+}
