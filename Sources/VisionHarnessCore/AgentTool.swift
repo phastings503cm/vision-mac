@@ -323,6 +323,10 @@ public struct AgentTool: ToolExecutor {
 
         let client = target.client
         let model = target.model
+        // Same chat to the machine (its name, its scope), its own place in line for the mouse. Its machine tools are
+        // reported on the seat, so the app's glow and the global stop (⌃⌥⌘.) see them like the chat's own.
+        let seat = context.machine?.child()
+        defer { seat?.noteToolWork(.ended) }
         let engine = Engine(
             client: client,
             registry: registry,
@@ -350,14 +354,23 @@ public struct AgentTool: ToolExecutor {
                 }
                 return [LLMMessage(role: .system, content: Compaction.summaryHeader + summary)] + plan.toKeep
             },
+            // The chat's approvals: allowed once covers its subagents, and ⌃⌥⌘. takes them back from all of them.
+            computerGrants: context.computerGrants ?? ComputerGrants(),
             vault: context.vault,
             vaultGrants: context.vaultGrants,
-            // Same chat to the machine (its name, its scope), its own place in line for the mouse.
-            machineSeat: context.machine?.child()
+            machineSeat: seat
         )
 
         let roster = context.roster
         let result = try await engine.run(messages: [], userText: prompt, sink: { event in
+            switch event {
+            case .toolStarted(_, let name, _) where ComputerAccess.forTool(name) != nil:
+                seat?.noteToolWork(.started(tool: name))
+            case .toolFinished(_, let name, _, _, _) where ComputerAccess.forTool(name) != nil:
+                seat?.noteToolWork(.finished)
+            default:
+                break
+            }
             guard let runID, let roster else { return }
             switch event {
             case .toolStarted(_, let name, let preview):

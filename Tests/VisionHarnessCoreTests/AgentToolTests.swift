@@ -289,3 +289,57 @@ final class AgentToolGuardTests: XCTestCase {
         XCTAssertEqual(AgentTool.present(description: "scan", outcome: failed), "Subagent 'scan' failed: no key")
     }
 }
+
+/// A subagent at the machine (review: its work never lit the glow, ⌃⌥⌘. didn't reach it, and it had approvals of its
+/// own): its machine tools are reported on its seat, and it uses — and loses — the chat's computer approvals.
+final class SubagentMachineWorkTests: XCTestCase {
+    struct FakeScreenshot: ToolExecutor {
+        static let name = "screenshot"
+        static let spec = ToolSpec(name: name, description: "a fake screenshot", parameters: "{}")
+        func execute(args: JSONString, in context: ToolContext) async -> ToolResult { ToolResult(output: "a picture") }
+    }
+
+    private var root: FleetTestDirectory!
+
+    override func setUp() {
+        super.setUp()
+        root = FleetTestDirectory("vision-submachine")
+    }
+
+    override func tearDown() {
+        root.remove()
+        super.tearDown()
+    }
+
+    private func run(seat: MachineSeat, grants: ComputerGrants, asked: Recorder<String>) async -> ToolResult {
+        let client = ScriptedClient(turns: [.init(calls: [ToolCall(id: "c1", name: "screenshot", arguments: "{}")]),
+                                            .init(text: "saw it")])
+        let context = ToolContext(workspace: root.url, policy: PermissionPolicy(preset: .workspaceWrite, workspaceRoot: root.url),
+                                  client: client, registry: ToolRegistry(tools: [FakeScreenshot()]), model: "test",
+                                  requestPermission: { _, _, detail in asked.append(detail); return false },
+                                  machine: seat, computerGrants: grants)
+        return await AgentTool().execute(args: #"{"description":"look","prompt":"take a screenshot"}"#, in: context)
+    }
+
+    func testASubagentsMachineToolsAreReportedOnItsSeatAndUseTheChatsApprovals() async throws {
+        let seat = MachineSeat.detached()
+        let holders = Recorder<String>()
+        let work = Recorder<MachineToolWork>()
+        seat.onToolWork = { holder, item in holders.append(holder); work.append(item) }
+        let grants = ComputerGrants()
+        grants.grant(.control)
+        let asked = Recorder<String>()
+
+        let result = await run(seat: seat, grants: grants, asked: asked)
+        XCTAssertTrue(result.output.contains("saw it"), result.output)
+        XCTAssertTrue(asked.values.isEmpty, "the chat allowed control: its subagent doesn't ask again")
+        XCTAssertEqual(work.values, [.started(tool: "screenshot"), .finished, .ended])
+        XCTAssertEqual(Set(holders.values).count, 1)
+        XCTAssertTrue(holders.values.allSatisfy { $0.hasPrefix(seat.holderID + "/sub") }, "\(holders.values)")
+
+        // ⌃⌥⌘. revokes the chat's approvals: the next subagent asks before it looks at the screen.
+        grants.revokeAll()
+        _ = await run(seat: seat, grants: grants, asked: asked)
+        XCTAssertEqual(asked.values.count, 1)
+    }
+}

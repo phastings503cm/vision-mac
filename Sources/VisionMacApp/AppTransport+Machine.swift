@@ -18,8 +18,9 @@ extension AppTransport {
         } else {
             seat = MachineSeat(chatID: sessionID, title: vm.title)
             let box = WeakTransportBox(self)
-            seat.onActivity = { activity in
-                Task { @MainActor in box.transport?.seatActivityChanged(sessionID, activity) }
+            // The chat's seat and every subagent seat made from it report here (each with its holder id).
+            seat.onToolWork = { holderID, work in
+                Task { @MainActor in box.transport?.machineToolWork(chatID: sessionID, holderID: holderID, work) }
             }
             machineSeats[sessionID] = seat
         }
@@ -124,17 +125,42 @@ extension AppTransport {
         refreshGlow()
     }
 
-    /// The seat says which app it is acting on (and whether with the real mouse): the pill names it.
-    func seatActivityChanged(_ sessionID: String, _ activity: SeatActivity) {
-        guard var work = machineWork[sessionID] else { return }
-        switch activity {
-        case .controlling(let app), .background(let app):
-            work.app = app
-            work.observing = false
-        default:
-            return
+    /// A seat's machine work. The chat's own seat (holder id = chat id) says which app it acts on — its tools come
+    /// from its own event stream. A subagent's seat (foreground or background) reports its tools here too, so the
+    /// glow lights and names the chat, and ⌃⌥⌘. finds it, even when the chat's own turn has ended.
+    func machineToolWork(chatID: String, holderID: String, _ work: MachineToolWork) {
+        let isSubagent = holderID != chatID
+        switch work {
+        case .acting(let app):
+            guard var current = machineWork[holderID] else { return }
+            current.app = app
+            current.observing = false
+            machineWork[holderID] = current
+        case .started(let tool):
+            guard isSubagent else { return }
+            subagentMachineTools[holderID, default: 0] += 1
+            let observing = ComputerAccess.forTool(tool) == .observe
+            if var current = machineWork[holderID] {
+                if !observing { current.observing = false }
+                machineWork[holderID] = current
+            } else {
+                let title = sessions.first { $0.id == chatID }?.title ?? ""
+                machineWork[holderID] = MachineWork(chatID: chatID, chatTitle: title, observing: observing)
+            }
+        case .finished:
+            guard isSubagent else { return }
+            let left = (subagentMachineTools[holderID] ?? 1) - 1
+            if left > 0 {
+                subagentMachineTools[holderID] = left
+            } else {
+                subagentMachineTools[holderID] = nil
+                machineWork[holderID] = nil
+            }
+        case .ended:
+            guard isSubagent else { return }
+            subagentMachineTools[holderID] = nil
+            machineWork[holderID] = nil
         }
-        machineWork[sessionID] = work
         refreshGlow()
     }
 
@@ -146,7 +172,7 @@ extension AppTransport {
     }
 
     /// The chat's turn ended: its own seat leaves the line and gives the controls back. (Its background
-    /// subagents keep their own places; their leases lapse when they stop acting.)
+    /// subagents keep their own places and their glow; their leases lapse when they stop acting.)
     func machineTurnEnded(_ sessionID: String) {
         machineWork[sessionID] = nil
         if let seat = machineSeats[sessionID] {
@@ -170,15 +196,18 @@ extension AppTransport {
     @discardableResult
     public func stopMachineControl() -> Int {
         let snapshot = controlSnapshot
-        var chats = Set(machineWork.keys)
+        // Every chat at the machine: its own tools, its subagents' (foreground or background), the line, the holder.
+        var chats = Set(machineWork.values.map(\.chatID))
         chats.formUnion(snapshot.waiting.map(\.chatID))
         if let holder = snapshot.holder { chats.insert(holder.chatID) }
         Task { await ControlArbiter.shared.stopAll() }
         for id in chats {
+            // Stops the turn and the chat's background agents; the approvals, shared with its subagents, go too.
             stopSession(id)
             computerGrants[id]?.revokeAll()
         }
         machineWork.removeAll()
+        subagentMachineTools.removeAll()
         refreshGlow()
         note(chats.isEmpty
              ? "Nothing was controlling the Mac. (⌃⌥⌘. stops all AI control from any app.)"

@@ -330,7 +330,8 @@ public struct Engine: Sendable {
                         fleet: fleet, roster: roster, agentTypes: agentTypes,
                         retry: config.retry, visionEnabled: config.visionEnabled,
                         temperature: config.temperature, maxOutputTokens: config.maxOutputTokens,
-                        unattended: config.unattended, fleetHome: fleetHome, machine: machineSeat)
+                        unattended: config.unattended, fleetHome: fleetHome, machine: machineSeat,
+                        computerGrants: computerGrants)
         }
 
         for iteration in 0..<config.maxIterations {

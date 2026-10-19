@@ -137,8 +137,11 @@ public final class AppTransport {
     /// Each chat's seat at the machine (its place in line for the real mouse, its scope), kept across engine
     /// rebuilds like its computer grants. See AppTransport+Machine.swift.
     @ObservationIgnored var machineSeats: [String: MachineSeat] = [:]
-    /// The chats with a machine tool running right now (what the glow's pill names).
+    /// Machine work running right now, keyed by seat holder id (a chat id, or a chat id + "/subN" for a subagent):
+    /// what the glow's pill names and what ⌃⌥⌘. stops.
     @ObservationIgnored var machineWork: [String: MachineWork] = [:]
+    /// Machine tools running in each subagent seat (one subagent may run several at once), keyed by holder id.
+    @ObservationIgnored var subagentMachineTools: [String: Int] = [:]
     /// The control arbiter as last seen (who has the real mouse, who waits).
     public internal(set) var controlSnapshot = ControlSnapshot.idle
     /// The status lines this file put on chats (so it only clears its own).

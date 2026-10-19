@@ -57,6 +57,15 @@ public struct MachineControlOptions: Sendable, Equatable, Codable {
     public static let waitChoices: [TimeInterval] = [30, 60, 90, 180, 300]
 }
 
+/// A seat's machine work as the glow follows it: a machine tool started or finished, the app it acts on, or the
+/// engine that used the seat ended (a stopped subagent: nothing of its is running any more).
+public enum MachineToolWork: Sendable, Equatable {
+    case started(tool: String)
+    case acting(app: String)
+    case finished
+    case ended
+}
+
 /// What a seat is doing, for the chat's status line and the glow.
 public enum SeatActivity: Sendable, Equatable {
     case idle
@@ -109,6 +118,14 @@ public final class MachineSeat: @unchecked Sendable {
     }
     private var _onActivity: (@Sendable (SeatActivity) -> Void)?
 
+    /// Machine work on this seat or a subagent seat made from it, with the seat's holder id — so the app's glow and
+    /// the global stop see a subagent's work, not only the chat's own (copied to every child seat).
+    public var onToolWork: (@Sendable (_ holderID: String, _ work: MachineToolWork) -> Void)? {
+        get { lock.guarded { _onToolWork } }
+        set { lock.guarded { _onToolWork = newValue } }
+    }
+    private var _onToolWork: (@Sendable (_ holderID: String, _ work: MachineToolWork) -> Void)?
+
     public init(chatID: String, title: String, arbiter: ControlArbiter = .shared) {
         self.chatID = chatID
         self.holderID = chatID
@@ -124,6 +141,7 @@ public final class MachineSeat: @unchecked Sendable {
         self.scope = parent.scope
         self._title = parent.title
         self._onActivity = parent.onActivity
+        self._onToolWork = parent.onToolWork
     }
 
     /// A seat for a subagent of this chat: its own place in line, the chat's scope and name.
@@ -147,12 +165,24 @@ public final class MachineSeat: @unchecked Sendable {
     public var activity: SeatActivity { lock.guarded { _activity } }
 
     public func setActivity(_ activity: SeatActivity) {
-        let (changed, observer): (Bool, (@Sendable (SeatActivity) -> Void)?) = lock.guarded {
+        let (changed, observer, work): (Bool, (@Sendable (SeatActivity) -> Void)?,
+                                        (@Sendable (String, MachineToolWork) -> Void)?) = lock.guarded {
             let changed = _activity != activity
             _activity = activity
-            return (changed, _onActivity)
+            return (changed, _onActivity, _onToolWork)
         }
-        if changed { observer?(activity) }
+        guard changed else { return }
+        observer?(activity)
+        switch activity {
+        case .controlling(let app), .background(let app): work?(holderID, .acting(app: app))
+        default: break
+        }
+    }
+
+    /// A machine tool started or finished on this seat, or the engine using it ended (see `MachineToolWork`).
+    public func noteToolWork(_ work: MachineToolWork) {
+        let observer = lock.guarded { _onToolWork }
+        observer?(holderID, work)
     }
 
     // MARK: Options and scope

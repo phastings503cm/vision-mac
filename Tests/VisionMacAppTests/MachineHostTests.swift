@@ -68,4 +68,42 @@ final class MachineHostTests: XCTestCase {
         XCTAssertFalse(grants.has(.control), "it asks again before controlling anything")
         XCTAssertFalse(transport.machineInUse)
     }
+
+    /// A background subagent acting on an app without the real mouse (ui_action) after its chat's turn ended: the glow
+    /// lights and names the chat, goes out when the tool is done, and ⌃⌥⌘. stops the chat (and so its background
+    /// agents) and takes back the approvals it shares with them.
+    func testABackgroundSubagentsMachineWorkLightsTheGlowAndTheGlobalStopReachesIt() async throws {
+        let a = transport.newSession(cwd: nil)
+        a.title = "Fix the build"
+        let grants = ComputerGrants()
+        grants.grant(.control)
+        transport.computerGrants[a.id] = grants
+        let sub = transport.machineSeat(for: a.id, vm: a).child()
+        XCTAssertFalse(a.running, "the chat's own turn is over")
+
+        sub.noteToolWork(.started(tool: "ui_action"))
+        sub.setActivity(.background(app: "Safari"))
+        try await waitUntil { MachineGlowController.shared.model.text == "Vision AI · “Fix the build” is working in Safari — your mouse is free · ⌃⌥⌘. stops" }
+        XCTAssertTrue(transport.machineInUse)
+        sub.noteToolWork(.finished)
+        try await waitUntil { !self.transport.machineInUse }
+
+        sub.noteToolWork(.started(tool: "ui_action"))
+        try await waitUntil { self.transport.machineInUse }
+        XCTAssertEqual(transport.stopMachineControl(), 1)
+        XCTAssertEqual(transport.banner, "Stopped AI control of the Mac in 1 chat. Each asks again before it controls anything.")
+        XCTAssertFalse(grants.has(.control), "the chat and its subagents ask again")
+        XCTAssertFalse(transport.machineInUse)
+        sub.noteToolWork(.ended)   // the stopped subagent's engine ends later: nothing comes back on
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertFalse(transport.machineInUse)
+    }
+
+    private func waitUntil(timeout: TimeInterval = 3, _ condition: @MainActor () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            if Date() > deadline { return XCTFail("condition never became true") }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
 }

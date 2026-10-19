@@ -54,6 +54,9 @@ public struct ToolContext: Sendable {
     /// This chat's seat at the machine: its place in line for the real mouse and keyboard, how it prefers to
     /// act, and which apps it may control (see `MachineSeat`). Nil = tools make a throwaway one.
     public let machine: MachineSeat?
+    /// This chat's computer-access approvals, so a subagent asks only if the chat hasn't allowed it — and the global
+    /// stop's revoke covers subagents too. Nil = a subagent starts with none of its own.
+    public let computerGrants: ComputerGrants?
 
     public init(workspace: URL, policy: PermissionPolicy,
                 client: any LLMClient, registry: ToolRegistry, depth: Int = 0,
@@ -64,8 +67,9 @@ public struct ToolContext: Sendable {
                 fleet: AgentFleet? = nil, roster: AgentRoster? = nil, agentTypes: AgentCatalog? = nil,
                 retry: RetryPolicy? = nil, visionEnabled: Bool = true,
                 temperature: Double? = nil, maxOutputTokens: Int? = nil, unattended: Bool = false,
-                fleetHome: FleetServer? = nil, machine: MachineSeat? = nil) {
+                fleetHome: FleetServer? = nil, machine: MachineSeat? = nil, computerGrants: ComputerGrants? = nil) {
         self.workspace = workspace
+        self.computerGrants = computerGrants
         self.fleetHome = fleetHome
         self.policy = policy
         self.client = client
