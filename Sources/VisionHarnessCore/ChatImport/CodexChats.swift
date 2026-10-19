@@ -56,7 +56,7 @@ public enum CodexChats {
         return parse(data, fallbackID: idFromFileName(file), names: names)
     }
 
-    /// "rollout-2026-03-26T20-24-56-019d2d52-…-936aefd65446.jsonl" → the uuid at its end.
+    /// "rollout-<local time>-<uuid>.jsonl" → the uuid at its end.
     static func idFromFileName(_ file: URL) -> String {
         let stem = file.deletingPathExtension().lastPathComponent
         let parts = stem.split(separator: "-")

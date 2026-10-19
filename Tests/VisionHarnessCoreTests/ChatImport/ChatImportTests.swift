@@ -178,7 +178,7 @@ final class ChatImportTests: XCTestCase {
         XCTAssertEqual(chat.model, "gpt-5.4")
         XCTAssertEqual(chat.rows.map(\.kind), [.user, .assistant, .tool, .tool, .tool, .tool, .assistant, .notice])
         XCTAssertEqual(chat.rows[0].text, "I need an S3 bucket in Oregon", "the typed prompt once; environment and instructions are not the person's")
-        XCTAssertEqual(chat.rows[0].at, iso("2026-03-27T03:26:32.303Z"))
+        XCTAssertEqual(chat.rows[0].at, iso("2026-05-07T10:03:45.440Z"))
         XCTAssertEqual(chat.rows[1].text, "I'll inspect the workspace first.", "the response item, not its event echo too")
         XCTAssertEqual(chat.rows[2].argSummary, "ls -la")
         XCTAssertFalse(chat.rows[2].isError)
@@ -204,7 +204,7 @@ final class ChatImportTests: XCTestCase {
 
     func testCodexFilesAndThreadNamesAreFound() throws {
         let file = try write(ChatImportFixtures.codexRollout,
-                             to: ".codex/sessions/2026/03/26/rollout-2026-03-26T20-24-56-\(ChatImportFixtures.codexID).jsonl")
+                             to: ".codex/sessions/2026/05/07/rollout-2026-05-07T03-02-09-\(ChatImportFixtures.codexID).jsonl")
         _ = try write(ChatImportFixtures.codexIndex, to: ".codex/session_index.jsonl")
         let home = CodexChats.home(home: dir, environment: [:])
         XCTAssertEqual(CodexChats.sessionFiles(codexHome: home).map(\.lastPathComponent), [file.lastPathComponent])
@@ -241,7 +241,7 @@ final class ChatImportTests: XCTestCase {
     func testOpenClawSessionsComeFromItsDatabaseOnTheBranchTheyEndedOn() throws {
         let database = try openClawDatabase([
             ("7f0c2a11-0000-4000-8000-0000000000aa", "agent:main:dashboard:d1", nil, "operator", ChatImportFixtures.openClawChatEvents),
-            ("9a9a9a9a-0000-4000-8000-0000000000bb", "agent:main:cron:22b8e0fd", "Cron: helpdesk-sweep-30min", "cron",
+            ("9a9a9a9a-0000-4000-8000-0000000000bb", "agent:main:cron:c4a1e000", "Cron: helpdesk-sweep-30min", "cron",
              ChatImportFixtures.openClawCronEvents),
         ])
         let previews = try OpenClawChats.previews(database: database, agent: "main").sorted { $0.title < $1.title }
@@ -271,7 +271,7 @@ final class ChatImportTests: XCTestCase {
     func testOpenClawTranscriptFilesPreviewQuicklyAndReadTheSame() throws {
         let agent = dir.appendingPathComponent(".openclaw/agents/main", isDirectory: true)
         let archive = try write(ChatImportFixtures.openClawChatEvents.joined(separator: "\n"),
-                                to: ".openclaw/agents/main/session-sqlite-import-archive/archive-tier.7f0c2a11-0000-4000-8000-0000000000aa.jsonl.imported-1788222840494")
+                                to: ".openclaw/agents/main/session-sqlite-import-archive/archive-tier.7f0c2a11-0000-4000-8000-0000000000aa.jsonl.imported-1790000000000")
         _ = try write("{}", to: ".openclaw/agents/main/session-sqlite-import-archive/archive-tier.7f0c.trajectory.jsonl.imported-1")
         _ = try write("{}", to: ".openclaw/agents/main/sessions/abc.jsonl.deleted.2026-09-16T18-04-36.539Z.ef9a.zst")
         let reset = try write(ChatImportFixtures.openClawCronEvents.joined(separator: "\n"),
@@ -584,10 +584,10 @@ final class ChatImportTests: XCTestCase {
     // MARK: Small pieces
 
     func testDatesInTheShapesTheToolsWrite() {
-        XCTAssertEqual(ImportDates.iso("2026-03-27T03:26:36.313383Z"), Date(timeIntervalSince1970: 1774581996.313))
-        XCTAssertEqual(ImportDates.iso("2026-03-27T03:26:36Z"), Date(timeIntervalSince1970: 1774581996))
-        XCTAssertEqual(ImportDates.iso("2026-03-27 03:26:36"), Date(timeIntervalSince1970: 1774581996))
-        XCTAssertEqual(ImportDates.iso("2026-03-27T03:26:36.5-07:00"), Date(timeIntervalSince1970: 1774581996.5 + 7 * 3600))
+        XCTAssertEqual(ImportDates.iso("2026-05-07T10:03:49.450383Z"), Date(timeIntervalSince1970: 1778148229.450))
+        XCTAssertEqual(ImportDates.iso("2026-05-07T10:03:49Z"), Date(timeIntervalSince1970: 1778148229))
+        XCTAssertEqual(ImportDates.iso("2026-05-07 10:03:49"), Date(timeIntervalSince1970: 1778148229))
+        XCTAssertEqual(ImportDates.iso("2026-05-07T10:03:49.5-07:00"), Date(timeIntervalSince1970: 1778148229.5 + 7 * 3600))
         XCTAssertEqual(ImportDates.any(1788220802938), Date(timeIntervalSince1970: 1788220802.938))
         XCTAssertEqual(ImportDates.any(1767225600.5), Date(timeIntervalSince1970: 1767225600.5))
         XCTAssertNil(ImportDates.iso("yesterday"))

@@ -34,37 +34,37 @@ enum ChatImportFixtures {
     not json at all
     """
 
-    // MARK: Codex — a rollout (~/.codex/sessions/2026/03/26/rollout-…-<id>.jsonl), Codex 0.117.
+    // MARK: Codex — a rollout (~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-…-<id>.jsonl), Codex 0.117.
 
-    static let codexID = "019d2d52-d341-7c81-a9c4-936aefd65446"
+    static let codexID = "c0de0000-0000-4000-8000-0000000000c1"
 
     static let codexRollout = """
-    {"timestamp":"2026-03-27T03:24:56.002Z","type":"session_meta","payload":{"id":"019d2d52-d341-7c81-a9c4-936aefd65446","timestamp":"2026-03-27T03:24:56.002Z","cwd":"/Users/pat/infra","originator":"Codex Desktop","cli_version":"0.117.0-alpha.24","source":"vscode","model_provider":"openai","base_instructions":{"text":"..."}}}
-    {"timestamp":"2026-03-27T03:26:32.302Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1","model_context_window":258400}}
-    {"timestamp":"2026-03-27T03:26:32.302Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions>\\nsandboxing</permissions instructions>"}]}}
-    {"timestamp":"2026-03-27T03:26:32.302Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\\n  <cwd>/Users/pat/infra</cwd>\\n</environment_context>"}]}}
-    {"timestamp":"2026-03-27T03:26:32.302Z","type":"turn_context","payload":{"turn_id":"t1","cwd":"/Users/pat/infra","approval_policy":"on-request","model":"gpt-5.4"}}
-    {"timestamp":"2026-03-27T03:26:32.303Z","type":"event_msg","payload":{"type":"user_message","message":"I need an S3 bucket in Oregon\\n","images":[],"local_images":[],"text_elements":[]}}
-    {"timestamp":"2026-03-27T03:26:32.303Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"I need an S3 bucket in Oregon\\n"}]}}
-    {"timestamp":"2026-03-27T03:26:32.612Z","type":"event_msg","payload":{"type":"token_count","info":null}}
-    {"timestamp":"2026-03-27T03:26:34.475Z","type":"response_item","payload":{"type":"reasoning","summary":[],"content":null,"encrypted_content":"gAAAA"}}
-    {"timestamp":"2026-03-27T03:26:39.465Z","type":"event_msg","payload":{"type":"agent_message","message":"I'll inspect the workspace first.","phase":"commentary"}}
-    {"timestamp":"2026-03-27T03:26:39.465Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I'll inspect the workspace first."}],"phase":"commentary"}}
-    {"timestamp":"2026-03-27T03:26:39.465Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\\"cmd\\":\\"ls -la\\",\\"workdir\\":\\"/Users/pat/infra\\"}","call_id":"call_1"}}
-    {"timestamp":"2026-03-27T03:26:39.549Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":"Command: /bin/zsh -lc ls -la\\nProcess exited with code 0\\nOutput:\\nmain.tf\\n"}}
-    {"timestamp":"2026-03-27T03:26:40.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\\"cmd\\":\\"terraform plan\\"}","call_id":"call_2"}}
-    {"timestamp":"2026-03-27T03:26:41.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_2","output":"Command: /bin/zsh -lc terraform plan\\nProcess exited with code 1\\nOutput:\\nError: no credentials\\n"}}
-    {"timestamp":"2026-03-27T03:30:13.942Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","call_id":"call_3","name":"apply_patch","input":"*** Begin Patch\\n*** Add File: /Users/pat/infra/bucket.tf\\n+resource {}\\n*** End Patch"}}
-    {"timestamp":"2026-03-27T03:30:13.980Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_3","output":"{\\"output\\":\\"Success. Updated the following files:\\\\nA /Users/pat/infra/bucket.tf\\\\n\\",\\"metadata\\":{\\"exit_code\\":0,\\"duration_seconds\\":0.0}}"}}
-    {"timestamp":"2026-03-27T03:31:00.000Z","type":"response_item","payload":{"type":"web_search_call","status":"completed","action":{"type":"search","query":"terraform s3 bucket oregon"}}}
-    {"timestamp":"2026-03-27T03:31:00.519Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Added bucket.tf; sign in to AWS so I can apply it."}],"phase":"final"}}
-    {"timestamp":"2026-03-27T03:31:00.519Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"Added bucket.tf"}}
-    {"timestamp":"2026-04-16T00:01:05.337Z","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"t2","reason":"interrupted"}}
+    {"timestamp":"2026-05-07T10:02:09.139Z","type":"session_meta","payload":{"id":"c0de0000-0000-4000-8000-0000000000c1","timestamp":"2026-05-07T10:02:09.139Z","cwd":"/Users/pat/infra","originator":"Codex Desktop","cli_version":"0.117.0-alpha.24","source":"vscode","model_provider":"openai","base_instructions":{"text":"..."}}}
+    {"timestamp":"2026-05-07T10:03:45.439Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1","model_context_window":258400}}
+    {"timestamp":"2026-05-07T10:03:45.439Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions>\\nsandboxing</permissions instructions>"}]}}
+    {"timestamp":"2026-05-07T10:03:45.439Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\\n  <cwd>/Users/pat/infra</cwd>\\n</environment_context>"}]}}
+    {"timestamp":"2026-05-07T10:03:45.439Z","type":"turn_context","payload":{"turn_id":"t1","cwd":"/Users/pat/infra","approval_policy":"on-request","model":"gpt-5.4"}}
+    {"timestamp":"2026-05-07T10:03:45.440Z","type":"event_msg","payload":{"type":"user_message","message":"I need an S3 bucket in Oregon\\n","images":[],"local_images":[],"text_elements":[]}}
+    {"timestamp":"2026-05-07T10:03:45.440Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"I need an S3 bucket in Oregon\\n"}]}}
+    {"timestamp":"2026-05-07T10:03:45.749Z","type":"event_msg","payload":{"type":"token_count","info":null}}
+    {"timestamp":"2026-05-07T10:03:47.612Z","type":"response_item","payload":{"type":"reasoning","summary":[],"content":null,"encrypted_content":"gAAAA"}}
+    {"timestamp":"2026-05-07T10:03:52.602Z","type":"event_msg","payload":{"type":"agent_message","message":"I'll inspect the workspace first.","phase":"commentary"}}
+    {"timestamp":"2026-05-07T10:03:52.602Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I'll inspect the workspace first."}],"phase":"commentary"}}
+    {"timestamp":"2026-05-07T10:03:52.602Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\\"cmd\\":\\"ls -la\\",\\"workdir\\":\\"/Users/pat/infra\\"}","call_id":"call_1"}}
+    {"timestamp":"2026-05-07T10:03:52.686Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":"Command: /bin/zsh -lc ls -la\\nProcess exited with code 0\\nOutput:\\nmain.tf\\n"}}
+    {"timestamp":"2026-05-07T10:03:53.137Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\\"cmd\\":\\"terraform plan\\"}","call_id":"call_2"}}
+    {"timestamp":"2026-05-07T10:03:54.137Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_2","output":"Command: /bin/zsh -lc terraform plan\\nProcess exited with code 1\\nOutput:\\nError: no credentials\\n"}}
+    {"timestamp":"2026-05-07T10:07:27.079Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","call_id":"call_3","name":"apply_patch","input":"*** Begin Patch\\n*** Add File: /Users/pat/infra/bucket.tf\\n+resource {}\\n*** End Patch"}}
+    {"timestamp":"2026-05-07T10:07:27.117Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_3","output":"{\\"output\\":\\"Success. Updated the following files:\\\\nA /Users/pat/infra/bucket.tf\\\\n\\",\\"metadata\\":{\\"exit_code\\":0,\\"duration_seconds\\":0.0}}"}}
+    {"timestamp":"2026-05-07T10:08:13.137Z","type":"response_item","payload":{"type":"web_search_call","status":"completed","action":{"type":"search","query":"terraform s3 bucket oregon"}}}
+    {"timestamp":"2026-05-07T10:08:13.656Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Added bucket.tf; sign in to AWS so I can apply it."}],"phase":"final"}}
+    {"timestamp":"2026-05-07T10:08:13.656Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"Added bucket.tf"}}
+    {"timestamp":"2026-05-27T06:38:18.474Z","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"t2","reason":"interrupted"}}
     """
 
     static let codexIndex = """
-    {"id":"019d2d52-d341-7c81-a9c4-936aefd65446","thread_name":"Provision bucket","updated_at":"2026-03-27T03:26:36.313383Z"}
-    {"id":"other","thread_name":"Another","updated_at":"2026-04-01T00:00:00Z"}
+    {"id":"c0de0000-0000-4000-8000-0000000000c1","thread_name":"Provision bucket","updated_at":"2026-05-07T10:03:49.450383Z"}
+    {"id":"other","thread_name":"Another","updated_at":"2026-05-12T06:37:13Z"}
     """
 
     /// An early rollout: no wrapper, no user_message events.
@@ -94,7 +94,7 @@ enum ChatImportFixtures {
 
     static let openClawCronEvents: [String] = [
         #"{"type":"session","version":3,"id":"9a9a9a9a-0000-4000-8000-0000000000bb","timestamp":"2026-10-19T18:30:00.000Z","cwd":"/Users/pat/.openclaw/workspace"}"#,
-        #"{"type":"message","id":"c1","parentId":null,"timestamp":"2026-10-19T18:30:00.100Z","message":{"role":"user","content":[{"type":"text","text":"[cron:22b8e0fd-d0e8-4781-a87c-a46b9b348db6 helpdesk-sweep-30min] Scan the helpdesk for open tickets."}]}}"#,
+        #"{"type":"message","id":"c1","parentId":null,"timestamp":"2026-10-19T18:30:00.100Z","message":{"role":"user","content":[{"type":"text","text":"[cron:c4a1e000-0000-4000-8000-0000000000c2 helpdesk-sweep-30min] Scan the helpdesk for open tickets."}]}}"#,
         #"{"type":"message","id":"c2","parentId":"c1","timestamp":"2026-10-19T18:30:09.000Z","message":{"role":"assistant","content":[{"type":"text","text":"NO_REPLY"}]}}"#,
     ]
 
