@@ -46,9 +46,21 @@ public struct AttachmentRoute: Sendable, Equatable {
                         maxImages: 20, maxImageBytes: 3_750_000, maxDocuments: 5, maxDocumentBytes: 4_500_000)
     }
 
+    /// Anthropic's own API: the same four image formats, PDFs as document blocks, and the Messages API's limits
+    /// (5 MB an image, a 32 MB request — documents are kept well under it, base64 being a third larger).
+    public static func anthropic(_ profile: ProviderProfile, traits: BedrockModelTraits) -> AttachmentRoute {
+        AttachmentRoute(vision: profile.vision ?? true, documents: traits.documents,
+                        imageTypes: ["image/png", "image/jpeg", "image/gif", "image/webp"],
+                        maxImages: 20, maxImageBytes: 5_000_000, maxDocuments: 5, maxDocumentBytes: 15_000_000)
+    }
+
     /// The route a profile is served on.
     public static func of(_ profile: ProviderProfile) -> AttachmentRoute {
-        profile.kind == .bedrock ? bedrock(profile, traits: BedrockModels.traits(profile.model)) : openAI(profile)
+        switch profile.kind {
+        case .bedrock: bedrock(profile, traits: BedrockModels.traits(profile.model))
+        case .anthropic: anthropic(profile, traits: BedrockModels.traits(profile.model))
+        default: openAI(profile)
+        }
     }
 }
 

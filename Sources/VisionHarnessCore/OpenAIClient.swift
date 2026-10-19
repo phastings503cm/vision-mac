@@ -179,7 +179,7 @@ public struct OpenAIClient: LLMClient {
                 if let hit {
                     resolved = (hit["id"] as? String) ?? id
                     limit = Self.contextWindow(from: hit)
-                    maxOut = hit["max_tokens"] as? Int
+                    maxOut = (hit["max_tokens"] as? Int) ?? (hit["max_output_tokens"] as? Int)
                 }
             }
         }
@@ -397,6 +397,10 @@ public struct OpenAIClient: LLMClient {
         if stream.finish == "error" {
             throw LLMError.http(500, "the server ended the reply with an error")
         }
+        // DeepSeek ran short of capacity mid-reply: an outage to wait out, not an answer.
+        if stream.finish == "insufficient_system_resource" {
+            throw LLMError.http(503, "the server ran out of capacity before finishing the reply (insufficient_system_resource)")
+        }
         // Every OpenAI-compatible server ends a reply with a finish_reason
         // and/or `data: [DONE]`. Neither means the connection closed mid-reply
         // (server restarted, proxy dropped it) — a failure worth retrying, not
@@ -451,6 +455,8 @@ public struct OpenAIClient: LLMClient {
                                      model: model)
         case .moonshot, .kimiCode:
             return KimiErrors.explain(status: status, body: body, provider: provider, model: model)
+        case .deepseek:
+            return DeepSeekErrors.explain(status: status, body: body, model: model)
         default:
             return nil
         }
@@ -512,7 +518,7 @@ public struct OpenAIClient: LLMClient {
         if let u = obj["usage"] as? [String: Any],
            let p = u["prompt_tokens"] as? Int,
            let c = u["completion_tokens"] as? Int, p > 0 || c > 0 {
-            state.usage = LLMUsage(promptTokens: p, completionTokens: c)
+            state.usage = LLMUsage(promptTokens: p, completionTokens: c, cachedTokens: Self.cachedTokens(in: u))
         }
         guard let choices = obj["choices"] as? [[String: Any]],
               let first = choices.first else { return }
@@ -569,8 +575,15 @@ public struct OpenAIClient: LLMClient {
         state.finish = (first["finish_reason"] as? String) ?? "stop"
         if let u = obj["usage"] as? [String: Any],
            let p = u["prompt_tokens"] as? Int, let c = u["completion_tokens"] as? Int {
-            state.usage = LLMUsage(promptTokens: p, completionTokens: c)
+            state.usage = LLMUsage(promptTokens: p, completionTokens: c, cachedTokens: Self.cachedTokens(in: u))
         }
+    }
+
+    /// Prompt tokens the server served from its cache, when it says: OpenAI's `prompt_tokens_details.cached_tokens`,
+    /// DeepSeek's `prompt_cache_hit_tokens`.
+    static func cachedTokens(in usage: [String: Any]) -> Int? {
+        if let details = usage["prompt_tokens_details"] as? [String: Any], let n = details["cached_tokens"] as? Int { return n }
+        return usage["prompt_cache_hit_tokens"] as? Int
     }
 
     /// The status code and message of an error object, if `obj` is one.
@@ -619,11 +632,17 @@ public struct OpenAIClient: LLMClient {
         let rules = ModelRequestRules.for(profile, model: requestModel(request))
         let learned = adaptations.adaptation(for: adaptationKey(request))
         let echo = rules.echoReasoning || (learned?.echoReasoning ?? false)
-        // A stand-in is only needed while the model thinks (K2.6 with thinking switched off wants none).
+        // A stand-in is only needed while the model thinks (K2.6 with thinking switched off wants none; nor does
+        // DeepSeek with reasoning_effort "none").
         let thinkingOff: Bool = {
-            if case .toggle = rules.thinking { return thinkingLevel(for: request) == .off }
-            return false
+            switch rules.thinking {
+            case .toggle: return thinkingLevel(for: request) == .off
+            case .effort(let words, _): return words[.off] != nil && thinkingLevel(for: request) == .off
+            default: return false
+            }
         }()
+        // DeepSeek: with tools in the request, every assistant message carries its reasoning — not only tool calls.
+        let echoEverywhere = rules.echoReasoningOnEveryMessage && !request.tools.isEmpty
         var messages: [[String: Any]] = []
         // Some OpenAI-compatible servers (SGLang on the DGX Spark, notably)
         // reject any request with more than one system message, or with one
@@ -656,7 +675,7 @@ public struct OpenAIClient: LLMClient {
                 if echo {
                     if let reasoning = ReasoningEcho.reasoning(from: m.providerState) {
                         msg["reasoning_content"] = reasoning
-                    } else if m.toolCalls?.isEmpty == false, !thinkingOff {
+                    } else if m.toolCalls?.isEmpty == false || echoEverywhere, !thinkingOff {
                         msg["reasoning_content"] = ReasoningEcho.placeholder
                     }
                 }
@@ -915,6 +934,9 @@ public enum FallbackContextWindow {
         "glm-5.3": 1_000_000, "kimi-for-coding": 1_000_000, "k3-256k": 262_144, "k3": 1_000_000,
         // Moonshot's platform (platform.kimi.ai/docs/models, 2026-10-18).
         "kimi-k3": 1_000_000, "kimi-k2.7-code": 262_144, "kimi-k2.7-code-highspeed": 262_144, "kimi-k2.6": 262_144,
+        // DeepSeek's API (api-docs.deepseek.com, 2026-10-19).
+        "deepseek-flash": 1_048_576, "deepseek-v4-pro": 1_048_576, "deepseek-v4-flash": 1_048_576,
+        "deepseek-v4-flash-vision-exp": 1_048_576,
     ]
 
     /// Prefix rules on the base name, checked after the exact table.
@@ -943,6 +965,10 @@ public enum FallbackContextWindow {
         // "meta-llama/Llama-3.3-70B-Instruct" → "Llama-3.3-70B-Instruct" → "llama-3.3-70b-instruct"
         let base = (modelID.components(separatedBy: "/").last ?? modelID).lowercased()
         if let hit = exact[base] { return hit }
+        // Anthropic's own ids ("claude-opus-5-5"): the Claude table Bedrock uses (1M from Claude 4.6 on).
+        if base.hasPrefix("claude-"), BedrockModels.claudeVersion(base) != nil, let window = BedrockModels.traits(base).contextWindow {
+            return window
+        }
         // Ollama tags: "qwen3:8b" → try "qwen3" prefix rules, base name "qwen3".
         let noTag = (base.components(separatedBy: ":").first ?? base)
         for (prefix, limit) in prefixes where noTag.hasPrefix(prefix) { return limit }

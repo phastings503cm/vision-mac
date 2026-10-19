@@ -168,6 +168,10 @@ public struct ProviderProfile: Codable, Hashable, Sendable {
         /// same account also shares prompts, skills, chats and code projects
         /// with every harness on it (see `GuardianClient`).
         case guardian
+        /// Anthropic's own API (api.anthropic.com/v1): Claude on the Messages API with an API key from
+        /// console.anthropic.com — streaming, tools, images, PDFs, extended thinking and prompt caching
+        /// (see `AnthropicClient`). Made by the plan guide ("Anthropic API (key)").
+        case anthropic
 
         /// The kinds the editor offers for a route made by hand. A Bedrock
         /// route comes from its guide (profile, Region and model together);

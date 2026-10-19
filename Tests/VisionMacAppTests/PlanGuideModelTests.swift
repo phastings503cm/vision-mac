@@ -252,5 +252,25 @@ final class PlanGuideModelTests: XCTestCase {
         XCTAssertTrue(guide.checkError?.hasPrefix("Z.ai didn't accept the key (401: token expired or incorrect).") == true,
                       guide.checkError ?? "")
     }
-}
 
+    // MARK: DeepSeek and Anthropic (mixing bowl #15, #16b)
+
+    /// DeepSeek's entry makes an OpenAI-compatible route at api.deepseek.com; Anthropic's makes a Messages API route.
+    func testDeepSeekAndAnthropicMakeTheirOwnKindsOfRoute() {
+        let deepseek = PlanGuideModel(backend: FakePlanBackend(), config: config(), planID: "deepseek")
+        deepseek.key = "sk-0123456789"
+        let ds = deepseek.route(model: "deepseek-v4-pro")
+        XCTAssertEqual(ds?.kind, .openAICompat)
+        XCTAssertEqual(ds?.baseURL, "https://api.deepseek.com")
+        XCTAssertEqual(ds?.name, "DeepSeek")
+        XCTAssertEqual(ds?.isPrivateRoute, false, "an online service: masked")
+
+        let anthropic = PlanGuideModel(backend: FakePlanBackend(), config: config(), planID: "anthropic")
+        anthropic.key = "sk-ant-api03-abc"
+        let an = anthropic.route(model: "claude-opus-5-5")
+        XCTAssertEqual(an?.kind, .anthropic)
+        XCTAssertEqual(an?.baseURL, "https://api.anthropic.com/v1")
+        XCTAssertEqual(an?.name, "Anthropic")
+        XCTAssertEqual(an?.needsAPIKey, true)
+    }
+}

@@ -65,6 +65,8 @@ struct ProviderSettings: View {
             Menu {
                 Button("Spark Swapper (connection code)…") { model.showSwapperGuide() }
                 Button("Z.ai (GLM)…") { model.showPlanGuide(plan: "zai") }
+                Button("DeepSeek…") { model.showPlanGuide(plan: "deepseek") }
+                Button("Anthropic API (key)…") { model.showPlanGuide(plan: "anthropic") }
                 Button("Subscription plan…") { model.showPlanGuide() }
                 Button("Amazon Bedrock…") { model.showBedrockGuide() }
                 Button("Other OpenAI-compatible server…") {

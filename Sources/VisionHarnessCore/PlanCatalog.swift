@@ -3,8 +3,9 @@ import Foundation
 // MARK: - Subscription and API plans
 //
 // The plans the "Connect a subscription plan" guide knows: Z.ai's GLM Coding Plan and API, Kimi Code and the
-// Moonshot API, OpenAI's API, and Alibaba Cloud's Qwen Coding Plan and Model Studio API — where each lives, where
-// its key comes from, which models it offers, and what its terms ask of Vision. (Researched October 2026.)
+// Moonshot API, DeepSeek's API, Anthropic's API (Claude with a key), OpenAI's API, and Alibaba Cloud's Qwen Coding
+// Plan and Model Studio API — where each lives, where its key comes from, which models it offers, and what its terms
+// ask of Vision. (Researched October 2026.)
 
 /// One plan.
 public struct SubscriptionPlan: Sendable, Equatable, Identifiable {
@@ -108,6 +109,8 @@ public enum PlanCatalog {
 
     public static let plans: [SubscriptionPlan] = [
         zai,
+        deepseek,
+        anthropic,
         SubscriptionPlan(
             id: "kimi-code", provider: "Kimi", name: "Kimi Code (subscription)", routeName: "Kimi Code",
             summary: "Kimi's coding subscription: K2.8 with up to 1M context, and K3.",
@@ -218,6 +221,44 @@ public enum PlanCatalog {
             $0.checksWithChat = true
         }
 
+    /// DeepSeek's own API (api-docs.deepseek.com, 2026-10-19): OpenAI-compatible at https://api.deepseek.com,
+    /// deepseek-v4-pro (text) and deepseek-flash (DeepSeek-V4.1-Flash, reads images), 1M context each, paid from a
+    /// prepaid balance. Request rules: `ModelRequestRules.deepseek`; errors: `DeepSeekErrors`.
+    static let deepseek = SubscriptionPlan(
+        id: "deepseek", provider: "DeepSeek", name: "DeepSeek API", routeName: "DeepSeek",
+        summary: "DeepSeek-V4 Pro and V4.1 Flash on DeepSeek's own API, paid per token from a prepaid balance.",
+        regions: [
+            .init(id: "international", name: "International", baseURL: "https://api.deepseek.com",
+                  keyPage: url("https://platform.deepseek.com/api_keys"), keyPlace: "API keys"),
+        ],
+        isSubscription: false, subscribeURL: nil,
+        keyHint: "Starts with sk-.",
+        models: [.init("deepseek-v4-pro", note: "V4 Pro · 1M context · text", contextWindow: 1_048_576),
+                 .init("deepseek-flash", note: "V4.1 Flash · 1M context · reads images", contextWindow: 1_048_576)],
+        listsModels: true,
+        terms: "Billed per token from the account's prepaid balance (top up at platform.deepseek.com); off-peak hours cost half. DeepSeek's servers are in China: the route isn't private, so Vision masks sensitive details before sending.",
+        interactiveOnly: false)
+
+    /// Anthropic's own API with an API key (the Messages API, `AnthropicClient`): Claude Opus 5.5, Fable 5.1,
+    /// Sonnet 5.5 and Haiku 5.5, 1M context each. A Claude Pro or Max subscription is not an API key — that goes
+    /// through Claude Code.
+    static let anthropic = SubscriptionPlan(
+        id: "anthropic", provider: "Anthropic", name: "Anthropic API (Claude, with an API key)", routeName: "Anthropic",
+        summary: "Claude Opus, Fable, Sonnet and Haiku on Anthropic's own API — thinking, images, PDFs and prompt caching.",
+        regions: [
+            .init(id: "international", name: "International", baseURL: AnthropicMessages.defaultBaseURL,
+                  keyPage: url("https://console.anthropic.com/settings/keys"), keyPlace: "API Keys"),
+        ],
+        isSubscription: false, subscribeURL: nil,
+        keyHint: "Starts with sk-ant-api…",
+        models: [.init("claude-opus-5-5", note: "Opus 5.5 · 1M context", contextWindow: 1_000_000),
+                 .init("claude-fable-5-1", note: "Fable 5.1 · the most capable · 1M", contextWindow: 1_000_000),
+                 .init("claude-sonnet-5-5", note: "Sonnet 5.5 · fast, capable · 1M", contextWindow: 1_000_000),
+                 .init("claude-haiku-5-5", note: "Haiku 5.5 · fastest · 1M", contextWindow: 1_000_000)],
+        listsModels: true,
+        terms: "Billed per token at console.anthropic.com. A Claude Pro or Max subscription doesn't include API access — for a subscription, use Claude Code instead.",
+        interactiveOnly: false)
+
     private static func configured(_ plan: SubscriptionPlan, _ edit: (inout SubscriptionPlan) -> Void) -> SubscriptionPlan {
         var plan = plan
         edit(&plan)
@@ -263,6 +304,15 @@ public enum PlanCatalog {
             if !key.hasPrefix("sk-") { return "Kimi and Moonshot keys start with sk-." }
         case "zai":
             if key.hasPrefix("sk-") { return "That looks like another service's key. Z.ai keys come from z.ai (or open.bigmodel.cn) and don't start with sk-." }
+        case "deepseek":
+            if key.hasPrefix("sk-ant-") { return "That's an Anthropic key. Choose “Anthropic API (Claude, with an API key)” for it, or copy a DeepSeek key from platform.deepseek.com/api_keys." }
+            if !key.hasPrefix("sk-") { return "DeepSeek keys start with sk-. Copy the key from platform.deepseek.com/api_keys." }
+        case "anthropic":
+            if key.hasPrefix("sk-ant-oat") {
+                return "That's a Claude subscription sign-in token (sk-ant-oat…), not an API key. A Pro or Max subscription works through Claude Code; for the API, create a key at console.anthropic.com ▸ API Keys."
+            }
+            if key.hasPrefix("sk-ant-admin") { return "That's an Admin key — it manages the organization but can't send messages. Create a regular API key at console.anthropic.com ▸ API Keys." }
+            if !key.hasPrefix("sk-ant-") { return "Anthropic API keys start with sk-ant-. Copy one from console.anthropic.com ▸ API Keys." }
         default:
             break
         }
@@ -295,6 +345,13 @@ public enum PlanCatalog {
                                                                 endpoint: ZAIErrors.Endpoint(rawValue: region.id),
                                                                 model: plan.recommended?.id ?? "glm-5.3") {
             return explained.message
+        }
+        if plan.id == "deepseek", let explained = DeepSeekErrors.explain(status: status, body: body,
+                                                                         model: plan.recommended?.id ?? "") {
+            return explained.message
+        }
+        if plan.id == "anthropic" {
+            return AnthropicErrors.error(status: status, body: body, model: plan.recommended?.id ?? "").localizedDescription
         }
         if plan.id == "kimi-code" || plan.id == "moonshot-api",
            let explained = KimiErrors.explain(status: status, body: body, provider: plan.id == "kimi-code" ? .kimiCode : .moonshot,
@@ -353,6 +410,10 @@ public enum PlanCatalog {
                 return lower.hasPrefix("glm-") && !["embedding", "image", "video", "voice", "asr", "tts", "realtime", "ocr"]
                     .contains { lower.contains($0) }
             }
+            if ids.isEmpty { return plan.models }
+        }
+        if plan.id == "anthropic" {
+            ids = listed.filter { $0.lowercased().hasPrefix("claude-") }
             if ids.isEmpty { return plan.models }
         }
         if plan.id == "openai" {
