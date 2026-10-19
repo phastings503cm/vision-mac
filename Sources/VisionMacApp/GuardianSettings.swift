@@ -139,7 +139,7 @@ struct GuardianSettingsForm: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button("Refresh") { Task { await guardian.refreshAccount() } }
+                    Button("Refresh") { Task { await guardian.refresh() } }
                     Button("Sign Out", role: .destructive) { guardian.signOut() }
                 }
                 if let account = guardian.account, !account.orgs.isEmpty {

@@ -32,7 +32,8 @@ public final class GuardianService: ObservableObject {
             // theirs — every sign-in, the wizard's too, ends here).
             if let token = client?.session?.token, !token.isEmpty, let client {
                 routesFollow(token: token, address: client.baseURL.absoluteString)
-                // Guardian's models are in every chat's menu at once (the list this Mac last saw), then read again.
+                // Guardian's models are in every chat's menu at once (the list this Mac last saw — none after an
+                // update from 0.16.2), then read now and every 15 minutes.
                 publishModels()
                 startModelRefresh()
             }
@@ -170,9 +171,8 @@ public final class GuardianService: ObservableObject {
         // The model routes on this Guardian use the new token too: signing in again here (what a 401 asks for) renews
         // the models as well as prompts, limits and the vault.
         routesFollow(token: session.token, address: guardian.baseURL.absoluteString)
-        // Guardian's models: in every chat's model menu, on this sign-in's token.
+        // Guardian's models: in every chat's model menu, on this sign-in's token (read now, then every 15 minutes).
         publishModels()
-        Task { [weak self] in await self?.refreshModels() }
         startModelRefresh()
         // The shared ETA cache: what the org's harnesses learned blends
         // into this Mac's cache, so its first estimates start smart.
@@ -278,12 +278,13 @@ public final class GuardianService: ObservableObject {
         remoteProjects = []
         // Guardian's models in the menus work in that organization too, and it may offer others.
         publishModels()
-        if refresh {
-            Task { [weak self] in
-                await self?.refreshAccount()
-                await self?.refreshModels()
-            }
-        }
+        if refresh { Task { [weak self] in await self?.refresh() } }
+    }
+
+    /// Read the account, its limits and Guardian's models again (Settings ▸ Guardian ▸ Refresh, another organization).
+    public func refresh() async {
+        await refreshAccount()
+        await refreshModels()
     }
 
     // MARK: Guardian's models in every chat's menu
@@ -324,14 +325,15 @@ public final class GuardianService: ObservableObject {
         transport?.resetRouteCache()
     }
 
+    /// Read the list now — a launch already signed in has only the list kept from last time, if any — and again every
+    /// `modelRefreshInterval` while signed in.
     private func startModelRefresh() {
         modelRefresh?.cancel()
         modelRefresh = Task { [weak self] in
-            while !Task.isCancelled {
+            // Cancelled (signed out), or the connection is gone: stop. (No strong hold on the service across the sleep.)
+            while !Task.isCancelled, self != nil {
+                await self?.refreshModels()
                 try? await Task.sleep(nanoseconds: UInt64(Self.modelRefreshInterval * 1_000_000_000))
-                // Cancelled (signed out), or the connection is gone: stop.
-                guard !Task.isCancelled, let service = self else { return }
-                await service.refreshModels()
             }
         }
     }

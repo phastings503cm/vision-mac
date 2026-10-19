@@ -293,6 +293,36 @@ final class GuardianServiceTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("guardian-models.json").path))
     }
 
+    /// Updating from 0.16.2 while signed in: there is no kept list, yet Guardian's models are read as the app starts
+    /// (not 15 minutes later) and are in the menus; Settings ▸ Guardian ▸ Refresh reads the list again.
+    func testALaunchAlreadySignedInReadsTheListAtOnceAndRefreshReadsItAgain() async throws {
+        wire.routes["GET /api/harness/v1/models"] = (200, Self.modelList)
+        let secrets = MemorySecretStore()
+        secrets.write("sess-1", service: AppIdentity.KeychainService.guardian, account: "token")
+        secrets.write("pat@503cm.com", service: AppIdentity.KeychainService.guardian, account: "email")
+        secrets.write(GuardianService.defaultURL, service: AppIdentity.KeychainService.guardian, account: "address")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("guardian-models.json").path))
+        let wire = self.wire!
+        let launched = GuardianService(appSupport: dir, secrets: secrets) { request in
+            wire.add(request)
+            let key = (request.httpMethod ?? "GET") + " " + (request.url?.path ?? "")
+            let (status, body) = wire.routes[key] ?? (404, #"{"error":"not found"}"#)
+            return GuardianHTTPResponse(data: Data(body.utf8), status: status, headers: [:])
+        }
+        XCTAssertTrue(launched.models.isEmpty, "nothing kept from 0.16.2")
+        launched.transport = transport
+        try await waitUntil { self.transport.config.guardianModels.count == 2 }
+        XCTAssertEqual(wire.count("GET /api/harness/v1/models"), 1)
+        XCTAssertEqual(transport.config.guardianModelRoutes.map(\.routeID), ["Guardian|claude-opus-5-5", "Guardian|guardian/fast"])
+
+        wire.routes["GET /api/harness/v1/models"] = (200, #"{"models":[{"id":"claude-sonnet-5-5","label":"Claude Sonnet 5.5"}]}"#)
+        await launched.refresh()
+        XCTAssertEqual(transport.config.guardianModels.map(\.id), ["claude-sonnet-5-5"])
+        XCTAssertEqual(wire.count("GET /api/harness/v1/models"), 2)
+        XCTAssertEqual(wire.count("GET /api/harness/me"), 1, "Refresh reads the account too")
+        launched.signOut()
+    }
+
     /// Download a Copy into the folder that holds the project's working tree: a new "ledger (2)", the tree untouched.
     func testDownloadingACopyNeverWritesOverTheFolderThatIsThere() async throws {
         wire.routes["GET /api/harness/projects/p1"] = (200, ##"{"name":"../ledger","files":{"README.md":"# From Guardian","../outside.txt":"x","Sources/a.swift":"let a = 1"}}"##)
