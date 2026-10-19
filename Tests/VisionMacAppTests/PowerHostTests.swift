@@ -109,6 +109,81 @@ final class PowerHostTests: XCTestCase {
         XCTAssertTrue(t.privateSubagentsOnly(vm), "with the shield off, subagents stay on private servers")
     }
 
+    func testASensitiveChatsConversationGoesOnlyWhereItsTurnsMay() async throws {
+        let t = makeTransport([kimi], shield: true)
+        FakeModelServer.reset { _, _ in .text("first answer") }
+        let vm = t.newSession(cwd: dir.path)
+        t.send("hello", sessionID: vm.id)
+        try await waitIdle(vm)
+        // Marked Sensitive, and the shield turned off: Kimi may no longer see this chat.
+        t.config.shield.enabled = false
+        t.setSensitive(true, for: vm)
+        FakeModelServer.reset { _, _ in .text("must not be asked") }
+
+        t.send("/compact", sessionID: vm.id)
+        try await waitIdle(vm, replies: 2)
+        XCTAssertTrue(FakeModelServer.seen.isEmpty, "/compact sent nothing")
+        let compactError = vm.entries.last { $0.message?.role == .error }?.message?.text ?? ""
+        XCTAssertTrue(compactError.hasPrefix("This chat is Sensitive. Kimi Code is an online service"), compactError)
+
+        t.send("/skill new a helper for these notes", sessionID: vm.id)
+        try await waitIdle(vm, replies: 3)
+        XCTAssertTrue(FakeModelServer.seen.isEmpty, "/skill new sent nothing")
+        XCTAssertTrue(vm.entries.last { $0.message?.role == .error }?.message?.text.hasPrefix("This chat is Sensitive.") == true)
+
+        // Skills ▸ New Skill "from this chat".
+        do {
+            _ = try await t.generateSkill(goal: "notes", from: vm)
+            XCTFail("refused")
+        } catch let refusal as SensitivityRefusal {
+            XCTAssertTrue(refusal.message.hasPrefix("This chat is Sensitive."))
+        }
+        XCTAssertTrue(FakeModelServer.seen.isEmpty)
+
+        // The composer keeps them like a prompt (they send the conversation); other commands still run.
+        XCTAssertTrue(ChatView.goesToModel("/compact"))
+        XCTAssertTrue(ChatView.goesToModel("/compact keep the decisions"))
+        XCTAssertTrue(ChatView.goesToModel("/skill new notes helper"))
+        XCTAssertFalse(ChatView.goesToModel("/skill off"))
+        XCTAssertFalse(ChatView.goesToModel("/rewind"))
+    }
+
+    func testWorkMadeFromASensitiveChatStaysSensitive() async throws {
+        let t = makeTransport([spark])
+        let vm = t.newSession(cwd: dir.path)
+        t.setSensitive(true, for: vm)
+        FakeModelServer.reset { seen, _ in
+            seen.fresh ? .toolCall("queue_task", #"{"title":"Follow up","details":"check the notes"}"#) : .text("Queued.")
+        }
+        t.send("queue a follow-up", sessionID: vm.id)
+        try await waitIdle(vm)
+        let task = try XCTUnwrap(t.queue.tasks.last)
+        XCTAssertEqual(task.title, "Follow up")
+        XCTAssertEqual(task.sensitive, true, "its chat will be Sensitive too")
+        let json = String(decoding: try JSONEncoder().encode(task), as: UTF8.self)
+        XCTAssertTrue(json.contains(#""sensitive":true"#), json)
+        XCTAssertEqual(try JSONDecoder().decode(QueueTask.self, from: Data(json.utf8)).sensitive, true)
+        XCTAssertFalse(String(decoding: try JSONEncoder().encode(QueueTask(title: "plain")), as: UTF8.self).contains("sensitive"))
+
+        // A chat downloaded from Guardian: Sensitive when it was, or when its project starts chats Sensitive.
+        XCTAssertTrue(String(decoding: GuardianSettingsForm.chatJSON(vm), as: UTF8.self).contains(#""sensitive":true"#))
+        t.setProjectStartsSensitive(true, path: dir.path)
+        func payload(_ id: String, cwd: String?, sensitive: Bool?) throws -> Data {
+            var chat: [String: Any] = ["id": id, "title": id, "rows": [["kind": "user", "text": "hi", "isError": false, "at": 0]]]
+            if let cwd { chat["cwd"] = cwd }
+            if let sensitive { chat["sensitive"] = sensitive }
+            return try JSONSerialization.data(withJSONObject: chat)
+        }
+        for (id, cwd, sensitive) in [("g-project", dir.path, nil), ("g-marked", nil, true), ("g-plain", nil, nil)] as [(String, String?, Bool?)] {
+            GuardianSettingsForm.restoreChat(id: id, title: id, updatedAt: Date(), payload: try payload(id, cwd: cwd, sensitive: sensitive),
+                                             transport: t)
+        }
+        t.reload()
+        XCTAssertEqual(t.sessions.first { $0.id == "g-project" }?.sensitive, true, "its project starts chats Sensitive")
+        XCTAssertEqual(t.sessions.first { $0.id == "g-marked" }?.sensitive, true)
+        XCTAssertEqual(t.sessions.first { $0.id == "g-plain" }?.sensitive, false)
+    }
+
     // MARK: Rewind
 
     func testATurnsFileChangesShowAndRewindAndTheModelIsTold() async throws {

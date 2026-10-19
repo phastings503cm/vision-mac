@@ -396,11 +396,15 @@ struct ChatView: View {
         model.send(text, in: session, attachments: payload)
     }
 
-    /// Whether sending `text` asks the model (a prompt, a skill, a /goal) rather than running a command.
+    /// Whether sending `text` asks the model (a prompt, a skill, a /goal, `/compact`, `/skill new …` — the last two
+    /// send the whole conversation) rather than running a command.
     static func goesToModel(_ text: String) -> Bool {
         guard let command = SlashCommand.parse(text) else { return true }
-        if case .goal = command { return true }
-        return false
+        switch command {
+        case .goal, .compact: return true
+        case .skill(let arg): return AppTransport.skillGenerationGoal(arg) != nil
+        default: return false
+        }
     }
 
     /// Queue the draft as this chat's next task (⌘↩, or ↩ while the agent works): it runs after what is running and

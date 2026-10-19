@@ -109,6 +109,8 @@ public struct QueueTask: Identifiable, Codable, Hashable, Sendable {
     /// last choice).
     public var routeID: String?
     public var thinking: String?
+    /// Queued from a Sensitive chat: the task's chat is Sensitive too (`"sensitive": true`, left out otherwise).
+    public var sensitive: Bool?
     /// A chat task: queued with "Add to tasks" in this chat, it runs there as the chat's next prompt once the chat is
     /// free — interactively, in order, after whatever the chat is doing. Nil = a task of the unattended queue, which
     /// the queue runner works as a goal. The queue runner never takes a chat task.
@@ -172,7 +174,7 @@ public struct QueueTask: Identifiable, Codable, Hashable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case id, title, details, status, enteredAt, startedAt, finishedAt, rounds
-        case promptTokens, completionTokens, sessionID, cwd, workFolder, routeID, thinking, chatID, attachments, log
+        case promptTokens, completionTokens, sessionID, cwd, workFolder, routeID, thinking, sensitive, chatID, attachments, log
     }
 
     /// Tolerant decoding: a missing field (a file from an older or newer
@@ -195,6 +197,7 @@ public struct QueueTask: Identifiable, Codable, Hashable, Sendable {
         workFolder = try c.decodeIfPresent(String.self, forKey: .workFolder)
         routeID = try? c.decodeIfPresent(String.self, forKey: .routeID)
         thinking = try? c.decodeIfPresent(String.self, forKey: .thinking)
+        sensitive = (try? c.decodeIfPresent(Bool.self, forKey: .sensitive)).flatMap { $0 == true ? true : nil }
         chatID = try? c.decodeIfPresent(String.self, forKey: .chatID)
         attachments = (try? c.decodeIfPresent([QueuedAttachment].self, forKey: .attachments)).flatMap { $0?.isEmpty == false ? $0 : nil }
         log = (try? c.decodeIfPresent([QueueLogLine].self, forKey: .log)) ?? []
@@ -342,6 +345,13 @@ public extension TaskQueue {
         guard var t = task(id) else { return }
         t.routeID = routeID
         t.thinking = thinking
+        self[t.id] = t
+    }
+
+    /// The task's chat is Sensitive (it was queued from a Sensitive chat).
+    mutating func setSensitive(id: String, _ on: Bool) {
+        guard var t = task(id) else { return }
+        t.sensitive = on ? true : nil
         self[t.id] = t
     }
 

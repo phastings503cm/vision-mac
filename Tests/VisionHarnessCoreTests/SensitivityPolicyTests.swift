@@ -83,5 +83,8 @@ final class SensitivityPolicyTests: XCTestCase {
         XCTAssertEqual(SensitivityPolicy.admittedBackups([spark, kimi, bedrock], shieldOn: true).map(\.name), ["Spark", "Kimi Code", "Bedrock"])
         XCTAssertTrue(SensitivityPolicy.subagentsPrivateOnly(shieldOn: false))
         XCTAssertFalse(SensitivityPolicy.subagentsPrivateOnly(shieldOn: true))
+        // Which routes take a Sensitive chat's subagents as they are: the policy's private ones, Guardian and Bedrock too.
+        let guardian = route(.guardian, "Guardian", "https://guardian.503cm.com/api/v1")
+        XCTAssertEqual([spark, kimi, bedrock, guardian].map(SensitivityPolicy.isPrivate), [true, false, true, true])
     }
 }

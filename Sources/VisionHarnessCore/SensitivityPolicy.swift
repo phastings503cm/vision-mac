@@ -130,6 +130,14 @@ public enum SensitivityPolicy {
         routes.filter { admission(for: $0, shieldOn: shieldOn).isAllowed }
     }
 
+    /// Whether a route may see a Sensitive chat as it is, whatever the shield: your own hardware, Guardian, Bedrock in
+    /// your AWS account (never an engine that reads files itself). A chat's own route that is private this way takes
+    /// its subagents' sensitive tasks — it already sees the chat.
+    public static func isPrivate(_ route: ProviderProfile) -> Bool {
+        if case .privateRoute = admission(for: route, shieldOn: false) { return true }
+        return false
+    }
+
     /// Whether a Sensitive chat's subagents must stay on private servers: when the shield is off, a server that
     /// isn't private would get the data as it is. (With the shield on, a subagent on such a server is masked like
     /// any request to it.)

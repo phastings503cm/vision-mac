@@ -722,12 +722,14 @@ public final class AppTransport {
                 // Queued from a chat without a project: a chat without one, working in that chat's folder.
                 vm = newSession(cwd: nil, select: false, workFolder: folder)
                 if task.routeID != nil { assignInitialChoice(vm, routeID: task.routeID, thinking: task.thinking) }
+                if task.sensitive == true { markSensitive(vm) }
                 renameSession(vm.id, to: "🚀 \(task.title)")
                 queue.attachSession(taskID, vm.id)
             } else {
                 let cwd = task.cwd ?? projectContext?.root.path ?? sessions.first?.cwd
                 vm = newSession(cwd: cwd, select: false)
                 if task.routeID != nil { assignInitialChoice(vm, routeID: task.routeID, thinking: task.thinking) }
+                if task.sensitive == true { markSensitive(vm) }
                 renameSession(vm.id, to: "🚀 \(task.title)")
                 queue.attachSession(taskID, vm.id)
             }
@@ -1242,6 +1244,8 @@ public final class AppTransport {
         queue.note(task.id, "Queued by the agent in “\(vm?.title ?? "a chat")”.")
         // The task's chat runs on the model of the chat that queued it.
         if let vm { queue.setRoute(id: task.id, routeID: chatRouteID(vm), thinking: vm.thinking?.rawValue) }
+        // A Sensitive chat's task runs in a Sensitive chat.
+        if vm?.sensitive == true { queue.setSensitive(id: task.id, true) }
         let position = queue.position(of: task.id) ?? 0
         var out = "Queued “\(task.title)” at #\(position) (\(queue.queuedCount) waiting)."
         if queueRunning {
@@ -1562,6 +1566,8 @@ public final class AppTransport {
             vm.note("The conversation is already as compact as it gets (~\(tokens.formatted()) tokens).")
         case .failed:
             vm.note("Compaction failed: the model did not return a summary. Nothing was changed.", role: .error)
+        case .refused(let why):
+            vm.note(why, role: .error)
         case .compacted(let removed, let before, let after):
             let text = "Compacted \(removed) messages: ~\(before.formatted()) → ~\(after.formatted()) tokens."
             vm.note(text)
@@ -1571,6 +1577,8 @@ public final class AppTransport {
 
     enum CompactOutcome {
         case nothingYet, noModel, alreadyCompact(Int), failed
+        /// A Sensitive chat on a model it may not use: nothing was sent.
+        case refused(String)
         case compacted(removed: Int, before: Int, after: Int)
     }
 
@@ -1583,6 +1591,9 @@ public final class AppTransport {
         let messages = transcripts[sessionID] ?? []
         guard messages.contains(where: { $0.role == .user }) else { return .nothingYet }
         guard let profile = await resolveRoute(vm) else { return .noModel }
+        // The whole conversation goes to the model: only where this chat's turns may go.
+        let client: any ProviderClient
+        do { client = try conversationClient(for: vm, profile: profile) } catch { return .refused(Self.describe(error)) }
         let prompt = systemPrompts[sessionID] ?? basePrompt
         let before = TokenEstimate.request(systemPrompt: prompt, messages: messages)
         guard let plan = Compaction.plan(usedTokens: before, limit: contextLimit(for: vm),
@@ -1591,7 +1602,6 @@ public final class AppTransport {
         }
         vm.activity = "Compacting conversation…"
         defer { vm.activity = nil }
-        let client = ProviderClients.make(profile)
         guard let summary = await Compaction.summarize(client: client, plan: plan,
                                                        model: profile.model, focus: focus),
               !Task.isCancelled else {
@@ -2595,9 +2605,7 @@ public final class AppTransport {
             return
         }
         let lower = arg.lowercased()
-        for verb in ["new ", "generate ", "create "] where lower.hasPrefix(verb) {
-            let goal = String(arg.dropFirst(verb.count)).trimmingCharacters(in: .whitespaces)
-            guard !goal.isEmpty else { break }
+        if let goal = Self.skillGenerationGoal(arg) {
             runTasks[vm.id] = Task { await generateSkillFromChat(vm, goal: goal) }
             return
         }
@@ -2656,12 +2664,25 @@ public final class AppTransport {
     /// Ask the model to write a skill (optionally from a chat, or improving one).
     public func generateSkill(goal: String, from vm: SessionVM?, improving: String? = nil) async throws -> GeneratedSkill {
         guard let profile = await resolveRoute(vm) else { throw LLMError.noModel }
+        // From a chat, its whole conversation goes to the model: only where that chat's turns may go.
+        let client = try conversationClient(for: vm, profile: profile)
         if let vm, transcripts[vm.id] == nil { hydrate(vm) }
         let conversation = vm.flatMap { transcripts[$0.id] } ?? []
         let request = SkillGenerationRequest(goal: goal, conversation: conversation,
                                              existingNames: skills(for: vm).map(\.name), improving: improving)
-        return try await SkillGenerator.generate(client: ProviderClients.make(profile),
-                                                 model: profile.model, request: request)
+        return try await SkillGenerator.generate(client: client, model: profile.model, request: request)
+    }
+
+    /// The goal of `/skill new|generate|create <goal>` (nil for the other `/skill` words) — a skill written from the
+    /// chat, which sends the conversation to the model.
+    nonisolated static func skillGenerationGoal(_ arg: String?) -> String? {
+        guard let arg else { return nil }
+        let lower = arg.lowercased()
+        for verb in ["new ", "generate ", "create "] where lower.hasPrefix(verb) {
+            let goal = String(arg.dropFirst(verb.count)).trimmingCharacters(in: .whitespaces)
+            return goal.isEmpty ? nil : goal
+        }
+        return nil
     }
 
     /// `/skill new …`: write a skill from this chat and queue it for approval.
@@ -2679,6 +2700,8 @@ public final class AppTransport {
             let warn = generated.issues.filter { $0.severity >= .warning }.map(\.message)
             vm.note("📝 Drafted skill **\(draft.name)** — \(draft.description)\nIt is not active yet: open **Skills** under the composer to review, edit and approve it."
                     + (warn.isEmpty ? "" : "\nNotes: " + warn.joined(separator: " ")))
+        } catch let refusal as SensitivityRefusal {
+            vm.note(refusal.message, role: .error)
         } catch {
             vm.note("Couldn't write the skill: \(Self.describe(error))", role: .error)
         }
@@ -3017,8 +3040,9 @@ public final class AppTransport {
     private func summarize(sessionID: String, plan: Compaction.Plan) async -> String? {
         let vm = sessions.first { $0.id == sessionID }
         await resolveRoute(vm)
-        guard let profile = engineKeys[sessionID]?.profile ?? chatRoute(vm).map(effective) else { return nil }
-        return await Compaction.summarize(client: ProviderClients.make(profile), plan: plan, model: profile.model)
+        guard let profile = engineKeys[sessionID]?.profile ?? chatRoute(vm).map(effective),
+              let client = try? conversationClient(for: vm, profile: profile) else { return nil }
+        return await Compaction.summarize(client: client, plan: plan, model: profile.model)
     }
 
     /// Rewrite the session's display + persisted log so the summarized part is

@@ -178,8 +178,9 @@ public struct AgentTool: ToolExecutor {
                                              note: Self.placementNote(definition: definition, lease: leased, fleet: fleet))
                     }
                 } else {
-                    // No fleet: it would run on the chat's own model — for a sensitive task, only if that is private.
-                    if sensitive, (context.client as? any ProviderClient)?.profile.isPrivateRoute != true {
+                    // No fleet: it would run on the chat's own model — for a sensitive task, only if that is private
+                    // (as a Sensitive chat counts it: own hardware, Guardian, Bedrock in your account).
+                    if sensitive, !((context.client as? any ProviderClient).map { SensitivityPolicy.isPrivate($0.profile) } ?? false) {
                         if let runID { roster?.finish(runID, status: .failed, report: AgentFleet.noPrivateServer) }
                         return SubagentOutcome(ok: false, report: AgentFleet.noPrivateServer, agentType: definition.name,
                                                server: nil, elapsed: elapsed(), failovers: failovers)

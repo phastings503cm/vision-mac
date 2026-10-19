@@ -20,6 +20,23 @@ extension AppTransport {
         log.setSensitive(id: vm.id, vm.sensitive)
     }
 
+    /// Make a chat Sensitive without a note (a queue task's chat, queued from a Sensitive chat).
+    @MainActor
+    func markSensitive(_ vm: SessionVM) {
+        vm.sensitive = true
+        log.setSensitive(id: vm.id, true)
+    }
+
+    /// Store a chat that comes from elsewhere (downloaded from Guardian, imported): it is Sensitive when it was, or
+    /// when its project starts its chats Sensitive — the same default `newSession` gives. Every path that writes a
+    /// chat into the log without `newSession` goes through here.
+    @MainActor
+    public func storeImportedChat(_ session: LogSession, items: [LogItemRow]) {
+        var session = session
+        session.sensitive = (session.sensitive == true || projectStartsSensitive(session.cwd)) ? true : nil
+        log.store(session, items: items)
+    }
+
     /// Mark a chat Sensitive or not. Its engine is rebuilt on the next turn (the prompt and subagent rules change).
     @MainActor
     public func setSensitive(_ on: Bool, for vm: SessionVM) {
@@ -75,6 +92,18 @@ extension AppTransport {
     public func sensitivityHeader(for vm: SessionVM) -> String? {
         guard vm.sensitive else { return nil }
         return SensitivityPolicy.headerLine(for: chatRoute(vm), shieldOn: shieldOn)
+    }
+
+    /// The client for a request that sends a chat's conversation somewhere other than a turn — `/compact`, the
+    /// automatic summary, a skill written from the chat. It goes only where the chat's turns may go: a Sensitive chat
+    /// on a model it may not use gets the same refusal a turn gets, and nothing is sent. `vm` nil = no chat's words go.
+    @MainActor
+    func conversationClient(for vm: SessionVM?, profile: ProviderProfile) throws -> any ProviderClient {
+        if let vm, vm.sensitive,
+           let why = sensitivityRefusal(for: vm) ?? SensitivityPolicy.refusalMessage(for: profile, shieldOn: shieldOn) {
+            throw SensitivityRefusal(why)
+        }
+        return ProviderClients.make(profile)
     }
 
     /// Subagents of a Sensitive chat stay on private servers while the shield is off.
