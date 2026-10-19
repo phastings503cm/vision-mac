@@ -197,6 +197,12 @@ extension AppTransport {
                             attachments: [MessageAttachment] = []) -> QueueTask? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !attachments.isEmpty, let vm = sessions.first(where: { $0.id == sessionID }) else { return nil }
+        // Only a /goal takes attachments (it carries them into its first round); any other command is refused now,
+        // not when its turn comes.
+        if !attachments.isEmpty, let why = Self.commandAttachmentRefusal(trimmed) {
+            vm.note(why, role: .error)
+            return nil
+        }
         let kept: [QueuedAttachment]
         do {
             kept = try attachmentStore(for: sessionID).saveQueued(attachments)

@@ -1354,19 +1354,25 @@ public final class AppTransport {
     /// Run what was sent (or what a chat task sends when its turn comes): a command, a skill by name, or a turn.
     func dispatch(_ text: String, vm: SessionVM, attachments: [MessageAttachment] = []) {
         let sessionID = vm.id
-        if attachments.isEmpty, let command = SlashCommand.parse(text) {
-            runCommand(command, vm: vm)
+        if let command = SlashCommand.parse(text) {
+            // A `/goal` takes what is attached (a 10,000-line paste, files) into its first round. No other command
+            // takes attachments: say so rather than send the command's words to the model as a prompt.
+            if !attachments.isEmpty, let why = Self.commandAttachmentRefusal(text) {
+                vm.note(why, role: .error)
+                return
+            }
+            runCommand(command, vm: vm, attachments: attachments)
             return
         }
-        // "/deploy staging": a skill or command invoked by name.
-        if attachments.isEmpty, let (skill, args) = matchSkillCommand(text, vm: vm),
+        // "/deploy staging": a skill or command invoked by name (what is attached goes with it).
+        if let (skill, args) = matchSkillCommand(text, vm: vm),
            let expanded = invocationText(skill, arguments: args) {
             if chatServerSwitching(vm) {
                 vm.note(Self.switchingNote)
                 return
             }
             let display = "/\(skill.slug)" + (args.isEmpty ? "" : " \(args)")
-            runTasks[sessionID] = Task { await runTurn(vm, text: display, modelText: expanded) }
+            runTasks[sessionID] = Task { await runTurn(vm, text: display, attachments: attachments, modelText: expanded) }
             return
         }
         if chatServerSwitching(vm) {
@@ -1378,7 +1384,25 @@ public final class AppTransport {
 
     // MARK: - Slash commands
 
-    private func runCommand(_ command: SlashCommand, vm: SessionVM) {
+    /// Why a command that came with attachments isn't run (nil: it takes them — `/goal`, or not a command at all).
+    /// Checked before anything is sent or queued, so the composer keeps the draft and its chips.
+    static func commandAttachmentRefusal(_ text: String) -> String? {
+        guard let command = SlashCommand.parse(text) else { return nil }
+        if case .goal = command { return nil }
+        let name = text.trimmingCharacters(in: .whitespacesAndNewlines).prefix { !$0.isWhitespace }
+        return "\(name) doesn't take attachments, so nothing was sent. Send the attachments with a message or a /goal, "
+            + "or the command on its own."
+    }
+
+    /// The goal a bare `/goal` with attachments states: what is attached is the goal (a pasted prompt, a spec).
+    static func attachedGoalText(_ attachments: [MessageAttachment]) -> String {
+        let names = attachments.map { "“\($0.name)”" }
+        let list = names.count <= 1 ? (names.first ?? "attachment")
+            : names.dropLast().joined(separator: ", ") + " and " + names.last!
+        return "Do what the attached \(list) ask\(attachments.count == 1 ? "s" : "") for."
+    }
+
+    private func runCommand(_ command: SlashCommand, vm: SessionVM, attachments: [MessageAttachment] = []) {
         switch command {
         case .help:
             let lines = SlashCommand.catalog.map { "`\($0.usage)` — \($0.summary)" }
@@ -1464,8 +1488,9 @@ public final class AppTransport {
                 return
             }
             // A bare `/goal` picks the chat's unfinished goal back up (after a
-            // Stop, a block the user has since answered, or a failure).
-            if goal.isEmpty {
+            // Stop, a block the user has since answered, or a failure) — unless it came with attachments: then they
+            // are the goal ("/goal" and a pasted 10,000-line prompt).
+            if goal.isEmpty, attachments.isEmpty {
                 guard let previous = vm.lastGoal ?? Self.lastGoal(in: vm.entries) else {
                     vm.note("Usage: `/goal <what you want done>` — the agent keeps working, round after round, "
                             + "until it declares the goal complete (or needs you). Stop it any time with ⌘.")
@@ -1474,7 +1499,8 @@ public final class AppTransport {
                 runTasks[vm.id] = Task { await runTurn(vm, text: previous, attachments: [], goal: previous, resumingGoal: true) }
                 return
             }
-            runTasks[vm.id] = Task { await runTurn(vm, text: goal, attachments: [], goal: goal) }
+            let stated = goal.isEmpty ? Self.attachedGoalText(attachments) : goal
+            runTasks[vm.id] = Task { await runTurn(vm, text: stated, attachments: attachments, goal: stated) }
         }
     }
 
@@ -1853,7 +1879,7 @@ public final class AppTransport {
 
         do {
             if let goal {
-                let ending = try await runGoal(vm, goal: goal, resuming: resumingGoal)
+                let ending = try await runGoal(vm, goal: goal, attachments: attachments, resuming: resumingGoal)
                 if case .blocked(let why) = ending {
                     outcome = .needsYou
                     reason = why
@@ -1939,9 +1965,10 @@ public final class AppTransport {
     /// `/goal`: run rounds until the model writes GOAL_COMPLETE (or GOAL_BLOCKED),
     /// re-stating the goal every round so it survives compaction.
     @discardableResult
-    private func runGoal(_ vm: SessionVM, goal: String, resuming: Bool) async throws -> GoalOutcome {
+    private func runGoal(_ vm: SessionVM, goal: String, attachments: [MessageAttachment] = [],
+                         resuming: Bool) async throws -> GoalOutcome {
         vm.lastGoal = goal
-        let outcome = try await goalLoop(vm, goal: goal, auto: false, resuming: resuming)
+        let outcome = try await goalLoop(vm, goal: goal, auto: false, resuming: resuming, attachments: attachments)
         if outcome == .complete { vm.lastGoal = nil }
         // Stopped between rounds: report it like a Stop mid-round.
         if outcome == .stopped { throw CancellationError() }
@@ -1959,7 +1986,10 @@ public final class AppTransport {
     /// round after a pause; only `GoalProtocol.maxConsecutiveErrors` of them
     /// in a row end the goal (thrown). Cancellation throws `CancellationError`
     /// or returns `.stopped`.
-    private func goalLoop(_ vm: SessionVM, goal: String, auto: Bool, resuming: Bool = false) async throws -> GoalOutcome {
+    /// `attachments` go with the kickoff only (the goal's first round): the goal is re-stated every round, what was
+    /// attached is not — it stays in the conversation, and a long one is read back with read_attachment.
+    private func goalLoop(_ vm: SessionVM, goal: String, auto: Bool, resuming: Bool = false,
+                          attachments: [MessageAttachment] = []) async throws -> GoalOutcome {
         var state = SessionVM.GoalState(text: goal, round: 1)
         vm.goal = state
         let awake = keepAwake("Working a goal")
@@ -2028,7 +2058,8 @@ public final class AppTransport {
             validationFailure = nil
 
             do {
-                let result = try await turn(vm, modelText: modelText, displayText: displayText, attachments: [])
+                let result = try await turn(vm, modelText: modelText, displayText: displayText,
+                                            attachments: kickedOff ? [] : attachments)
                 report(round, result.usage)
                 kickedOff = true
                 errorsInARow = 0

@@ -55,6 +55,25 @@ final class AttachmentReaderTests: XCTestCase {
         XCTAssertEqual(PastedText.name(existing: ["pasted-text.txt", "pasted-text-2.txt"]), "pasted-text-3.txt")
     }
 
+    /// A big paste that starts with /goal keeps the command (and a short first line) in the box; the rest is the chip.
+    func testABigGoalPasteKeepsItsCommandInTheBox() throws {
+        let body = AttachmentFixtures.lines(10_000, width: 40)
+        let stated = try XCTUnwrap(PastedText.splitGoal("/goal Fix the build\r\n" + body))
+        XCTAssertEqual(stated.command, "/goal Fix the build")
+        XCTAssertEqual(stated.rest, AttachmentText.normalizeNewlines(body))
+        let bare = try XCTUnwrap(PastedText.splitGoal("  /GOAL\n\n" + body))
+        XCTAssertEqual(bare.command, "/goal")
+        XCTAssertEqual(bare.rest, body)
+        // A first line too long for the box goes into the attachment with the rest.
+        let longLine = String(repeating: "x", count: PastedText.goalLineCharacters + 1)
+        let long = try XCTUnwrap(PastedText.splitGoal("/goal " + longLine + "\n" + body))
+        XCTAssertEqual(long.command, "/goal")
+        XCTAssertEqual(long.rest, longLine + "\n" + body)
+        XCTAssertNil(PastedText.splitGoal(body))
+        XCTAssertNil(PastedText.splitGoal("/goals are good\n" + body))
+        XCTAssertNil(PastedText.splitGoal("/Users/pat/log.txt\n" + body))
+    }
+
     func testLongUserMessagesCollapseInTheTranscript() {
         XCTAssertNil(PastedText.collapsed("short"))
         XCTAssertNil(PastedText.collapsed(AttachmentFixtures.lines(24, width: 10)))

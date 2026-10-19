@@ -26,6 +26,30 @@ public enum PastedText {
         AttachmentReader.pasted(text, name: name(existing: existing))
     }
 
+    /// The longest first line a big `/goal` paste keeps in the message box (the goal it states); a longer one goes into
+    /// the attachment with the rest.
+    public static let goalLineCharacters = 300
+
+    /// A big paste that starts with `/goal` (a long prompt run as a goal): the message box keeps the command — with
+    /// the rest of its first line when that line is short — and the rest becomes the attachment. Without this the
+    /// whole paste, `/goal` included, would be a chip and the message would go as an ordinary prompt. Nil for any other
+    /// paste. Same rule on Windows.
+    public static func splitGoal(_ text: String) -> (command: String, rest: String)? {
+        let normalized = AttachmentText.normalizeNewlines(text)
+        let start = normalized.drop { $0 == " " || $0 == "\t" || $0 == "\n" }
+        let word = start.prefix { !$0.isWhitespace }
+        guard word.lowercased() == "/goal" else { return nil }
+        let afterWord = start.dropFirst(word.count)
+        let firstLine = afterWord.prefix { $0 != "\n" }
+        let stated = firstLine.trimmingCharacters(in: .whitespaces)
+        let keepLine = stated.utf16.count <= goalLineCharacters
+        let command = keepLine && !stated.isEmpty ? "/goal \(stated)" : "/goal"
+        // The rest keeps its own indentation: only the line break (or the space after `/goal`) goes.
+        let rest = keepLine ? String(afterWord.dropFirst(firstLine.count).drop { $0 == "\n" })
+                            : String(afterWord.drop { $0 == " " || $0 == "\t" })
+        return (command, rest)
+    }
+
     public static func name(existing: [String]) -> String {
         let taken = Set(existing)
         if !taken.contains("pasted-text.txt") { return "pasted-text.txt" }

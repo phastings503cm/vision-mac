@@ -244,6 +244,74 @@ final class AttachmentTurnTests: XCTestCase {
         XCTAssertTrue(RawModelServer.bodies.isEmpty, "nothing was sent")
     }
 
+    // MARK: /goal with a big paste (review: a paste made the goal run as one plain turn)
+
+    /// `/goal X` with a 10,214-line paste: a goal starts (rounds, the GOAL kickoff), and its first round carries the
+    /// paste — in parts, as any attachment. The goal re-stated on later rounds is only X.
+    func testAGoalWithABigPasteStartsAGoalWhoseFirstRoundCarriesIt() async throws {
+        RawModelServer.reset { index in index == 1 ? .text("Read part 1, still working.") : .text("All summarised.\n\nGOAL_COMPLETE") }
+        let vm = transport.newSession(cwd: dir.path)
+        transport.send("/goal Summarise the log", sessionID: vm.id,
+                       attachments: [PastedText.attachment(HostFixtures.lines(10_214, width: 40))])
+        try await waitForIdle(vm, replies: 2)
+        XCTAssertEqual(RawModelServer.bodies.count, 2, "two rounds: a goal, not one turn")
+        let kickoff = Self.userContent(try XCTUnwrap(RawModelServer.bodies.first))
+        XCTAssertTrue(kickoff.hasPrefix("GOAL: Summarise the log\n"), kickoff)
+        XCTAssertTrue(kickoff.contains("[Attached file: pasted-text.txt — Pasted text · 10,214 lines · "), kickoff)
+        let second = Self.userContent(try XCTUnwrap(RawModelServer.bodies.last))
+        XCTAssertFalse(second.contains("[Attached file:"), "the paste goes once, with the kickoff")
+        let first = try XCTUnwrap(vm.entries.first { $0.message?.role == .user }?.message)
+        XCTAssertEqual(first.text, "🎯 /goal Summarise the log")
+        XCTAssertEqual(first.attachments.map(\.stored), ["pasted-text.txt"])
+        XCTAssertEqual(vm.promptHistory.first?.source, .goal)
+        XCTAssertTrue(vm.entries.contains { $0.message?.text.hasPrefix("✅ Goal complete after 2 rounds") == true })
+    }
+
+    /// A bare `/goal` with a paste (typed "/goal", then pasted the prompt): the paste is the goal.
+    func testABareGoalWithAPasteMakesThePasteTheGoal() async throws {
+        RawModelServer.reset { _ in .text("Done.\n\nGOAL_COMPLETE") }
+        let vm = transport.newSession(cwd: dir.path)
+        transport.send("/goal", sessionID: vm.id, attachments: [PastedText.attachment(HostFixtures.lines(500, width: 40))])
+        try await waitForIdle(vm)
+        let kickoff = Self.userContent(try XCTUnwrap(RawModelServer.bodies.first))
+        XCTAssertTrue(kickoff.hasPrefix("GOAL: Do what the attached “pasted-text.txt” asks for.\n"), kickoff)
+        XCTAssertTrue(kickoff.contains("[Attached file: pasted-text.txt"), kickoff)
+        XCTAssertEqual(vm.promptHistory.first?.source, .goal)
+    }
+
+    /// A queued `/goal X` that carries a paste starts a goal when its turn comes.
+    func testAQueuedGoalWithAPasteStartsAGoal() async throws {
+        RawModelServer.reset { _ in .text("Done.\n\nGOAL_COMPLETE") }
+        let vm = transport.newSession(cwd: dir.path)
+        let task = try XCTUnwrap(transport.addChatTask("/goal Summarise the log", sessionID: vm.id,
+                                                       attachments: [PastedText.attachment(HostFixtures.lines(10_000, width: 40))]))
+        try await waitForIdle(vm)
+        let deadline = Date().addingTimeInterval(10)
+        while transport.queue.task(task.id)?.status != .complete, Date() < deadline { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(transport.queue.task(task.id)?.status, .complete)
+        let kickoff = Self.userContent(try XCTUnwrap(RawModelServer.bodies.first))
+        XCTAssertTrue(kickoff.hasPrefix("GOAL: Summarise the log\n"), kickoff)
+        XCTAssertTrue(kickoff.contains("[Attached file: pasted-text.txt — Pasted text · 10,000 lines · "), kickoff)
+        XCTAssertTrue(vm.entries.contains { $0.message?.text == "🎯 /goal Summarise the log" })
+    }
+
+    /// Any other command with an attachment is refused (sent or queued): nothing reaches the model.
+    func testOtherCommandsWithAttachmentsAreRefused() async throws {
+        let vm = transport.newSession(cwd: dir.path)
+        let file = MessageAttachment(kind: .file, name: "notes.md", data: Data("# N".utf8))
+        transport.send("/think high", sessionID: vm.id, attachments: [file])
+        XCTAssertEqual(vm.entries.last?.message?.text,
+                       "/think doesn't take attachments, so nothing was sent. Send the attachments with a message or a /goal, or the command on its own.")
+        XCTAssertEqual(vm.entries.last?.message?.role, .error)
+        XCTAssertNil(transport.addChatTask("/compact", sessionID: vm.id, attachments: [file]))
+        XCTAssertTrue(transport.queue.chatTasks(vm.id).isEmpty)
+        XCTAssertNil(vm.thinking, "the command did not run either")
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(RawModelServer.bodies.isEmpty)
+        XCTAssertNil(AppTransport.commandAttachmentRefusal("/goal ship it"))
+        XCTAssertNil(AppTransport.commandAttachmentRefusal("Summarise these"))
+    }
+
     func testDeletingAChatDeletesItsSavedAttachments() async throws {
         let vm = transport.newSession(cwd: dir.path)
         transport.send("keep", sessionID: vm.id,

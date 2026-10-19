@@ -69,8 +69,10 @@ struct ChatView: View {
         .onChange(of: model.pendingComposerText) { _, text in
             guard let text else { return }
             if PastedText.isLarge(text) {
-                // A re-sent prompt as long as a big paste goes the same way: as an attachment.
-                addPasted(text)
+                // A re-sent prompt as long as a big paste goes the same way: as an attachment (a `/goal` keeps its
+                // command in the box, so it runs as a goal again).
+                draft = ""
+                pasteLarge(text)
             } else {
                 draft = text
                 composerHeight = min(max(ComposerField.minHeight, 90), ComposerField.maxHeight)
@@ -283,7 +285,7 @@ struct ChatView: View {
 
                 ComposerField(text: $draft, height: $composerHeight,
                               isEnabled: true, onSubmit: send, onAddToTasks: addToTasks,
-                              onLargePaste: { addPasted($0) })
+                              onLargePaste: { pasteLarge($0) })
                     .frame(height: composerHeight)
                     .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.corner))
                     .overlay(
@@ -391,6 +393,11 @@ struct ChatView: View {
         }
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !staged.isEmpty, !staged.contains(where: \.reading) else { return }
+        // Only /goal takes attachments: a command with chips is refused here, and the box keeps both.
+        if !staged.isEmpty, let why = AppTransport.commandAttachmentRefusal(text) {
+            session.note(why, role: .error)
+            return
+        }
         let payload = staged.map(\.attachment)
         draft = ""
         staged = []
@@ -402,11 +409,26 @@ struct ChatView: View {
     private func addToTasks() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !staged.isEmpty, !staged.contains(where: \.reading) else { return }
+        if !staged.isEmpty, let why = AppTransport.commandAttachmentRefusal(text) {
+            session.note(why, role: .error)
+            return
+        }
         // The files, pictures and large pastes in the box go with it (kept until the task is deleted).
         guard transport.addChatTask(text, sessionID: session.id, attachments: staged.map(\.attachment)) != nil else { return }
         staged = []
         draft = ""
         composerHeight = ComposerField.minHeight
+    }
+
+    /// A paste too large for the message box: a "Pasted text" attachment. One that starts with `/goal` into an empty
+    /// box leaves the command (and a short first line) in the box, so it still runs as a goal.
+    private func pasteLarge(_ text: String) {
+        if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let split = PastedText.splitGoal(text) {
+            draft = split.command
+            if !split.rest.isEmpty { addPasted(split.rest) }
+        } else {
+            addPasted(text)
+        }
     }
 
     /// A paste too large for the message box becomes a "Pasted text" attachment.
