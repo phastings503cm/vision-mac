@@ -70,6 +70,14 @@ final class ChatImportHostTests: XCTestCase {
         let result = transport.importChats([claudeCodeChat(cwd: folder)], now: t0.addingTimeInterval(86_400))
         XCTAssertEqual(result.imported.count, 1)
         XCTAssertEqual(result.summary, "Imported 1 chat (2 messages).")
+        var big = ChatImportResult()
+        big.imported = Array(repeating: "x", count: 12)
+        big.messages = 1_840
+        big.alreadyHere = 3
+        big.failed = ["a"]
+        XCTAssertEqual(big.summary, "Imported 12 chats (1,840 messages). 3 were already in Vision. 1 couldn't be read.",
+                       "Vision for Windows' words")
+        XCTAssertEqual(ChatImportResult().summary, "Nothing new to import.")
         let vm = try XCTUnwrap(transport.sessions.first { $0.id == result.imported[0] })
         XCTAssertEqual(vm.title, "Login fixes")
         XCTAssertEqual(vm.cwd, folder, "its folder is on this Mac, so it opens as a chat in that project")
@@ -93,7 +101,7 @@ final class ChatImportHostTests: XCTestCase {
         let again = transport.importChats([claudeCodeChat(cwd: folder), claudeCodeChat(id: "s2")])
         XCTAssertEqual(again.alreadyHere, 1, "the same session twice is one chat")
         XCTAssertEqual(again.imported.count, 1, "a new session comes in")
-        XCTAssertEqual(again.summary, "Imported 1 chat (2 messages). 1 was already here.")
+        XCTAssertEqual(again.summary, "Imported 1 chat (2 messages). 1 was already in Vision.")
         let candidate = ChatImportCandidate(claudeCodeChat(), location: .loaded)
         XCTAssertTrue(transport.isAlreadyImported(candidate))
 

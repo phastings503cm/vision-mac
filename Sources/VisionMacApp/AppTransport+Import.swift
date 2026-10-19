@@ -20,17 +20,19 @@ public struct ChatImportResult: Equatable, Sendable {
 
     public init() {}
 
+    /// Vision for Windows says the same words.
     public var summary: String {
         var parts: [String] = []
-        let count = imported.count
-        parts.append(count == 0 ? "No chats imported."
-                     : "Imported \(count) chat\(count == 1 ? "" : "s") (\(messages) message\(messages == 1 ? "" : "s")).")
-        if alreadyHere > 0 { parts.append("\(alreadyHere) \(alreadyHere == 1 ? "was" : "were") already here.") }
-        if empty > 0 { parts.append("\(empty) had no messages.") }
-        if !failed.isEmpty {
-            parts.append("\(failed.count) couldn't be read: \(failed.prefix(3).joined(separator: "; "))\(failed.count > 3 ? "…" : "")")
-        }
+        parts.append(imported.isEmpty ? "Nothing new to import."
+                     : "Imported \(Self.count(imported.count, "chat", "chats")) (\(Self.count(messages, "message", "messages"))).")
+        if alreadyHere > 0 { parts.append("\(alreadyHere) \(alreadyHere == 1 ? "was" : "were") already in Vision.") }
+        if !failed.isEmpty { parts.append("\(failed.count) couldn't be read.") }
         return parts.joined(separator: " ")
+    }
+
+    /// "1 chat", "1,840 messages".
+    static func count(_ n: Int, _ one: String, _ many: String) -> String {
+        n == 1 ? "1 \(one)" : "\(n.formatted(.number.grouping(.automatic).locale(Locale(identifier: "en_US")))) \(many)"
     }
 }
 

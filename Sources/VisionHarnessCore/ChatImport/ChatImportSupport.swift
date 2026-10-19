@@ -9,6 +9,8 @@ public enum ChatImportLimits {
     public static let message = 1_000_000
     /// A tool card's "called with" and "result" lines.
     public static let summary = 200
+    /// A file's text attached to a Claude.ai message.
+    public static let attachment = 50_000
 }
 
 public enum ImportText {
@@ -77,8 +79,7 @@ public enum ImportText {
             }
             return firstLine(text)
         case let object as [String: Any]:
-            for key in ["command", "cmd", "file_path", "filePath", "path", "notebook_path", "pattern", "query", "url",
-                        "prompt", "description", "skill", "name", "title"] {
+            for key in argumentKeys {
                 if let value = object[key] as? String, !value.isEmpty { return oneLine(value) }
                 if let list = object[key] as? [String], !list.isEmpty { return oneLine(shellCommand(list)) }
             }
@@ -90,17 +91,34 @@ public enum ImportText {
         }
     }
 
+    /// The arguments a person recognises a call by, first found wins (Vision for Windows reads the same list).
+    static let argumentKeys = ["command", "cmd", "file_path", "filePath", "notebook_path", "pattern", "query", "q", "url",
+                               "path", "description", "prompt", "skill", "subject", "name", "code", "input"]
+
     /// `["/bin/zsh", "-lc", "ls -la"]` → "ls -la".
     static func shellCommand(_ list: [String]) -> String {
         if list.count == 3, ["-lc", "-c"].contains(list[1]) { return list[2] }
         return list.joined(separator: " ")
     }
 
-    /// A tool result's one-line summary: its first non-empty line, or "done" / "failed" when it has none.
+    /// A tool result's one-line summary: its first non-empty line that isn't only a wrapper's tag (`<result>`),
+    /// "failed: …" when it failed; "done" / "failed" when it says nothing.
     public static func resultSummary(_ output: String, isError: Bool) -> String {
-        let line = firstLine(stripReminders(output))
+        let line = stripReminders(output).split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty && !isTagOnly($0) }
+            .map { oneLine($0) } ?? ""
         if line.isEmpty { return isError ? "failed" : "done" }
-        return line
+        return isError ? "failed: " + line : line
+    }
+
+    /// "<result>", "</persisted-output>": a line that is one tag and nothing else.
+    static func isTagOnly(_ line: String) -> Bool {
+        guard line.hasPrefix("<"), line.hasSuffix(">"), line.count >= 3 else { return false }
+        var inner = line.dropFirst().dropLast()
+        if inner.hasPrefix("/") { inner = inner.dropFirst() }
+        guard let first = inner.first, first.isASCII, first.isLetter else { return false }
+        return inner.allSatisfy { ($0.isASCII && ($0.isLetter || $0.isNumber)) || $0 == "_" || $0 == "-" }
     }
 
     public static func compactJSON(_ value: Any) -> String {

@@ -77,9 +77,8 @@ final class ChatSearchModel {
                 let rows = loaded ?? ConversationLog.readRows(at: file, sessionID: id) ?? []
                 return ChatSearchDocument(chatID: id, title: title, source: source, updatedAt: updatedAt,
                                           rows: rows.compactMap { row in
-                    ChatSearchDocument.searchText(kind: row.kind, text: row.text, toolName: row.toolName,
-                                                  argSummary: row.argSummary)
-                        .map { ChatSearchDocument.Row(seq: row.seq, kind: row.kind, text: $0, at: row.at) }
+                    ChatSearchDocument.row(seq: row.seq, kind: row.kind, text: row.text, toolName: row.toolName,
+                                           argSummary: row.argSummary, output: row.output, at: row.at)
                 })
             }
         }.value

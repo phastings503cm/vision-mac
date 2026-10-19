@@ -2,8 +2,8 @@ import Foundation
 
 // MARK: - One search across every chat on this Mac
 //
-// Titles and what was said — prompts, answers, notices, and each tool card's name, arguments and result line (not the
-// tool outputs themselves) — in chats made here and chats imported from anywhere. Every word of the query must appear
+// Titles and what was said — prompts, answers, notices, and each tool card's name, arguments, result line and the start
+// of its output — in chats made here and chats imported from anywhere. Every word of the query must appear
 // somewhere in a chat (a "quoted phrase" counts as one word); case and accents don't matter. A chat whose title holds
 // every word comes first, then the most recent.
 
@@ -12,18 +12,28 @@ public struct ChatSearchDocument: Sendable {
         public var seq: Int
         public var kind: String
         public var text: String
+        /// More to search that isn't the row's own line: a tool's output (the first `outputLimit` characters).
+        public var more: String
         public var at: Date
-        /// `text` case- and accent-folded, made once when the index is built.
+        /// `text` and `more` case- and accent-folded, made once when the index is built.
         let folded: String
+        let foldedMore: String
 
-        public init(seq: Int, kind: String, text: String, at: Date) {
+        public init(seq: Int, kind: String, text: String, more: String = "", at: Date) {
             self.seq = seq
             self.kind = kind
             self.text = text
+            self.more = more
             self.at = at
             self.folded = ChatSearch.fold(text)
+            self.foldedMore = more.isEmpty ? "" : ChatSearch.fold(more)
         }
+
+        func holds(_ word: String) -> Bool { folded.contains(word) || (!foldedMore.isEmpty && foldedMore.contains(word)) }
     }
+
+    /// How much of a tool's output the index keeps.
+    public static let outputLimit = 4_000
 
     public var chatID: String
     public var title: String
@@ -52,6 +62,14 @@ public struct ChatSearchDocument: Sendable {
         default:
             return nil
         }
+    }
+
+    /// A stored row as an index row (nil: not searched): its line, and a tool's output as more to search.
+    public static func row(seq: Int, kind: String, text: String?, toolName: String?, argSummary: String?, output: String?,
+                           at: Date) -> Row? {
+        guard let line = searchText(kind: kind, text: text, toolName: toolName, argSummary: argSummary) else { return nil }
+        let more = kind == "tool" ? String((output ?? "").prefix(outputLimit)) : ""
+        return Row(seq: seq, kind: kind, text: line, more: more, at: at)
     }
 }
 
@@ -125,7 +143,7 @@ public enum ChatSearch {
             var matches = 0
             var best: (row: ChatSearchDocument.Row, count: Int)?
             for row in document.rows {
-                let found = words.filter { row.folded.contains($0) }
+                let found = words.filter { row.holds($0) }
                 guard !found.isEmpty else { continue }
                 matches += 1
                 missing.subtract(found)
@@ -134,7 +152,12 @@ public enum ChatSearch {
             guard missing.isEmpty else { continue }
             let snippet: String
             if let best {
-                snippet = Self.snippet(best.row.text, word: words.first { best.row.folded.contains($0) } ?? words[0])
+                // From the row's own line when a word is there, else from the output that matched.
+                if let word = words.first(where: { best.row.folded.contains($0) }) {
+                    snippet = Self.snippet(best.row.text, word: word)
+                } else {
+                    snippet = Self.snippet(best.row.more, word: words.first { best.row.foldedMore.contains($0) } ?? words[0])
+                }
             } else {
                 snippet = ""
             }

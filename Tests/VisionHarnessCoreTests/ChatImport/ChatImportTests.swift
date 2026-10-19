@@ -54,14 +54,14 @@ final class ChatImportTests: XCTestCase {
         XCTAssertEqual(rows[3].toolName, "Read")
         XCTAssertEqual(rows[3].argSummary, "/Users/pat/code/demo/missing.ts")
         XCTAssertTrue(rows[3].isError)
-        XCTAssertEqual(rows[3].text, "File does not exist.")
+        XCTAssertEqual(rows[3].text, "failed: File does not exist.")
 
         XCTAssertEqual(rows[4].text, "The login tests pass; the old helper file is gone.")
         XCTAssertFalse(rows.contains { $0.text?.contains("subagent's own prompt") == true }, "sidechain lines are a subagent's")
         XCTAssertFalse(rows.contains { $0.text?.contains("Caveat") == true }, "meta lines are the harness's")
         XCTAssertEqual(rows[5].text, "Ran /model claude-opus-5 in Claude Code.")
         XCTAssertEqual(rows[6].text, "Set model to claude-opus-5")
-        XCTAssertEqual(rows[7].text, "[image]\nHere is the broken screen")
+        XCTAssertEqual(rows[7].text, "[image]\n\nHere is the broken screen")
         XCTAssertEqual(rows[8].text, "also check the signup page", "a prompt typed while a turn ran is still a prompt")
         XCTAssertEqual(rows[9].text, "Background task completed: Recon finished",
                        "the notification once, not again from the queue")
@@ -106,6 +106,56 @@ final class ChatImportTests: XCTestCase {
         XCTAssertEqual(full.updatedAt, quick.updatedAt)
         XCTAssertEqual(full.rows.last?.toolName, "Write")
         XCTAssertEqual(full.rows.last?.output?.count, ChatImportLimits.toolOutput + "\n… [20000 more characters not imported]".count)
+    }
+
+    func testARewoundBranchIsLeftOutButParallelToolResultsStay() throws {
+        func line(_ uuid: String, _ parent: String?, _ type: String, _ content: String, _ at: String) -> String {
+            let up = parent.map { "\"\($0)\"" } ?? "null"
+            return #"{"parentUuid":\#(up),"isSidechain":false,"type":"\#(type)","message":{"role":"\#(type)","content":\#(content)},"uuid":"\#(uuid)","timestamp":"\#(at)","sessionId":"s"}"#
+        }
+        let lines = [
+            line("u1", nil, "user", #""First question""#, "2026-10-01T10:00:00Z"),
+            line("a1", "u1", "assistant", #"[{"type":"tool_use","id":"tA","name":"Read","input":{"file_path":"/a"}}]"#, "2026-10-01T10:00:01Z"),
+            line("a2", "a1", "assistant", #"[{"type":"tool_use","id":"tB","name":"Read","input":{"file_path":"/b"}}]"#, "2026-10-01T10:00:02Z"),
+            line("rA", "a1", "user", #"[{"type":"tool_result","tool_use_id":"tA","content":"A says hi"}]"#, "2026-10-01T10:00:03Z"),
+            line("rB", "a2", "user", #"[{"type":"tool_result","tool_use_id":"tB","content":"B says hi"}]"#, "2026-10-01T10:00:04Z"),
+            line("a3", "rB", "assistant", #"[{"type":"text","text":"An answer the person rewound"}]"#, "2026-10-01T10:00:05Z"),
+            line("u2", "a3", "user", #""A question on the abandoned branch""#, "2026-10-01T10:00:06Z"),
+            line("u3", "rB", "user", #""The edited question""#, "2026-10-01T10:01:00Z"),
+            line("a4", "u3", "assistant", #"[{"type":"text","text":"The answer that stayed"}]"#, "2026-10-01T10:01:05Z"),
+        ].joined(separator: "\n")
+        let chat = try XCTUnwrap(ClaudeCodeChats.parse(Data(lines.utf8), fallbackID: "f"))
+        XCTAssertEqual(chat.rows.map(\.kind), [.user, .tool, .tool, .user, .assistant])
+        XCTAssertEqual(chat.rows[1].output, "A says hi", "a parallel call's result is a sibling, not on the branch, and stays")
+        XCTAssertEqual(chat.rows[2].output, "B says hi")
+        XCTAssertEqual(chat.rows.compactMap(\.text).filter { $0.contains("rewound") || $0.contains("abandoned") }, [])
+        XCTAssertEqual(chat.rows[3].text, "The edited question")
+        // A parent the file doesn't hold (a session resumed from another file): nothing is dropped.
+        let orphan = lines.replacingOccurrences(of: #"{"parentUuid":null"#, with: #"{"parentUuid":"elsewhere""#)
+        XCTAssertEqual(ClaudeCodeChats.parse(Data(orphan.utf8), fallbackID: "f")?.messageCount, 5)
+    }
+
+    func testClaudeCodesOtherTaggedMessagesReadAsVisionForWindowsReadsThem() throws {
+        func user(_ content: String, origin: String? = nil) -> String {
+            let kind = origin.map { #","origin":{"kind":"\#($0)"}"# } ?? ""
+            return #"{"type":"user","isSidechain":false,"message":{"role":"user","content":\#(content)},"timestamp":"2026-10-01T10:00:00Z"\#(kind)}"#
+        }
+        let lines = [
+            user(#""<bash-input>git status</bash-input>""#),
+            user(#""<bash-stdout>On branch main</bash-stdout><bash-stderr>warning: x</bash-stderr>""#),
+            user(#""[Request interrupted by user for tool use]""#),
+            user(#""Rebase finished on main""#, origin: "peer"),
+            #"{"type":"assistant","isSidechain":false,"message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"No response requested."}]},"timestamp":"2026-10-01T10:00:01Z"}"#,
+            #"{"type":"agent-name","agentName":"Release helper","sessionId":"s"}"#,
+        ].joined(separator: "\n")
+        let chat = try XCTUnwrap(ClaudeCodeChats.parse(Data(lines.utf8), fallbackID: "f"))
+        XCTAssertEqual(chat.rows.map(\.kind), [.user, .notice, .notice, .notice, .error])
+        XCTAssertEqual(chat.rows.map { $0.text ?? "" }, ["! git status", "On branch main\nwarning: x", "Interrupted by the user.",
+                                                       "Message from another session: Rebase finished on main",
+                                                       "No response requested."])
+        XCTAssertEqual(chat.title, "Release helper")
+        XCTAssertEqual(ImportText.resultSummary("<result>\n  ok then\n</result>", isError: false), "ok then", "a wrapper's tag says nothing")
+        XCTAssertEqual(ImportText.resultSummary("", isError: true), "failed")
     }
 
     func testASessionWithNoConversationIsNotOffered() {
@@ -205,7 +255,7 @@ final class ChatImportTests: XCTestCase {
         XCTAssertEqual(chatPreview.title, "How many open tickets are there?", "no label: the first prompt")
         XCTAssertFalse(chatPreview.automated)
         XCTAssertEqual(chatPreview.detail, "Chat")
-        XCTAssertEqual(chatPreview.cwd, "/Users/pat/.openclaw/workspace")
+        XCTAssertNil(chatPreview.cwd, "OpenClaw's own workspace is no project")
         XCTAssertEqual(chatPreview.location, .openClawDatabase(database, sessionID: "7f0c2a11-0000-4000-8000-0000000000aa"))
 
         let chat = try XCTUnwrap(OpenClawChats.read(database: database, sessionID: "7f0c2a11-0000-4000-8000-0000000000aa"))
@@ -258,7 +308,7 @@ final class ChatImportTests: XCTestCase {
         XCTAssertEqual(chat.title, "Trip planning")
         XCTAssertEqual(chat.createdAt, iso("2026-05-01T17:43:26.474Z"), "six fraction digits read")
         XCTAssertEqual(chat.rows.map(\.kind), [.user, .tool, .assistant])
-        XCTAssertEqual(chat.rows[0].text, "Plan a weekend in Portland\n\n[Attached: budget.txt]\nBudget: $400\n\n[Attached: map.png]")
+        XCTAssertEqual(chat.rows[0].text, "Plan a weekend in Portland\n\n[Attached: budget.txt]\nBudget: $400\n\n[File: map.png]")
         XCTAssertEqual(chat.rows[1].toolName, "web_search")
         XCTAssertEqual(chat.rows[1].argSummary, "portland weekend events")
         XCTAssertEqual(chat.rows[1].output, "Saturday market")
@@ -499,7 +549,7 @@ final class ChatImportTests: XCTestCase {
             ChatSearchDocument(chatID: "b", title: "Login fixes", source: .claudeCode, updatedAt: at.addingTimeInterval(60), rows: [
                 .init(seq: 0, kind: "notice", text: "Imported from Claude Code", at: at),
                 .init(seq: 1, kind: "user", text: "the login page shows a blank screen", at: at),
-                .init(seq: 2, kind: "tool", text: "Bash npm test -- login PASS", at: at),
+                .init(seq: 2, kind: "tool", text: "Bash npm test -- login PASS", more: "Tests: 3 passed (jest)", at: at),
             ]),
             ChatSearchDocument(chatID: "c", title: "Weekend", source: .chatGPT, updatedAt: at.addingTimeInterval(120), rows: [
                 .init(seq: 0, kind: "user", text: "blank page in my notebook, and a resume tip", at: at),
@@ -523,7 +573,11 @@ final class ChatImportTests: XCTestCase {
         XCTAssertEqual(ChatSearch.snippet(String(repeating: "a ", count: 100) + "needle" + String(repeating: " b", count: 100),
                                           word: "needle", radius: 10),
                        "…a a a a a needle b b b b b…")
+        XCTAssertEqual(ChatSearch.search("jest", in: docs).first?.snippet, "Tests: 3 passed (jest)", "a tool's output is searched too")
         XCTAssertEqual(ChatSearchDocument.searchText(kind: "tool", text: "ok", toolName: "Bash", argSummary: "ls"), "Bash ls ok")
+        let row = ChatSearchDocument.row(seq: 1, kind: "tool", text: "ok", toolName: "Bash", argSummary: "ls",
+                                         output: String(repeating: "y", count: 9_000), at: .now)
+        XCTAssertEqual(row?.more.count, ChatSearchDocument.outputLimit)
         XCTAssertNil(ChatSearchDocument.searchText(kind: "todos", text: nil, toolName: nil, argSummary: nil))
     }
 

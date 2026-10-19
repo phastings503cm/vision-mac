@@ -73,10 +73,14 @@ public enum GuardianChatImport {
             switch (message["role"] as? String ?? "").uppercased() {
             case "USER":
                 let origin = message["origin"] as? String
+                let attached = (message["attachments"] as? [[String: Any]] ?? []).compactMap { item -> String? in
+                    ((item["attachment"] as? [String: Any])?["name"] as? String ?? item["name"] as? String).map { "[Attached: \($0)]" }
+                }
+                let text = ([content] + attached).filter { !$0.isEmpty }.joined(separator: "\n\n")
                 if origin == "system" {
-                    builder.notice(content, at: at)
+                    builder.notice(text, at: at)
                 } else {
-                    builder.user(content, at: at)
+                    builder.user(text, at: at)
                 }
             case "ASSISTANT":
                 // The tools a turn ran came before its final words.

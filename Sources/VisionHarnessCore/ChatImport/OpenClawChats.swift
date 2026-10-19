@@ -12,7 +12,8 @@ import SQLite3
 //   agents/<agent>/session-sqlite-import-archive/archive-tier.<id>.jsonl.imported-<ms>
 // (trajectory, checkpoint and zstd-compressed ".deleted" files are not conversations and are skipped).
 //
-// An event is the agent session format, version 3: {type:"session", id, timestamp, cwd} first, then
+// An event is the agent session format, version 3: {type:"session", id, timestamp, cwd} first (the cwd is OpenClaw's
+// own workspace, not a project, so an imported chat gets no folder), then
 //   {type:"message", id, parentId, timestamp, message:{role:"user"|"assistant"|"toolResult"|"bashExecution", content}}
 //     assistant content: text · thinking · toolCall {id, name, arguments}; toolResult {toolCallId, toolName, content,
 //     isError}
@@ -100,7 +101,6 @@ public enum OpenClawChats {
     struct Reading {
         var builder = ImportTranscriptBuilder()
         var sessionID: String?
-        var cwd: String?
         var model: String?
         var first: Date?
         var last: Date?
@@ -112,7 +112,6 @@ public enum OpenClawChats {
         switch event["type"] as? String {
         case "session":
             if let id = event["id"] as? String { reading.sessionID = id }
-            if let folder = event["cwd"] as? String, !folder.isEmpty { reading.cwd = folder }
             return
         case "model_change":
             if let id = event["modelId"] as? String { reading.model = id }
@@ -186,7 +185,7 @@ public enum OpenClawChats {
         let createdAt = reading.first ?? created ?? .now
         return ImportedChat(source: .openClaw, sourceID: reading.sessionID ?? fallbackID, title: title,
                             createdAt: createdAt, updatedAt: reading.last ?? updated ?? createdAt,
-                            cwd: reading.cwd, model: reading.model, rows: rows, automated: automated)
+                            model: reading.model, rows: rows, automated: automated)
     }
 
     static func isAutomatedKey(_ key: String?) -> Bool {
@@ -223,7 +222,6 @@ public enum OpenClawChats {
     public static func preview(file: URL, agent: String) -> ChatImportCandidate? {
         guard let data = try? Data(contentsOf: file, options: .alwaysMapped) else { return nil }
         var sessionID: String?
-        var cwd: String?
         var firstPrompt: String?
         var first: Date?
         var last: Date?
@@ -253,7 +251,6 @@ public enum OpenClawChats {
                       let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
                       object["type"] as? String == "session" {
                 sessionID = object["id"] as? String
-                cwd = object["cwd"] as? String
             }
             return true
         }
@@ -264,7 +261,7 @@ public enum OpenClawChats {
         let modified = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
         let detail = file.lastPathComponent.contains(".reset.") ? "Before a reset" : (cron != nil ? "Cron run" : "Session")
         return ChatImportCandidate(source: .openClaw, sourceID: id, title: title, createdAt: first,
-                                   updatedAt: last ?? modified ?? .now, messageCount: messages, cwd: cwd,
+                                   updatedAt: last ?? modified ?? .now, messageCount: messages,
                                    automated: cron != nil, detail: agent == "main" ? detail : "\(detail) · agent \(agent)",
                                    location: .file(file))
     }
@@ -287,13 +284,6 @@ public enum OpenClawChats {
                   let message = event["message"] as? [String: Any] else { return }
             prompts[id] = ImportText.blocksText(message["content"])
         }
-        var cwds: [String: String] = [:]
-        try db.each(#"SELECT session_id, event_json FROM transcript_events WHERE substr(event_json,1,17)='{"type":"session"'"#) { row in
-            guard let id = row.text(0), let json = row.text(1), let data = json.data(using: .utf8),
-                  let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let cwd = event["cwd"] as? String else { return }
-            cwds[id] = cwd
-        }
         var out: [ChatImportCandidate] = []
         try db.each("""
             SELECT w.session_id, w.session_key, COALESCE(NULLIF(n.label,''), NULLIF(n.display_name,''), NULLIF(w.display_name,'')),
@@ -309,7 +299,7 @@ public enum OpenClawChats {
             let automated = isAutomatedKey(key) || ["cron", "spawn", "run"].contains(via ?? "") || cron != nil
             out.append(ChatImportCandidate(
                 source: .openClaw, sourceID: id, title: title, createdAt: row.millis(3), updatedAt: row.millis(4) ?? .now,
-                messageCount: messages, cwd: cwds[id], automated: automated, detail: detail(key: key, agent: agent, via: via),
+                messageCount: messages, automated: automated, detail: detail(key: key, agent: agent, via: via),
                 location: .openClawDatabase(database, sessionID: id)))
         }
         return out

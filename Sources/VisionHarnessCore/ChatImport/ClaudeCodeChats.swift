@@ -75,6 +75,7 @@ public enum ClaudeCodeChats {
         var cwd: String?
         var customTitle: String?
         var aiTitle: String?
+        var agentName: String?
         var summaryTitle: String?
         var model: String?
         var first: Date?
@@ -90,9 +91,15 @@ public enum ClaudeCodeChats {
         let serverToolMark = Data(#""type":"server_tool_use""#.utf8)
         let typedMark = Data(#""role":"user","content":""#.utf8)
         let queuedMark = Data(#""queued_command""#.utf8)
-        let titleMarks = [#""type":"custom-title""#, #""type":"ai-title""#, #""type":"summary""#].map { Data($0.utf8) }
+        let titleMarks = [#""type":"custom-title""#, #""type":"ai-title""#, #""type":"agent-name""#, #""type":"summary""#]
+            .map { Data($0.utf8) }
+
+        let offBranch = preview ? [] : offBranchLines(data)
+        var lineIndex = -1
 
         JSONLines.forEachLine(data) { raw in
+            lineIndex += 1
+            if offBranch.contains(lineIndex) { return true }
             if preview {
                 let head = raw.prefix(600)
                 let wanted = !JSONLines.contains(head, toolResultMark)
@@ -120,6 +127,9 @@ public enum ClaudeCodeChats {
                 return true
             case "ai-title":
                 if let title = line["aiTitle"] as? String, !title.isEmpty { aiTitle = title }
+                return true
+            case "agent-name":
+                if let title = line["agentName"] as? String, !title.isEmpty { agentName = title }
                 return true
             case "summary":
                 if let title = line["summary"] as? String, !title.isEmpty { summaryTitle = title }
@@ -162,11 +172,66 @@ public enum ClaudeCodeChats {
         let rows = builder.finish()
         guard rows.contains(where: \.isMessage) else { return nil }
         let created = first ?? modified ?? .now
-        let title = customTitle ?? aiTitle ?? summaryTitle
+        let title = customTitle ?? aiTitle ?? agentName ?? summaryTitle
             ?? builder.firstPrompt.flatMap(ImportText.title(fromPrompt:)) ?? "Claude Code session"
         return ImportedChat(source: .claudeCode, sourceID: sessionID ?? fallbackID, title: title, createdAt: created,
                             updatedAt: last ?? modified ?? created, cwd: cwd, model: model, rows: rows,
                             automated: scripted, subagents: subagents)
+    }
+
+    /// The lines (by position among non-empty lines) off the branch the session ended on. Claude Code keeps a tree:
+    /// each entry names its parent (`parentUuid`; across a compaction, the boundary's `logicalParentUuid`), and a rewind
+    /// leaves the abandoned branch in the file. The branch is walked up from the last user or assistant entry; a tool
+    /// result whose call is on the branch stays (parallel calls' results are siblings of each other). A walk that
+    /// reaches a parent the file doesn't hold drops nothing.
+    static func offBranchLines(_ data: Data) -> Set<Int> {
+        struct Entry {
+            var line: Int
+            var uuid: String
+            var parent: String?
+            var resultsFor: [String]
+            var calls: [String]
+            var message: Bool
+        }
+        var entries: [Entry] = []
+        var index = -1
+        JSONLines.forEachLine(data) { raw in
+            index += 1
+            guard let line = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
+                  let uuid = line["uuid"] as? String, line["isSidechain"] as? Bool != true else { return true }
+            let type = line["type"] as? String ?? ""
+            let parent = line["parentUuid"] as? String ?? line["logicalParentUuid"] as? String
+            var results: [String] = []
+            var calls: [String] = []
+            if let blocks = (line["message"] as? [String: Any])?["content"] as? [Any] {
+                for case let block as [String: Any] in blocks {
+                    if block["type"] as? String == "tool_result", let id = block["tool_use_id"] as? String { results.append(id) }
+                    if block["type"] as? String == "tool_use", let id = block["id"] as? String { calls.append(id) }
+                }
+            }
+            entries.append(Entry(line: index, uuid: uuid, parent: parent, resultsFor: results, calls: calls,
+                                 message: type == "user" || type == "assistant"))
+            return true
+        }
+        guard let leaf = entries.last(where: \.message) else { return [] }
+        let byID = Dictionary(entries.map { ($0.uuid, $0) }, uniquingKeysWith: { _, last in last })
+        var branch: Set<String> = [leaf.uuid]
+        var node = leaf
+        while let up = node.parent {
+            guard let next = byID[up], !branch.contains(up) else {
+                if byID[up] == nil { return [] }
+                break
+            }
+            branch.insert(up)
+            node = next
+        }
+        let callsOnBranch = Set(entries.filter { branch.contains($0.uuid) }.flatMap(\.calls))
+        var off = Set<Int>()
+        for entry in entries where !branch.contains(entry.uuid) {
+            if !entry.resultsFor.isEmpty, entry.resultsFor.allSatisfy(callsOnBranch.contains) { continue }
+            off.insert(entry.line)
+        }
+        return off
     }
 
     private static func user(_ line: [String: Any], at: Date, into builder: inout ImportTranscriptBuilder) {
@@ -175,9 +240,10 @@ public enum ClaudeCodeChats {
             builder.compaction(ImportText.blocksText(message["content"]), at: at)
             return
         }
+        let origin = (line["origin"] as? [String: Any])?["kind"] as? String
         switch message["content"] {
         case let text as String:
-            typed(text, at: at, into: &builder)
+            typed(text, origin: origin, at: at, into: &builder)
         case let blocks as [Any]:
             var typedText: [String] = []
             for case let block as [String: Any] in blocks {
@@ -196,30 +262,42 @@ public enum ClaudeCodeChats {
                     break
                 }
             }
-            if !typedText.isEmpty { typed(typedText.joined(separator: "\n"), at: at, into: &builder) }
+            if !typedText.isEmpty { typed(typedText.joined(separator: "\n\n"), origin: origin, at: at, into: &builder) }
         default:
             break
         }
     }
 
-    /// Something the person's side sent: a prompt, or one of the harness's tagged messages.
-    private static func typed(_ raw: String, at: Date, into builder: inout ImportTranscriptBuilder) {
-        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if text.hasPrefix("<command-name>") || text.hasPrefix("<command-message>") {
+    /// Something the person's side sent: a prompt, or one of the harness's tagged messages — a slash command and its
+    /// output, a `!` shell command and its output, a background task's result, another session's message, an
+    /// interruption. Only prompts go to a model again; the rest are notices.
+    private static func typed(_ raw: String, origin: String? = nil, at: Date, into builder: inout ImportTranscriptBuilder) {
+        let text = ImportText.stripReminders(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard !text.isEmpty else { return }
+        if text.hasPrefix("[Request interrupted by user") {
+            builder.notice("Interrupted by the user.", at: at)
+        } else if origin == "task-notification" || origin == "peer" || text.hasPrefix("<task-notification>") {
+            if let summary = ImportText.tag("summary", in: text), !summary.isEmpty {
+                let status = ImportText.tag("status", in: text) ?? ""
+                builder.notice(status.isEmpty ? "Background task: \(summary)" : "Background task \(status): \(summary)", at: at)
+            } else {
+                builder.notice(origin == "peer" ? "Message from another session: \(text)" : text, at: at)
+            }
+        } else if let output = ImportText.tag("local-command-stdout", in: text) {
+            builder.notice(output, at: at)
+        } else if text.hasPrefix("<command-name>") || text.hasPrefix("<command-message>") {
             let name = ImportText.tag("command-name", in: text) ?? ImportText.tag("command-message", in: text).map { "/" + $0 } ?? ""
             let args = ImportText.tag("command-args", in: text) ?? ""
             builder.notice("Ran \(name)\(args.isEmpty ? "" : " " + args) in Claude Code.", at: at)
-        } else if text.hasPrefix("<local-command-stdout>") {
-            let output = ImportText.tag("local-command-stdout", in: text) ?? ""
-            if !output.isEmpty { builder.notice(output, at: at) }
+        } else if let command = ImportText.tag("bash-input", in: text) {
+            builder.user("! " + command, at: at)
+        } else if let output = ImportText.tag("bash-stdout", in: text) {
+            let error = ImportText.tag("bash-stderr", in: text) ?? ""
+            builder.notice(error.isEmpty ? output : output + "\n" + error, at: at)
         } else if text.hasPrefix("<local-command-caveat>") || text.hasPrefix("<local-command-stderr>") {
             return
-        } else if text.hasPrefix("<task-notification>") {
-            let summary = ImportText.tag("summary", in: text) ?? "A background task finished."
-            let status = ImportText.tag("status", in: text)
-            builder.notice("Background task \(status ?? "finished"): \(summary)", at: at)
         } else {
-            builder.user(ImportText.stripReminders(text), at: at)
+            builder.user(text, at: at)
         }
     }
 
@@ -227,7 +305,7 @@ public enum ClaudeCodeChats {
                                   into builder: inout ImportTranscriptBuilder) {
         guard let message = line["message"] as? [String: Any] else { return }
         if let name = message["model"] as? String, !name.isEmpty, name != "<synthetic>" { model = name }
-        if line["isApiErrorMessage"] as? Bool == true {
+        if line["isApiErrorMessage"] as? Bool == true || message["model"] as? String == "<synthetic>" {
             builder.error(ImportText.blocksText(message["content"]), at: at)
             return
         }

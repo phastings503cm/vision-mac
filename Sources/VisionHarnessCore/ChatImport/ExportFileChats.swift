@@ -134,9 +134,19 @@ public enum ClaudeAIExport {
                         let text = block["text"] as? String ?? ""
                         if human { parts.append(text) } else { builder.assistant(text, at: at) }
                     case "tool_use":
-                        builder.toolCall(id: block["id"] as? String, name: block["name"] as? String ?? "tool",
-                                         input: block["input"], at: at)
-                    case "tool_result":
+                        let name = block["name"] as? String ?? "tool"
+                        let input = block["input"] as? [String: Any]
+                        if name == "artifacts" {
+                            // An artifact's content is what the reply made: it is the call's output (its "OK" result
+                            // is dropped below).
+                            let label = input?["title"] as? String ?? input?["id"] as? String ?? input?["command"] as? String
+                            builder.toolCall(id: block["id"] as? String, name: name, input: label, at: at)
+                            builder.toolResult(id: block["id"] as? String, name: name,
+                                               output: input?["content"] as? String ?? "", isError: false, at: at)
+                        } else {
+                            builder.toolCall(id: block["id"] as? String, name: name, input: block["input"], at: at)
+                        }
+                    case "tool_result" where block["name"] as? String != "artifacts":
                         builder.toolResult(id: block["tool_use_id"] as? String, name: block["name"] as? String,
                                            output: ImportText.blocksText(block["content"]),
                                            isError: block["is_error"] as? Bool ?? false, at: at)
@@ -151,13 +161,13 @@ public enum ClaudeAIExport {
             for attachment in message["attachments"] as? [[String: Any]] ?? [] {
                 let file = attachment["file_name"] as? String ?? "file"
                 if let content = attachment["extracted_content"] as? String, !content.isEmpty {
-                    parts.append("[Attached: \(file)]\n" + ImportText.clip(content, ChatImportLimits.toolOutput))
+                    parts.append("[Attached: \(file)]\n" + ImportText.clip(content, ChatImportLimits.attachment))
                 } else {
                     parts.append("[Attached: \(file)]")
                 }
             }
             for file in message["files"] as? [[String: Any]] ?? [] {
-                parts.append("[Attached: \(file["file_name"] as? String ?? "file")]")
+                parts.append("[File: \(file["file_name"] as? String ?? "file")]")
             }
             builder.user(parts.joined(separator: "\n\n"), at: at)
         }

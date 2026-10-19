@@ -205,6 +205,9 @@ struct ChatImportSheet: View {
                 .disabled(model.importing)
             Button("Select None") { model.selectNone() }
                 .disabled(model.importing || model.picked.isEmpty)
+            Button("Look Again") { model.lookEverywhere() }
+                .disabled(model.importing)
+                .help("Look in every source again for chats added since")
             if model.importing {
                 ProgressView(value: Double(model.progress.done), total: Double(max(model.progress.total, 1)))
                     .frame(width: 140)

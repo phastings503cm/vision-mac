@@ -236,6 +236,7 @@ final class ChatImportModel {
         importedKeys = transport.importedKeys()
         picked.subtract(candidates.filter(isImported).map(\.id))
         importing = false
+        problems = total.failed + problems
         result = (Task.isCancelled ? "Stopped. " : "") + total.summary
     }
 }

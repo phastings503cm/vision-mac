@@ -205,9 +205,13 @@ public enum CodexChats {
             if let output = object["output"] as? String { text = output }
             if let meta = object["metadata"] as? [String: Any], let code = meta["exit_code"] as? Int { failed = code != 0 }
         }
-        if let range = text.range(of: "Process exited with code ") {
+        if text.hasPrefix("Command: "), let range = text.range(of: "Process exited with code ") {
             let digits = text[range.upperBound...].prefix { $0.isNumber || $0 == "-" }
             if let code = Int(digits) { failed = code != 0 }
+        }
+        // exec_command's header ("Command: … Wall time … Output:") is Codex's, not the command's output.
+        if text.hasPrefix("Command: "), let output = text.range(of: "\nOutput:\n") {
+            text = String(text[output.upperBound...])
         }
         return (text, failed)
     }
