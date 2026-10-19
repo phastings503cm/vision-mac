@@ -21,6 +21,8 @@
   <a href="assets/screenshots/all-prompts.png">all prompts</a> ·
   <a href="assets/screenshots/activity.png">background activity</a> ·
   <a href="assets/screenshots/code-focus.png">code mode, chat and project status only</a> ·
+  <a href="assets/screenshots/chat-attachments.png">attachments and a 10,000-line paste</a> ·
+  <a href="assets/screenshots/settings-guardian.png">Settings ▸ Guardian</a> ·
   <a href="assets/screenshots/setup.png">the setup wizard</a> ·
   <a href="assets/screenshots/settings-models.png">Settings ▸ AI Models</a>
 </p>
@@ -98,7 +100,14 @@ The **model menu** under the composer shows the model in use and its window, and
   Servers**. `/swap` lists every box's models; `/swap flash` switches the box behind the primary (or the
   only box); `/swap evo flash` names the box by the start of its name.
 - **Primary · Subagents · Backups · Other models**: every route that's switched on in **Settings ▸ AI
-  Models**, each marked private (a lock) or masked (a shield). Picking one makes it the primary.
+  Models**, each marked private (a lock) or masked (a shield). Picking one switches **this chat** only.
+
+**Each chat keeps its own model.** The model is stored with the chat, so two projects open at once — or two
+chats in one — each talk to their own server: their turns, retries, `/goal` rounds, compaction, `/context`,
+and their subagents' fallback all use it, whatever another chat picks. A new chat starts with what its
+project's chats last used (else the primary); **Make This the Primary** in the menu is the explicit way to
+change the default for new projects and the fleet's main server. If a chat's model is removed or switched
+off, the chat says so and moves to the primary.
 
 ### Thinking
 
@@ -109,6 +118,18 @@ Settings. On a self-hosted server it is sent as `chat_template_kwargs.enable_thi
 Templates disagree on vocabulary — Qwen3.8 accepts `low`/`medium`/`xhigh` and 400s on `high` — so
 when a server rejects a word the client picks the nearest one it lists, retries once, and remembers
 it. The model's reasoning streams live under the "Thinking…" row.
+
+**Each model gets only what it takes.** A table of the hosted providers' rules decides what goes on the wire
+per model: Kimi K2.6/K2.7 and K3 get no temperature (Moonshot fixes it), K2.6 toggles thinking on/off, K2.7
+Code and the `*highspeed*` models always think (the menu says *Always thinks*), Kimi's reasoning is sent back
+with its tool calls, GLM-5.3 takes `low`/`high`/`max`, Z.ai's text models get plain-string messages, OpenAI's
+reasoning models get `max_completion_tokens`. The thinking menu offers only the model's own levels. For
+everything else there is a **safety net**: when a server answers 400/422 naming a parameter Vision sent
+("invalid temperature: only 1 is allowed for this model"), Vision drops it (or renames it), says so in one
+grey line — *Moonshot (kimi-k2.6) doesn't take `temperature` — Vision stopped sending it for this model and
+carried on.* — retries, and remembers it for that server and model (Settings ▸ AI Models ▸ Edit shows what it
+learned, with **Forget**). Only optional parameters are ever learned; a refusal about the messages, tools or
+model is shown as it is.
 
 ### Connecting a Spark Swapper
 
@@ -144,8 +165,7 @@ addresses where it has both:
 
 | Plan | Models |
 |---|---|
-| Z.ai — GLM Coding Plan | `glm-5.3` (1M context) |
-| Z.ai — pay-as-you-go API | `glm-5.3` |
+| Z.ai (GLM) — Coding Plan or API key | `glm-5.3` (1M context), `glm-5.3-flash`, … |
 | Kimi Code (subscription) | `kimi-for-coding` (K2.8, up to 1M), `k3`, `k3-256k`, `kimi-for-coding-highspeed` |
 | Moonshot (Kimi) — pay-as-you-go API | what `/models` lists |
 | OpenAI API | what `/models` lists, the newest `gpt-*` chat model recommended |
@@ -157,6 +177,12 @@ terms), takes the key — it goes to your Keychain — and catches recognisable 
 (`/models`, or a one-token message where a plan doesn't list models) with errors in plain words, lets you
 pick the model, asks how Vision should use it, and says hello through it.
 
+- **Z.ai (GLM) has its own guide** — the wizard's *Z.ai (GLM)* card, or **Add ▸ Z.ai (GLM)…** — with an
+  **Endpoint** menu: Coding Plan or General API, global (`api.z.ai`) or China (`open.bigmodel.cn`). A GLM
+  Coding Plan key works only on the Coding Plan endpoint; the check (and **Test** in the route editor) tries
+  the other endpoints when a key is turned away and says which one it belongs to — *This looks like a GLM
+  Coding Plan key — switch the endpoint to Coding Plan* — with a **Switch to …** button. Z.ai's business codes
+  (no balance, plan expired, usage limit used up until …) are explained in plain words and not retried.
 - **GLM-5.3 always thinks.** Vision never asks it not to; the thinking menu maps to its `low` / `high` / `max`.
 - **Kimi Code checks which app is calling.** Vision tells it honestly that it is Vision
   (`User-Agent: Vision/<version> (macOS)`) and never imitates another tool. If Kimi turns it away, Vision
@@ -337,10 +363,36 @@ calls, the text is run through an XML parser that understands both the `<functio
 - **Task Queue** (0.9; unattended since 0.10). `queue_task` adds follow-up work; `/queue` runs the queue one task at a time. A model outage retries until the server is back.
 - **Credentials Vault** (0.11). API keys and passwords live in the Keychain. The agent references a secret by its vault name and never sees the value; `vault_search` lists names, not secrets.
 - **Background subagents** (0.12). `agent` with `run_in_background` (up to four per chat), plus `agent_status` and `agent_stop`.
-- **Turn phases** (0.16). Every turn runs Planning → Execution → Validation → Results. Planning drafts the plan live and states an ETA — classified into a small task catalog, scoped to the ask, and blended with how long turns of that kind took before (the cache persists and refines as turns complete; Guardian aggregates the same learning across its users). Execution shows a green working badge with the runtime against the estimate, and every step timestamped when you drill in. When the work ends, validation checks the outcome against the plan the turn set out with and gathers evidence — screenshots, changed files, the closing summary — or loops back to execution when it fails (unlimited by default, cappable). Results shows a green "completed with results" with the evidence. Works with `/goal` and the task queue.
-- **Prompt history** (0.16). Every prompt a chat has sent, with its outcome chip and timestamp: copy it, reuse it in the composer, and see the results card it produced.
-- **Guardian** (0.16). Sign in with your guardian.503cm.com login and use your account's models through its OpenAI-compatible proxy — a wizard option and a Settings ▸ Guardian tab. Prompts you send sync to Guardian's prompt history; skills, chats and code projects move both ways (deposit/take skills, export/import chats, upload a project to the account's private repo store for the AI Coders module).
-- **The machine-in-use glow** (0.16). While a computer-use tool is on the machine — observing or controlling it — the screen edges glow green with "machine in use by Vision AI". It takes no input and goes away when the tool ends.
+- **Turn phases** (0.15). Every turn runs Planning → Execution → Validation → Results. Planning drafts the plan live and states an ETA — classified into a small task catalog, scoped to the ask, and blended with how long turns of that kind took before (the cache persists and refines as turns complete; Guardian aggregates the same learning across its users). Execution shows a green working badge with the runtime against the estimate, and every step timestamped when you drill in. When the work ends, validation checks the outcome against the plan the turn set out with and gathers evidence — screenshots, changed files, the closing summary. When a `/goal` (or a queued goal) declares itself done but its closing words report an error (`Error:`, a traceback, `Build FAILED` at the start of a line), it goes back to execution to fix it — *↻ validation: fix and check again (attempt 2)* — with no retry cap by default; the always-on no-progress check stops it once two attempts in a row fail the same way without finishing a plan step. A plain turn that fails validation ends *Finished with issues*. Results shows a green "completed with results" with the evidence.
+- **Guardian** (0.15; finished in 0.16). See [Talking to Guardian](#talking-to-guardian).
+- **The machine-in-use glow** (0.15). While a computer-use tool is on the machine — observing or controlling it — the screen edges glow green with "machine in use by Vision AI". It takes no input and goes away when the tool ends; its pill says which chat has the mouse (see [Screen control](#screen-control-without-taking-your-mouse)).
+- **`ui_action`** (0.16). Presses, focuses, sets values and picks menu items through Accessibility by element id (`w0.3.1`), by name and role, or by menu path (`File > Save As…`) — without moving your mouse. `ui_tree` lists the ids.
+- **`read_attachment`** (0.16). Reads a part of a long attachment, or searches it, from the chat's saved copy.
+- **`agent` / `delegate` take a `step`** (0.16): the plan step the subagent works (its number or its text), shown on that step.
+
+### Screen control without taking your mouse
+
+Clicks and typing go the quiet way first: an Accessibility action on the element (press a button, focus a
+field, insert text at the caret), else events posted to the target app alone — your pointer doesn't move and
+the app can stay behind. Only drags, clicks on things with no accessible action (a canvas, a game), or a tool
+call that asks for `real_mouse` / `foreground` use the real mouse and keyboard, and then chats **take turns**:
+one at a time, first come first served, each waiting until you have stopped using the mouse for a moment —
+*Waiting for the mouse — “Fix the build” is using it. It goes to the next chat when that one is done; ⌃⌥⌘.
+stops all control.* A second copy of Vision takes turns too. The glow's pill says who has the mouse (or that
+chats are working with your mouse free), and **⌃⌥⌘.** — from any app — stops every chat using or waiting for
+the machine and takes their control permission back. **Settings ▸ Computer** sets background-first, how long
+a chat waits (30 s–5 min, default 90 s), and whether a chat may drive any app or only the ones it opened and
+ones you allow; `/control only TextEdit, Safari`, `/control any` and `/control` set it per chat.
+
+### Import & Export with OpenClaw
+
+**Settings ▸ Import & Export** finds the OpenClaw on this Mac (`~/.openclaw`, its profiles, or a folder you
+choose) and previews what it holds: skills, memory (MEMORY.md, USER.md, the daily notes), keys and passwords
+(names and origin only), and model servers. **Import** brings the ones you tick in — skills through the skill
+importer (no key files), memory into Vision's memory files as marked blocks (importing again updates them),
+keys into the Credentials Vault (*Ask first* by default), compatible model servers as routes — with keep both,
+replace or skip for clashes; unchanged items are skipped. **Export** sends your skills and memory back to
+OpenClaw, and vault keys to its `.env` only after you confirm. Nothing in OpenClaw is run.
 
 ## Code mode
 
@@ -415,8 +467,10 @@ showing the subagents working it, by name and model ("worker · Qwen3-Coder on D
 how the last prompt ended and the plan it left.
 
 Below it is **Up next**. The composer stays usable while the agent works: **↩** adds the draft to the
-chat's tasks (**⌘↩** does so any time), and each task starts by itself, in order, when the work before it
-ends — sent exactly as if you had sent it then, so a `/goal` stays a goal and a command just runs. Drag or
+chat's tasks (**⌘↩** does so any time) — with its attachments and big pastes, which are kept with the task
+until it is deleted — and each task starts by itself, in order, when the work before it ends (and its own
+model server isn't switching) — sent exactly as if you had sent it then, so a `/goal` stays a goal and a
+command just runs. Drag or
 use the arrows to reorder, edit, remove, or run one next; the list keeps taking new tasks while it moves.
 A Stop, a failure, or a goal that needs you **pauses** the list (Resume carries on), and waiting tasks are
 paused when Vision opens again. Finished tasks are listed with **Run again**. Chat tasks never run
@@ -573,17 +627,21 @@ A running agent is reachable without opening its chat: the running bar at the to
 
 Guardian (guardian.503cm.com) is the account side of the family — models, prompts, skills, chats and code, shared across your harnesses.
 
-**Connect**: the wizard's *My Guardian account* choice, or Settings ▸ Guardian. Sign in with your Guardian email and password; Vision exchanges them for a session token (Keychain, not preferences) and lists the models your plan allows. The route behaves like any OpenAI-compatible server — primary, subagent, backup, thinking levels — with Guardian doing the proxying.
+**Connect**: the wizard's *My Guardian account* choice, or Settings ▸ Guardian. **Sign In with Guardian in the Browser** opens Guardian's consent page (Entra SSO, passwordless — PKCE with a loopback redirect, nothing typed into Vision); email, password and the authenticator code are still there under a disclosure. The session token goes to the Keychain. Pick the **organization** Vision works in (sent with every call, the Guardian model route included), and see your **limits** — spend, tokens, requests per day/week/month — with bars and when each resets. The route behaves like any OpenAI-compatible server — primary, subagent, backup, thinking levels — with Guardian doing the proxying.
+
+**When Guardian says no**, Vision says why in a dialog, never a bare HTTP code: what is missing and who can grant it (*Missing: the “vision” module is turned off for you. An admin of your Guardian organization can turn it on for you (Guardian ▸ Settings ▸ Members).*), or which limit was reached and when it resets (*Spend today: $4.80 of $5.00 — resets in 3 hours (Mon 4:00 PM).*). A spent budget or a missing permission is not retried.
+
+**The vault**: secrets you marked *Usable in Vision* in Guardian are listed; **Use** one and the agent can reference it as `{{vault:ENVKEY}}` (asked first) — held in memory only, gone when Vision quits or you sign out.
 
 **What syncs**:
 
 | | Direction | When |
 |---|---|---|
-| Prompt history | harness → Guardian | automatically, as you send prompts while signed in, and again with the outcome when each ends |
+| Prompt history | harness → Guardian | automatically, as you send prompts while signed in, and again with the outcome when each ends — masked first (your vault's secrets always, and what the sensitive-data shield masks); **Send my prompts to the notebook** in Settings ▸ Guardian turns it off |
 | Prompt history | Guardian → harness | Settings ▸ Guardian browses the account's notebook |
 | Skills | both ways | import the account's skills; deposit the project's `.vision/skills` |
 | Chats | both ways | export all loaded chats; import the account's exported ones back |
-| Code projects | harness → Guardian | upload the open project's text files to the account's private repo store — Guardian's own github-for-one, ready for the AI Coders module |
+| Code projects | both ways | upload the open project's text files to the account's private repo store — Guardian's own github-for-one, ready for the AI Coders module — never `.env` files, keys or certificates; download one back |
 
 **Estimates across users**: the turn-phase ETA cache that Vision keeps per machine (`eta-cache.json`) has a multitenant big sibling in Guardian, which aggregates durations per task kind and scope across its users — the client sends nothing but the kind, the scope number and the wall-clock.
 
@@ -621,6 +679,14 @@ VisionHarnessCore/         the harness. No AppKit, no SwiftUI — headlessly tes
   EditorBuffer.swift       open file, dirty tracking, external-change resolution
   Language.swift           lexical vocabulary per language
   Markdown.swift           block parser (SwiftUI only does inline)
+  ModelRequestRules.swift  what each hosted model takes on the wire; RequestAdaptations: the safety net
+  ProviderErrors.swift     Z.ai's and Kimi's errors in plain words; the Z.ai key/endpoint diagnosis
+  Attachments/             reading attachments (PDF, OCR, Office, RTF), budgets, parts, the chat's store
+  PromptTimeline.swift     the Prompts timeline: records, rules, the per-chat file
+  ChatTasks.swift          chat tasks' rules; which plan step a subagent works
+  MachineControl/          screen control: the planner, the arbiter (taking turns), the seat, Accessibility
+  OpenClaw/                reading a local OpenClaw; import and export
+  GuardianHarnessAPI.swift browser sign-in (PKCE), /me, limits, vault, projects; GuardianProblems: refusals
 
 VisionMacApp/              SwiftUI
   VisionMacApp.swift       @main, menus, root split view, toolbar
@@ -632,6 +698,13 @@ VisionMacApp/              SwiftUI
   ModelRoutesSettings.swift  Settings › AI Models: a row per route (on, primary, subagent, backup, private)
   SensitiveDataSettings.swift  Settings › AI Models › Sensitive data
   SwapperSettings.swift    Settings › Model Servers: the Swapper boxes
+  ChatRoutes.swift         each chat's own model
+  RunPanel.swift           the right column: Tasks and Prompts; All Prompts; Results
+  ActivityMenu.swift       background activity
+  ProjectStatusPanel.swift code mode's project status beside the chat
+  ComposerAttachments.swift  chips, the preview sheet, the long-text viewer
+  OpenClawSettings.swift   Settings › Import & Export
+  GuardianService.swift    Guardian sign-in, organizations, limits, vault, prompt sync, refusal dialogs
   SparkController.swift    the boxes: status, switching, installs, routes that follow
   RouteMenu.swift          the primary / subagents / backups menu shared by toolbar and composer
   PlanPanel.swift          the plan panel
@@ -651,7 +724,7 @@ VisionMacApp/              SwiftUI
 swift test
 ```
 
-1,490 tests: the engine loop (tool round-trips, denials, iteration budget, usage accounting,
+1,717 tests (1,490 on the harness core, 227 on the app host): the engine loop (tool round-trips, denials, iteration budget, usage accounting,
 cancellation), permission containment, the Qwen XML fallback, glob, markdown, plugin interpolation
 and quoting, prompt assembly, editor-buffer conflict resolution, 34 over the terminal emulator, and 8
 that spawn a real shell on a real pty and assert on what lands on the screen — plus the fleet (server
@@ -669,7 +742,15 @@ codes against the system's own, and the app host against two fake model servers 
 timeline (every ending, timing against the estimate, search, the composer quote, Jump after a relaunch, the
 backfill of old chats, the file), chat tasks end to end (in order after the current work, paused by a Stop or
 a failure and at launch, goals and commands as tasks), and which model, route and settings a subagent really
-uses, checked on the wire. Four live tests are skipped unless pointed at a real server.
+uses, checked on the wire. Also: each model's request rules and the safety net against the providers' own
+error bodies, Z.ai's errors and key diagnosis, each chat's own model with two chats at once, attachments read
+from real PDFs (text and scanned), Office files and pictures and the exact payload each kind of server gets,
+a 10,000-line paste sent in parts and queued with a task, the paste rule through AppKit's own paste path,
+validation sending a goal back and the no-progress stop, screen control's planner and arbiter against a fake
+machine, OpenClaw import and export against made-up installs (and read-only against a real one), and the
+Guardian contract — browser sign-in with PKCE through the loopback, organizations, limits, refusals, the
+vault, projects and the masked notebook — against a scripted Guardian. Five live tests are skipped unless
+pointed at a real server or a real OpenClaw.
 
 ## Status
 
@@ -687,10 +768,13 @@ Verified on macOS 14+ / Apple Silicon:
 
 - **The terminal is a subset, not a full VT.** Shells, build logs, `git`, and `less` are fine; a
   full-screen curses app that relies on mouse reporting or sixel is not.
-- **Amazon Bedrock, the multi-server fleet, backups and the subscription plans are covered by tests
-  against fakes** (a scripted AWS CLI, stubbed HTTP, fake model servers); the Swapper client was also run
-  against a local Swapper 2.0 demo. The first run against real AWS, a real plan, and a real second box is
-  yours.
+- **Amazon Bedrock, the multi-server fleet, backups, the subscription plans (Kimi and Z.ai included),
+  attachments and Guardian are covered by tests against fakes** (a scripted AWS CLI, stubbed HTTP, fake
+  model servers, a scripted Guardian built to its contract); the Swapper client was also run against a local
+  Swapper 2.0 demo. The first run against real AWS, a real Kimi or Z.ai key, real vLLM/llama.cpp with a PDF,
+  the live Guardian, and a real second box is yours.
+- **Screen control through Accessibility can't run in the test process** (macOS doesn't trust it); its
+  decisions — which route, who waits, who has the mouse — are tested, and the live paths need a person.
 - **The shield masks what it recognises** — the patterns above and your own terms — not every name or
   detail in a conversation. Describe tasks for a model that isn't private in general terms, as the agent
   is told to.

@@ -1,13 +1,17 @@
 name: Release DMG
 
-# Publish the distributable .dmg to the GitHub Releases section.
+# Publish the distributable .dmg to the GitHub Releases section of Vision for macOS's
+# home, https://github.com/phastings503cm/vision-mac (the README, the release notes and
+# the app's download links all point there).
 #
 # The version is read from the app bundle's Info.plist (CFBundleShortVersionString),
-# so it stays in lockstep with bundle.sh. Tag a commit as v<version> (e.g. v0.4.0)
-# and push it — the matching release is created (or re-created on re-tag) automatically.
+# so it stays in lockstep with bundle.sh. Tag a commit as v<version> (e.g. v0.16.0)
+# and push the tag to that repository — the matching release is created (or re-created
+# on re-tag) automatically. A tag pushed to any other copy of the repository (a fork,
+# the old home) publishes nothing.
 #
-#   1. Bump CFBundleShortVersionString in bundle.sh.
-#   2. git tag v0.4.0 && git push origin v0.4.0
+#   1. Bump CFBundleShortVersionString (and CFBundleVersion) in bundle.sh.
+#   2. git tag v0.16.0 && git push vision v0.16.0   (vision = phastings503cm/vision-mac)
 #   3. This workflow builds the DMG and publishes the release.
 
 on:
@@ -20,6 +24,8 @@ permissions:
 
 jobs:
   release:
+    # Releases are published only from Vision for macOS's home repository.
+    if: github.repository == 'phastings503cm/vision-mac'
     # arm64 runner (matches the Apple Silicon build). The default Xcode 16
     # toolchain is Swift 6, which is what the package requires
     # (swift-tools-version 6.0 in Package.swift).

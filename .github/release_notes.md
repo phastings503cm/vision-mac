@@ -1,7 +1,9 @@
 ## Download
 
 - **`Vision.dmg`** — open it and drag **Vision** into **Applications**. Every
-  release is at https://github.com/phastings503cm/vision-mac/releases.
+  release is at https://github.com/phastings503cm/vision-mac/releases (0.15.x
+  builds were published from an older repository; from 0.16.0 they are all
+  here).
 
 Builds are ad-hoc-signed for Apple Silicon (arm64), macOS 14+. Gatekeeper will
 prompt on first launch — right-click the app and choose **Open**, or run:
@@ -10,7 +12,70 @@ prompt on first launch — right-click the app and choose **Open**, or run:
 xattr -d com.apple.quarantine /Applications/Vision.app
 ```
 
-## What's new in 0.15.0 — the app is now called Vision
+## What's new in 0.16.0 — each chat its own model, files that just work, and you can see what runs where
+
+- **Each chat keeps its own model.** Pick a model in a chat's menu and only that
+  chat changes — two projects open at once each talk to their own server, with
+  their own retries, `/goal` rounds, compaction and subagents. A new chat starts
+  with what its project's chats last used; **Make This the Primary** is explicit.
+- **Kimi and Z.ai (GLM) work.** Each model gets only the parameters it takes
+  (Kimi K2.6/K2.7's fixed temperature, GLM-5.3's thinking levels, Kimi's
+  reasoning sent back with tool calls). A server that refuses a parameter gets
+  it dropped and remembered, with one grey line in the chat instead of a failed
+  turn — never the messages, tools or model. **Z.ai (GLM)** is a first-class
+  choice with an endpoint picker (Coding Plan or General API, global or China)
+  and a **Test** that names the fix ("This looks like a GLM Coding Plan key —
+  switch the endpoint to Coding Plan"); its balance and plan errors say so in
+  plain words instead of retrying for ever.
+- **PDFs, Markdown, Word, Excel and pictures in any chat.** Vision reads
+  attachments itself — PDF text (scans by OCR), Office files, rich text, the text
+  in a picture — and sends what the model can take: a model server never gets a
+  part it refuses ("file type not supported" is gone). A file too long for the
+  context window goes in parts the model reads with `read_attachment`. Chips say
+  how each file goes ("PDF · 40 pages · sent as text in 3 parts").
+- **Huge pastes.** A paste over 400 lines or 20,000 characters becomes a
+  "Pasted text" chip you can open and edit, the message box stays responsive,
+  long messages collapse in the transcript with **Show all**, and the transcript
+  scrolls freely.
+- **Prompts.** ⇧⌘H shows every prompt a chat sent and how it ended — completed,
+  finished with issues, needs you, failed, stopped — with its duration against
+  the estimate, the model it ran on and its evidence; **Copy**, **Add to
+  composer**, **Jump** and **Results** on each. ⌥⇧⌘H searches every chat. Kept
+  on disk; older chats are filled in from their transcripts.
+- **Tasks: the current work first, then what's queued.** ⇧⌘P shows the chat's
+  running `/goal` or prompt as its first task with its plan and the subagents on
+  each step. Press ↩ while the agent works (or ⌘↩ any time) to add the draft —
+  attachments and big pastes included — to the chat's tasks; they start by
+  themselves, in order, and you can reorder, edit, pause and run them again.
+- **A goal fixes what validation finds.** When a `/goal` says it's done but its
+  closing words report an error, it goes back to fix it — no retry cap by
+  default; it stops when two attempts in a row get nowhere.
+- **Background activity.** The bolt in the toolbar (⌥⌘A) lists every chat's
+  main agent and subagents with the model and server each runs on, what it was
+  given, its plan step, its log and its tokens. Subagents on another server now
+  use that server's own settings, and a hosted subagent server is used even when
+  its key can't list models.
+- **Code mode puts the chat first.** Toggle the file tree (⌘B), editor (⌥⌘E) and
+  terminal (⌃\`), or **Chat and Project Status Only** (⌥⌘↩): the chat in the
+  middle with the branch, changes, plan and what's queued beside it. Opening a
+  file brings the editor back.
+- **Screen control takes turns.** Clicks and typing go through Accessibility or
+  straight to the target app first, so your mouse stays yours; when a chat needs
+  the real mouse it waits its turn (and for you to stop moving it), the glow's
+  pill says who has it, and ⌃⌥⌘. stops every chat at once. `/control only <App>`
+  limits a chat to the apps it opened.
+- **Import & Export with OpenClaw.** Settings ▸ Import & Export brings the local
+  OpenClaw's skills, memory, keys and model servers into Vision, and sends
+  Vision's back (keys only after you confirm).
+- **Guardian sign-in, finished.** Sign in through the browser (Entra SSO,
+  passwordless), pick the organization, see your limits and when they reset,
+  use your "Usable in Vision" vault secrets, and upload or download code
+  projects (never `.env` files or keys). A refusal is a dialog that says what is
+  missing and who can grant it. Prompts go to your Guardian notebook masked
+  (vault secrets always, and what the sensitive-data shield masks), with how
+  they ended — or switch that off in Settings ▸ Guardian.
+
+## 0.15.0 — the app is now called Vision
 
 <!-- The one place these notes name the app's old name (users need to recognise it); keep it to this sentence. -->
 Vision was previously called DSH: the first launch of Vision brings its chats, settings, keys and vault over, so there is nothing to set up again.
