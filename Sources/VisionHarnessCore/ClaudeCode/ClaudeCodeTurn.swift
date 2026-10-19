@@ -57,12 +57,14 @@ public enum ClaudeCodeError: Error, LocalizedError, Equatable, Sendable {
     /// `--session-id` named a session that already exists.
     case sessionInUse
     case sensitiveChat
+    /// The folder has Claude Code settings of its own that this CLI can't leave out (the whole sentence).
+    case untrustedFolder(String)
     case failed(String)
 
     /// Another try can't fix it without the person (install, sign in, wait for the plan, change the chat).
     public var isPermanent: Bool {
         switch self {
-        case .notInstalled, .couldNotStart, .notSignedIn, .rateLimited, .sensitiveChat: true
+        case .notInstalled, .couldNotStart, .notSignedIn, .rateLimited, .sensitiveChat, .untrustedFolder: true
         case .sessionNotFound, .sessionInUse, .failed: false
         }
     }
@@ -77,6 +79,7 @@ public enum ClaudeCodeError: Error, LocalizedError, Equatable, Sendable {
         case .sessionNotFound: "Claude Code no longer has this chat's session."
         case .sessionInUse: "Claude Code already has a session with this chat's id."
         case .sensitiveChat: ClaudeCodeTurn.sensitiveRefusal
+        case .untrustedFolder(let why): why
         case .failed(let why): why
         }
     }
@@ -126,6 +129,9 @@ public enum ClaudeCodeTurn {
                            decide: @escaping @Sendable (ClaudeCodePermissionRequest) async -> ClaudeCodePermissionDecision,
                            onEvent: @escaping @Sendable (ClaudeCodeEvent) -> Void) async throws -> ClaudeCodeTurnOutcome {
         let parser = LockedParser(ClaudeCodeStreamParser(workspace: workspace))
+        // Questions still waiting for an answer (the person's card): cancelled — and so answered no, card gone — once
+        // their answer can no longer reach Claude Code.
+        let pending = PendingDecisions()
         let exit: ClaudeCodeExit
         do {
             exit = try await launcher.launch(
@@ -137,7 +143,9 @@ public enum ClaudeCodeTurn {
                 for event in events {
                     switch event {
                     case .permission(let request):
-                        Task {
+                        // Standard input is closed (the reply is in): no answer could reach it, so nobody is asked.
+                        guard !channel.inputClosed, !pending.isClosed else { continue }
+                        pending.start {
                             let decision = await decide(request)
                             switch decision {
                             case .allow:
@@ -158,14 +166,18 @@ public enum ClaudeCodeTurn {
                 // The reply is in: let it finish (and wait for any background work it started) and exit.
                 if firstResult {
                     channel.closeInput()
+                    pending.cancelAll()
                     DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
                         if !parser.ended { onEvent(.activity("Claude Code is finishing work it started in the background…")) }
                     }
                 }
             }
         } catch {
+            await pending.finish()
             throw ClaudeCodeError.couldNotStart(error.localizedDescription)
         }
+        // The process is gone: a question still up can never be answered — take its card down before returning.
+        await pending.finish()
         parser.end()
         for event in parser.finish() { onEvent(event) }
         for event in parser.closeDangling(exit.interrupted ? "Stopped before it finished" : "Not finished — Claude Code ended the turn first") {
@@ -213,6 +225,41 @@ public enum ClaudeCodeTurn {
     static func firstLines(_ text: String) -> String {
         let lines = text.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.prefix(3)
         return ClaudeCodeTools.prefix(lines.joined(separator: " "), 400)
+    }
+
+    /// The permission questions of one turn being decided (each may wait for the person). Once their answers can't
+    /// be delivered — standard input closed, the process gone — they are cancelled, which answers a waiting card no.
+    final class PendingDecisions: @unchecked Sendable {
+        private let lock = NSLock()
+        private var tasks: [Task<Void, Never>] = []
+        private var closed = false
+
+        func start(_ work: @escaping @Sendable () async -> Void) {
+            let task = Task { await work() }
+            let late: Bool = lock.withLock {
+                if closed { return true }
+                tasks.append(task)
+                return false
+            }
+            if late { task.cancel() }
+        }
+
+        /// No more answers can be delivered.
+        var isClosed: Bool { lock.withLock { closed } }
+
+        func cancelAll() {
+            let all: [Task<Void, Never>] = lock.withLock {
+                closed = true
+                return tasks
+            }
+            all.forEach { $0.cancel() }
+        }
+
+        /// Cancel what is left and wait until each has answered.
+        func finish() async {
+            cancelAll()
+            for task in lock.withLock({ tasks }) { await task.value }
+        }
     }
 
     /// The parser behind a lock: lines arrive on the launcher's queue, the snapshot is read after the run.
@@ -331,6 +378,89 @@ public enum ClaudeCodeRecap {
         }
         guard !parts.isEmpty else { return nil }
         return header + "\n\n" + parts.reversed().joined(separator: "\n\n") + "\n\n" + footer
+    }
+}
+
+// MARK: - The shield on what Vision hands Claude Code
+
+/// Claude Code reads files and runs commands itself, so the sensitive-data shield can't stand between it and Anthropic
+/// the way it does for Vision's own engine. What Vision itself hands over is shielded: the recap of the chat so far
+/// is masked like any request to a model that isn't private (it is history, so nothing has to come back — and earlier
+/// turns may have been answered by a private model, unmasked); the new message and the text of its attachments have
+/// their secrets masked (and the vault's values), the other kinds left as the person wrote them, because Claude Code
+/// would write a placeholder into a file as it is — nothing can put the real value back for it. The same rules as
+/// Vision for Windows.
+public enum ClaudeCodeShield {
+    public struct Masked: Sendable, Equatable {
+        public var recap: String?
+        public var message: String
+        public var parts: [AttachmentWirePart]
+        /// Distinct values masked, by kind.
+        public var counts: [SensitiveCategory: Int]
+        /// Pictures or PDFs go as they are (the shield can't look into them).
+        public var unchecked: Bool
+    }
+
+    /// Put after the recap's header when something in it was masked.
+    public static let recapNote = "[Vision's sensitive-data shield replaced some values in this recap with placeholders such as ⟦EMAIL_1⟧. The real values aren't available here — ask the person if you need one.]"
+
+    /// Said once per chat per launch when a chat with history moves onto Claude Code while the shield is on.
+    public static let notice = "The sensitive-data shield covers what Vision hands Claude Code — the chat so far, and secrets in your messages — but not what Claude Code reads or runs itself: that goes to Anthropic as it is."
+
+    /// What the turn sends, masked with `detector` (the shield's, nil = off: everything as it is). One set of
+    /// placeholders across the recap, the message and the attachments' text, so a value is the same placeholder in each.
+    public static func mask(recap: String?, message: String, parts: [AttachmentWirePart], detector: SensitiveDetector?) -> Masked {
+        let unchecked = parts.contains { if case .text = $0 { false } else { true } }
+        guard let detector else {
+            return Masked(recap: recap, message: message, parts: parts, counts: [:], unchecked: unchecked)
+        }
+        // Secrets everywhere first (one numbering), then everything else in the recap only.
+        var texts = [recap ?? "", message]
+        var textIndexes: [Int] = []
+        for (index, part) in parts.enumerated() {
+            if case .text(let text) = part {
+                textIndexes.append(index)
+                texts.append(text)
+            }
+        }
+        let (secretsMasked, secretCounts) = maskAll(texts, secretsOnly(detector))
+        var counts = secretCounts
+        var maskedRecap: String?
+        if let recap {
+            let (full, more) = maskAll([secretsMasked[0]], detector)
+            for (category, n) in more { counts[category, default: 0] += n }
+            maskedRecap = full[0]
+            if full[0] != recap {
+                maskedRecap = full[0].hasPrefix(ClaudeCodeRecap.header)
+                    ? ClaudeCodeRecap.header + "\n" + recapNote + full[0].dropFirst(ClaudeCodeRecap.header.count)
+                    : recapNote + "\n\n" + full[0]
+            }
+        }
+        var maskedParts = parts
+        for (offset, index) in textIndexes.enumerated() { maskedParts[index] = .text(secretsMasked[2 + offset]) }
+        return Masked(recap: maskedRecap, message: secretsMasked[1], parts: maskedParts, counts: counts.filter { $0.value > 0 },
+                      unchecked: unchecked)
+    }
+
+    /// The same detector looking for secrets only (and the vault's values, always).
+    static func secretsOnly(_ detector: SensitiveDetector) -> SensitiveDetector {
+        var settings = ShieldSettings()
+        settings.enabled = detector.settings.enabled && detector.settings.secrets
+        settings.secrets = true
+        settings.emails = false
+        settings.phones = false
+        settings.ids = false
+        settings.ips = false
+        settings.terms = false
+        settings.customTerms = []
+        return SensitiveDetector(settings: settings, vaultValues: detector.vaultValues)
+    }
+
+    private static func maskAll(_ texts: [String], _ detector: SensitiveDetector) -> ([String], [SensitiveCategory: Int]) {
+        guard detector.isActive else { return (texts, [:]) }
+        let request = LLMRequest(systemPrompt: "", messages: texts.map { LLMMessage.user($0) }, tools: [], model: "")
+        let result = Shield.mask(request, detector: detector)
+        return (result.request.messages.map { $0.content ?? "" }, result.map.counts)
     }
 }
 

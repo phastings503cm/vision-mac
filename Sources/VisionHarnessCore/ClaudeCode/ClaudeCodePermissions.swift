@@ -73,10 +73,15 @@ public enum ClaudeCodePermissions {
     public static let declined = "The person declined this in Vision. Don't retry it; carry on another way or say what you needed."
 
     /// Decide a permission question the way Vision's own engine decides the same call under the chat's preset: reads
-    /// and web fetches go ahead; writes go ahead inside the project (Workspace write) or always (Full access) and ask
-    /// otherwise; commands that only read go ahead, ones that could change something ask (Workspace write); anything
-    /// Vision doesn't know asks — except under Full access. A safety check Claude Code says needs a person always asks.
-    public static func decide(_ request: ClaudeCodePermissionRequest, policy: PermissionPolicy) -> ClaudeCodePermissionDecision {
+    /// inside the project (or `readRoots`, where Vision saved an attachment's text) and web fetches go ahead, reads
+    /// anywhere else ask (Claude Code reads inside its folders without asking, so a read question is always about a
+    /// file elsewhere — ~/.aws, ~/.ssh — and what it reads goes to Anthropic unmasked); writes go ahead inside the
+    /// project (Workspace write) or always (Full access) and ask otherwise; commands that only read go ahead, ones that
+    /// could change something — or that name a file in the home folder outside the project — ask (Workspace write);
+    /// anything Vision doesn't know asks. Full access says yes to all of it. A safety check Claude Code says needs a
+    /// person always asks.
+    public static func decide(_ request: ClaudeCodePermissionRequest, policy: PermissionPolicy,
+                              readRoots: [URL] = []) -> ClaudeCodePermissionDecision {
         let tool = request.toolName
         let input = request.input
         let visionName = ClaudeCodeTools.visionName(tool)
@@ -104,9 +109,18 @@ public enum ClaudeCodePermissions {
             detail = "\(policy.preset == .plan ? "Write" : "Write outside the project"): \(policy.resolve(raw).url.path)"
         case "Bash", "PowerShell":
             let command = input?["command"]?.string ?? ""
-            decision = policy.checkShell(command: command)
+            decision = policy.preset == .workspaceWrite && namesPrivatePath(command, policy: policy, readRoots: readRoots)
+                ? .ask : policy.checkShell(command: command)
             detail = "Run command: \(command)"
-        case "Read", "Glob", "Grep", "LS", "WebFetch", "WebSearch", "TodoWrite", "Task", "Agent", "Skill",
+        case "Read", "Glob", "Grep", "LS", "NotebookRead":
+            if let target = readTarget(tool, input), !isInside(target, policy: policy, readRoots: readRoots) {
+                decision = policy.preset == .fullAccess ? .proceed : .ask
+                detail = "Read outside the project: \(policy.resolve(target).url.path)"
+            } else {
+                decision = .proceed
+                detail = ""
+            }
+        case "WebFetch", "WebSearch", "TodoWrite", "Task", "Agent", "Skill",
              "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskOutput", "ToolSearch":
             decision = .proceed
             detail = ""
@@ -122,6 +136,57 @@ public enum ClaudeCodePermissions {
             return .ask(name: visionName, detail: what + why)
         }
         return .allow
+    }
+
+    // MARK: Where a read goes
+
+    /// The path a read tool names (nil = Claude Code's working folder). A Glob with no `path` but a pattern that
+    /// starts outside it ("/Users/me/.ssh/*", "~/.aws/*", "../other/**") reads the folder its pattern starts in.
+    static func readTarget(_ tool: String, _ input: JSONValue?) -> String? {
+        func value(_ key: String) -> String? {
+            input?[key]?.string.flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
+        }
+        switch tool {
+        case "Read": return value("file_path")
+        case "NotebookRead": return value("notebook_path") ?? value("file_path")
+        case "Glob":
+            if let path = value("path") { return path }
+            guard let pattern = value("pattern"),
+                  pattern.hasPrefix("/") || pattern.hasPrefix("~") || pattern == ".." || pattern.hasPrefix("../") else { return nil }
+            let fixed = pattern.split(separator: "/", omittingEmptySubsequences: false)
+                .prefix { !$0.contains(where: { "*?[{".contains($0) }) }
+            let folder = fixed.joined(separator: "/")
+            return folder.isEmpty ? "/" : folder
+        default: return value("path")
+        }
+    }
+
+    /// `raw` (relative to the project, `~/…` or absolute) is inside the project or one of `readRoots`, symbolic links
+    /// resolved — a link in the project that points out of it is outside.
+    static func isInside(_ raw: String, policy: PermissionPolicy, readRoots: [URL]) -> Bool {
+        let real = ClaudeCodeTrust.realPath(policy.resolve(raw).url.path)
+        return ([policy.workspaceRoot] + readRoots).contains { ClaudeCodeTrust.contains(ClaudeCodeTrust.realPath($0.path), real) }
+    }
+
+    /// The command names a file in the home folder outside the project and `readRoots` (`cat ~/.aws/credentials`,
+    /// `$HOME/.ssh/id_ed25519`, `../../.config/x`): Claude Code asks about such commands, and "it only reads" is no
+    /// reason to say yes to those.
+    static func namesPrivatePath(_ command: String, policy: PermissionPolicy, readRoots: [URL]) -> Bool {
+        let home = NSHomeDirectory()
+        let realHome = ClaudeCodeTrust.realPath(home)
+        let separators = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ";|&()<>\"'`="))
+        for piece in command.components(separatedBy: separators) where !piece.isEmpty {
+            var token = piece
+            for prefix in ["${HOME}", "$HOME"] where token == prefix || token.hasPrefix(prefix + "/") {
+                token = home + token.dropFirst(prefix.count)
+            }
+            guard token.hasPrefix("/") || token.hasPrefix("~") || token == ".." || token.contains("../") || token.hasSuffix("/..") else {
+                continue
+            }
+            let real = ClaudeCodeTrust.realPath(policy.resolve(token).url.path)
+            if ClaudeCodeTrust.contains(realHome, real), !isInside(real, policy: policy, readRoots: readRoots) { return true }
+        }
+        return false
     }
 
     static func stripANSI(_ text: String) -> String {

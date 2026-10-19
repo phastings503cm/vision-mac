@@ -9,7 +9,9 @@ import VisionHarnessCore
 // `apply` as every engine event, so run phases, the ETA, the Prompts timeline, /goal and the task queue all work on it
 // unchanged; Claude Code's permission questions are answered with the chat's preset (asking the person on the same card
 // Vision's own engine uses); Stop interrupts the turn. The CLI does all the talking with the person's own sign-in —
-// Vision never reads it. Vision for Windows does the same (AgentHost.ClaudeCode.cs).
+// Vision never reads it. A folder's own Claude Code settings (hooks, MCP servers, CLAUDE.md) load only when the person
+// trusted it in Claude Code (`ClaudeCodeTrust`), and what Vision hands over — the recap, the message — goes through
+// the sensitive-data shield (`ClaudeCodeShield`). Vision for Windows does the same (AgentHost.ClaudeCode.cs).
 
 extension AppTransport {
     /// One turn on Claude Code. The user's row is already in the chat; this runs `claude -p` and returns what the goal
@@ -39,6 +41,24 @@ extension AppTransport {
             markUndelivered(vm, entryID: userEntryID)
             throw CancellationError()
         }
+        let environment = ClaudeCodeEnvironment.environment(for: install.path, base: ProcessInfo.processInfo.environment)
+        // The folder's own settings only when the person trusted it in Claude Code: headless, the CLI would run its hooks
+        // and MCP servers without asking.
+        let folder = ClaudeCodeTrust.settings(for: workspace, install: install,
+                                              trusted: claudeCode.isTrusted(workspace, environment))
+        switch folder {
+        case .cantSkip(let files):
+            markUndelivered(vm, entryID: userEntryID)
+            throw ClaudeCodeError.untrustedFolder(ClaudeCodeTrust.cantSkipMessage(version: install.version, files: files))
+        case .userOnly(let files):
+            if !files.isEmpty, claudeCode.trustNoted.insert(sessionID).inserted {
+                let text = ClaudeCodeTrust.skippedNotice(files)
+                vm.note(text)
+                log.recordItem(sessionID, kind: "notice", text: text, toolName: nil, argSummary: nil, output: nil, isError: false)
+            }
+        case .trusted:
+            break
+        }
 
         // Attachments: pictures and PDFs go as themselves; a long file goes in parts, and Claude Code reads the rest of it
         // from where Vision saved it (it has no read_attachment tool).
@@ -61,31 +81,47 @@ extension AppTransport {
         let stored = log.claudeSession(sessionID)
         var session = stored.session
         var lastCost = stored.cost
-        var message = modelText
-        if vm.goal != nil { message += "\n\n" + ClaudeCodeTurn.goalNote }
-        if !notes.isEmpty { message += "\n\n" + notes.joined(separator: "\n") }
-        let body = message
-        /// The chat before the new message (all of it, or only after `since`), as a recap in front of `text`.
-        func seeded(_ text: String, since: Date?) -> String {
+        var text = modelText
+        if vm.goal != nil { text += "\n\n" + ClaudeCodeTurn.goalNote }
+        if !notes.isEmpty { text += "\n\n" + notes.joined(separator: "\n") }
+        let body = text
+        let detector = ProviderClients.shield?.detector()
+        let rawParts = parts
+        /// The chat before the new message (all of it, or only after `since`) as a recap in front of the message, all of
+        /// it behind the shield (`ClaudeCodeShield`) — what it masked goes on the turn's answer like any route's.
+        func seeded(since: Date?) -> String {
             var before = Array(vm.entries.prefix { $0.id != userEntryID })
             if let since { before = before.filter { $0.at > since } }
-            return ClaudeCodeRecap.build(Self.replayMessages(before)).map { $0 + "\n\n" + text } ?? text
+            let masked = ClaudeCodeShield.mask(recap: ClaudeCodeRecap.build(Self.replayMessages(before)), message: body,
+                                               parts: rawParts, detector: detector)
+            parts = masked.parts
+            if detector != nil {
+                noteMasked(ShieldReport(route: Self.routeLabel(profile), counts: masked.counts, unchecked: masked.unchecked),
+                           sessionID: sessionID)
+                if masked.recap != nil, claudeCode.shieldNoted.insert(sessionID).inserted {
+                    vm.note(ClaudeCodeShield.notice)
+                    log.recordItem(sessionID, kind: "notice", text: ClaudeCodeShield.notice, toolName: nil, argSummary: nil,
+                                   output: nil, isError: false)
+                }
+            }
+            return masked.recap.map { $0 + "\n\n" + masked.message } ?? masked.message
         }
         var choice: ClaudeCodeSessionChoice
+        var message: String
         if let session {
             choice = .resume(session)
             // Turns on other models since it last spoke go along first (none when nothing happened in between).
-            message = seeded(body, since: stored.syncedAt ?? .distantPast)
+            message = seeded(since: stored.syncedAt ?? .distantPast)
         } else {
             choice = .new(UUID().uuidString.lowercased())
-            message = seeded(body, since: nil)
+            message = seeded(since: nil)
         }
         let policy = PermissionPolicy(preset: vm.preset, workspaceRoot: workspace)
-        let environment = ClaudeCodeEnvironment.environment(for: install.path, base: ProcessInfo.processInfo.environment)
+        let readRoots = addDirs.map { URL(fileURLWithPath: $0) }
         let rules = ModelRequestRules.for(profile, model: profile.model)
         let effort = (vm.thinking ?? profile.thinking).flatMap { rules.effortWord($0) }
         let decide: @Sendable (ClaudeCodePermissionRequest) async -> ClaudeCodePermissionDecision = { [weak self] request in
-            let decision = ClaudeCodePermissions.decide(request, policy: policy)
+            let decision = ClaudeCodePermissions.decide(request, policy: policy, readRoots: readRoots)
             guard case .ask(let name, let detail) = decision else { return decision }
             let allowed = await self?.askGate(sessionID: sessionID, gateID: request.toolUseID ?? request.requestID,
                                               name: name, detail: detail) ?? false
@@ -97,7 +133,8 @@ extension AppTransport {
         while true {
             attempts += 1
             let invocation = ClaudeCodeInvocation(model: profile.model, effort: effort, preset: vm.preset, session: choice,
-                                                  appendSystemPrompt: ClaudeCodeTurn.systemNote, addDirs: addDirs)
+                                                  appendSystemPrompt: ClaudeCodeTurn.systemNote, addDirs: addDirs,
+                                                  projectSettings: folder.loadsProjectSettings)
             // Events are applied on the main actor, in order, and all of them before the turn is wrapped up.
             let (events, sink) = AsyncStream<ClaudeCodeEvent>.makeStream()
             let consumer = Task { @MainActor [weak self] in
@@ -131,7 +168,7 @@ extension AppTransport {
             session = nil
             lastCost = nil
             choice = .new(UUID().uuidString.lowercased())
-            message = seeded(body, since: nil)
+            message = seeded(since: nil)
         }
         // Switching this chat to another model later: it rebuilds its transcript from the rows, Claude Code's turns included.
         transcripts[sessionID] = nil
@@ -160,6 +197,11 @@ extension AppTransport {
             throw failure
         }
 
+        // What the shield masked goes on the turn's last answer.
+        if let pending = vm.pendingMask, let answer = vm.currentAnswerID {
+            vm.masked[answer] = pending
+            vm.pendingMask = nil
+        }
         let usage = outcome.usage ?? outcome.result?.usage
         vm.lastUsage = usage
         if let usage {
@@ -192,6 +234,12 @@ extension AppTransport {
             return
         }
         let workspace = vm.workspaceURL ?? scratchFolder(for: vm, create: true)
+        let environment = ClaudeCodeEnvironment.environment(for: install.path, base: ProcessInfo.processInfo.environment)
+        let folder = ClaudeCodeTrust.settings(for: workspace, install: install, trusted: claudeCode.isTrusted(workspace, environment))
+        if case .cantSkip(let files) = folder {
+            vm.note(ClaudeCodeTrust.cantSkipMessage(version: install.version, files: files), role: .error)
+            return
+        }
         let command = "/compact" + ((focus ?? "").trimmingCharacters(in: .whitespaces).isEmpty ? "" : " " + focus!.trimmingCharacters(in: .whitespaces))
         let (events, sink) = AsyncStream<ClaudeCodeEvent>.makeStream()
         let consumer = Task { @MainActor [weak self] in
@@ -204,9 +252,9 @@ extension AppTransport {
             }
         }
         let outcome = try? await ClaudeCodeTurn.run(
-            install: install, invocation: ClaudeCodeInvocation(model: profile.model, preset: vm.preset, session: .resume(session)),
-            message: ClaudeCodeInput.line(text: command), workspace: workspace,
-            environment: ClaudeCodeEnvironment.environment(for: install.path, base: ProcessInfo.processInfo.environment),
+            install: install, invocation: ClaudeCodeInvocation(model: profile.model, preset: vm.preset, session: .resume(session),
+                                                               projectSettings: folder.loadsProjectSettings),
+            message: ClaudeCodeInput.line(text: command), workspace: workspace, environment: environment,
             launcher: claudeCode.launcher, decide: { _ in .deny(ClaudeCodePermissions.declined) }) { sink.yield($0) }
         sink.finish()
         await consumer.value

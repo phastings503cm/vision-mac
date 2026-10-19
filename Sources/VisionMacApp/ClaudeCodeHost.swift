@@ -26,6 +26,12 @@ public final class ClaudeCodeHost {
     @ObservationIgnored var announced: Set<String> = []
     /// Chats told this launch that an API key pays instead of the Claude plan.
     @ObservationIgnored var keyNoted: Set<String> = []
+    /// Chats told this launch that their folder's own Claude Code settings are left out.
+    @ObservationIgnored var trustNoted: Set<String> = []
+    /// Chats told this launch what the sensitive-data shield covers on Claude Code.
+    @ObservationIgnored var shieldNoted: Set<String> = []
+    /// Whether the person trusted a folder in Claude Code (its own record in ~/.claude.json); tests replace it.
+    @ObservationIgnored var isTrusted: @Sendable (URL, [String: String]) -> Bool = { ClaudeCodeTrust.isTrusted($0, environment: $1) }
 
     public init() {}
 

@@ -44,6 +44,8 @@ final class ClaudeCodeChatTests: XCTestCase {
         transport.goalErrorBackoff = { _ in 0.05 }
         transport.claudeCode.installOverride = ClaudeCodeInstall(path: cli.appendingPathComponent("claude").path, version: "2.1.299",
                                                                  flags: Self.flags, commands: ["auth"])
+        // Not the person's own ~/.claude.json: no folder is trusted unless a test says so.
+        transport.claudeCode.isTrusted = { _, _ in false }
     }
 
     override func tearDown() async throws {
@@ -65,6 +67,9 @@ final class ClaudeCodeChatTests: XCTestCase {
         n=$(cat "$d/count" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$d/count"
         : > "$d/args-$n"; for a in "$@"; do printf '%s\\n' "$a" >> "$d/args-$n"; done
         IFS= read -r first; printf '%s\\n' "$first" > "$d/stdin-$n"
+        if [ -f "$d/ask-and-die" ]; then
+          cat "$d/ask-and-die"; echo "it crashed" >&2; exit 3
+        fi
         if [ -f "$d/ask" ]; then
           cat "$d/ask"
           IFS= read -r answer; printf '%s\\n' "$answer" > "$d/answer-$n"
@@ -349,6 +354,82 @@ final class ClaudeCodeChatTests: XCTestCase {
         XCTAssertTrue(texts(vm, .notice).contains("Stopped."), "\(texts(vm, .notice))")
         XCTAssertEqual(vm.promptHistory.last?.outcome, .stopped)
         XCTAssertEqual(transport.log.claudeSession(vm.id).session, "S", "the session it opened is kept")
+    }
+
+    func testAFoldersOwnSettingsLoadOnlyWhenTrustedInClaudeCode() async throws {
+        // A cloned repository's MCP servers (or hooks): headless, Claude Code would start them without asking anyone.
+        try "{}".write(to: dir.appendingPathComponent(".mcp.json"), atomically: true, encoding: .utf8)
+        let claude = cli.appendingPathComponent("claude").path
+        transport.claudeCode.installOverride = ClaudeCodeInstall(path: claude, version: "2.1.299",
+                                                                 flags: Self.flags.union(["--setting-sources"]), commands: ["auth"])
+        await transport.claudeCode.refresh()
+        let vm = transport.newSession(cwd: dir.path)
+        try setOutput(turn("Done."))
+        try await send("look around", to: vm)
+        let first = try args(1)
+        XCTAssertEqual(first[try XCTUnwrap(first.firstIndex(of: "--setting-sources")) + 1], "user", "only the person's own settings")
+        let notice = ClaudeCodeTrust.skippedNotice([".mcp.json"])
+        XCTAssertTrue(texts(vm, .notice).contains(notice), "\(texts(vm, .notice))")
+        try await send("again", to: vm)
+        XCTAssertTrue(try args(2).contains("--setting-sources"))
+        XCTAssertEqual(texts(vm, .notice).filter { $0 == notice }.count, 1, "said once")
+
+        // Trusted in Claude Code itself: the folder's own settings load, as they would in a terminal.
+        transport.claudeCode.isTrusted = { _, _ in true }
+        try await send("and now", to: vm)
+        XCTAssertFalse(try args(3).contains("--setting-sources"))
+
+        // A CLI that can't leave them out never runs in a folder that has them and isn't trusted.
+        transport.claudeCode.isTrusted = { _, _ in false }
+        transport.claudeCode.installOverride = ClaudeCodeInstall(path: claude, version: "2.1.299", flags: Self.flags, commands: ["auth"])
+        await transport.claudeCode.refresh()
+        try await send("one more", to: vm)
+        XCTAssertEqual(runs(), 3, "the claude command didn't run")
+        XCTAssertTrue(texts(vm, .error).contains(ClaudeCodeTrust.cantSkipMessage(version: "2.1.299", files: [".mcp.json"])),
+                      "\(texts(vm, .error))")
+        XCTAssertTrue(texts(vm, .notice).contains("Not delivered to the model: one more"))
+    }
+
+    func testAQuestionStillOpenWhenClaudeCodeEndsIsAnsweredNoAndGoesAway() async throws {
+        let vm = transport.newSession(cwd: dir.path)
+        // Claude Code asks, then dies before anyone answers: the card must not outlive the turn (it would hold the
+        // chat's task queue, and its answer could only go to a closed pipe).
+        try (#"{"type":"control_request","request_id":"req-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"rm -rf build"},"tool_use_id":"toolu_q"}}"#
+             + "\n").write(to: cli.appendingPathComponent("ask-and-die"), atomically: true, encoding: .utf8)
+        try setOutput(turn("never"))
+        try await send("clean the build", to: vm)
+        XCTAssertTrue(vm.pendingGates.isEmpty, "\(vm.pendingGates)")
+        XCTAssertTrue(texts(vm, .error).contains { $0.hasPrefix("Claude Code stopped without answering") }, "\(texts(vm, .error))")
+
+        // The next turn runs normally (nothing waits on the old question).
+        try FileManager.default.removeItem(at: cli.appendingPathComponent("ask-and-die"))
+        try setOutput(turn("Cleaned."))
+        try await send("try again", to: vm)
+        XCTAssertEqual(texts(vm, .assistant).last, "Cleaned.")
+        XCTAssertTrue(vm.pendingGates.isEmpty)
+    }
+
+    func testWhatVisionHandsClaudeCodeGoesThroughTheShield() async throws {
+        ProviderClients.shield = ShieldPolicy()
+        defer { ProviderClients.shield = nil }
+        let key = "sk-ant-api03-" + String(repeating: "Qq11", count: 6)
+        let vm = transport.newSession(cwd: dir.path)
+        // An earlier turn on another model…
+        transport.setRoute(transport.config.providers[1].routeID, for: vm)
+        try await send("Mail pat@example.com the report", to: vm)
+        // …goes to Claude Code as a masked recap; the new message keeps the address (Claude Code may need to write it)
+        // but not the key.
+        transport.setRoute(transport.config.providers[0].routeID, for: vm)
+        try setOutput(turn("Sent."))
+        try await send("Now use \(key) for pat@example.com", to: vm)
+        let sent = try prompt(1)
+        XCTAssertTrue(sent.hasPrefix(ClaudeCodeRecap.header + "\n" + ClaudeCodeShield.recapNote + "\n\n"), sent)
+        XCTAssertTrue(sent.contains("Person: Mail ⟦EMAIL_1⟧ the report"), sent)
+        XCTAssertTrue(sent.hasSuffix(ClaudeCodeRecap.footer + "\n\nNow use ⟦SECRET_1⟧ for pat@example.com"), sent)
+        XCTAssertFalse(sent.contains(key))
+        XCTAssertTrue(texts(vm, .notice).contains(ClaudeCodeShield.notice), "\(texts(vm, .notice))")
+        let answer = try XCTUnwrap(vm.currentAnswerID)
+        XCTAssertEqual(vm.masked[answer]?.counts, [.secret: 1, .email: 1], "the shield chip on the answer says what")
     }
 
     func testAddingClaudeCodeFromTheCard() {

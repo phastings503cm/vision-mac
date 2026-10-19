@@ -1318,21 +1318,31 @@ public final class AppTransport {
         let gateID = "\(callID)#\(UUID().uuidString)"
         vm.pendingGates.append(.init(id: gateID, name: name, detail: detail))
         let isQueue = queueSessions[sessionID] != nil
-        let decision: Bool = await withCheckedContinuation { continuation in
-            gates[gateID] = (continuation, sessionID)
-            if isQueue {
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
-                    guard let entry = self.gates[gateID] else { return } // answered or cancelled
-                    self.gates[gateID] = nil
-                    self.sessions.first { $0.id == sessionID }?.pendingGates.removeAll { $0.id == gateID }
-                    if let v = self.sessions.first(where: { $0.id == sessionID }) {
-                        v.note("Permission for \(name) auto-denied after 5 minutes — queue tasks run unattended. "
-                               + "To allow it, change the permission preset (or the command allowlist) in Settings, "
-                               + "then Resume the task.", role: .error)
+        // A cancelled caller (a Claude Code turn whose process ended, so the answer can't reach it) answers no and
+        // takes the card down.
+        let decision: Bool = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                gates[gateID] = (continuation, sessionID)
+                if isQueue {
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
+                        guard let entry = self.gates[gateID] else { return } // answered or cancelled
+                        self.gates[gateID] = nil
+                        self.sessions.first { $0.id == sessionID }?.pendingGates.removeAll { $0.id == gateID }
+                        if let v = self.sessions.first(where: { $0.id == sessionID }) {
+                            v.note("Permission for \(name) auto-denied after 5 minutes — queue tasks run unattended. "
+                                   + "To allow it, change the permission preset (or the command allowlist) in Settings, "
+                                   + "then Resume the task.", role: .error)
+                        }
+                        entry.cont.resume(returning: false)
                     }
-                    entry.cont.resume(returning: false)
                 }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                guard let self, let entry = self.gates[gateID] else { return } // answered already
+                self.gates[gateID] = nil
+                entry.cont.resume(returning: false)
             }
         }
         gates[gateID] = nil
@@ -2860,7 +2870,7 @@ public final class AppTransport {
     /// What the shield masked for a request in this chat: a chip on the turn's answer (and, the first time a
     /// picture or a file that isn't plain text goes to a model that isn't private, a word that those can't be
     /// checked).
-    private func noteMasked(_ report: ShieldReport, sessionID: String) {
+    func noteMasked(_ report: ShieldReport, sessionID: String) {
         guard let vm = sessions.first(where: { $0.id == sessionID }) else { return }
         if report.unchecked, !vm.toldAboutUnchecked {
             vm.toldAboutUnchecked = true

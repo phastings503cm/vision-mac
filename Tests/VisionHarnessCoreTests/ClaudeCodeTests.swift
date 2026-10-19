@@ -232,8 +232,8 @@ final class ClaudeCodeTests: XCTestCase {
     }
 
     func testPermissionQuestionsAreDecidedLikeVisionsOwnEngine() {
-        // Workspace write: reads, edits inside, read-only commands go ahead; the rest asks.
-        XCTAssertEqual(ask("Read", ["file_path": "/etc/hosts"]), .allow)
+        // Workspace write: reads and edits inside, read-only commands go ahead; the rest asks.
+        XCTAssertEqual(ask("Read", ["file_path": "/tmp/project/notes.md"]), .allow)
         XCTAssertEqual(ask("Edit", ["file_path": "/tmp/project/a.swift"]), .allow)
         XCTAssertEqual(ask("Write", ["file_path": "/Users/me/elsewhere.txt"]),
                        .ask(name: "write_file", detail: "Write outside the project: /Users/me/elsewhere.txt"))
@@ -256,6 +256,192 @@ final class ClaudeCodeTests: XCTestCase {
         XCTAssertEqual(ask("AskUserQuestion", [:]), .deny(ClaudeCodePermissions.askInReply))
     }
 
+    func testAReadOutsideTheProjectAsks() throws {
+        // Claude Code asks only about reads outside its folders — ~/.aws, ~/.ssh — and what it reads goes to Anthropic.
+        let home = NSHomeDirectory()
+        XCTAssertEqual(ask("Read", ["file_path": "~/.aws/credentials"]),
+                       .ask(name: "read_file", detail: "Read outside the project: \(home)/.aws/credentials"))
+        XCTAssertEqual(ask("Read", ["file_path": "/etc/hosts"]), .ask(name: "read_file", detail: "Read outside the project: /etc/hosts"))
+        XCTAssertEqual(ask("Read", ["file_path": "../other/secret.txt"]),
+                       .ask(name: "read_file", detail: "Read outside the project: /tmp/other/secret.txt"))
+        XCTAssertEqual(ask("Grep", ["pattern": "AKIA", "path": "~/.ssh"]),
+                       .ask(name: "grep", detail: "Read outside the project: \(home)/.ssh"))
+        XCTAssertEqual(ask("Glob", ["pattern": "~/.ssh/id_*"]), .ask(name: "glob", detail: "Read outside the project: \(home)/.ssh"))
+        XCTAssertEqual(ask("Glob", ["pattern": "/**/*.pem"]), .ask(name: "glob", detail: "Read outside the project: /"))
+        XCTAssertEqual(ask("Glob", ["pattern": "../other/**/*.env"]), .ask(name: "glob", detail: "Read outside the project: /tmp/other"))
+        XCTAssertEqual(ask("LS", ["path": "/Users"]), .ask(name: "list_directory", detail: "Read outside the project: /Users"))
+        // Inside the project (relative, absolute, a pattern with no path) goes ahead.
+        XCTAssertEqual(ask("Glob", ["pattern": "**/*.swift"]), .allow)
+        XCTAssertEqual(ask("Grep", ["pattern": "TODO"]), .allow)
+        XCTAssertEqual(ask("Read", ["file_path": "Sources/a.swift"]), .allow)
+        XCTAssertEqual(ask("Glob", ["pattern": "/tmp/project/**/*.md"]), .allow)
+        // Plan only asks too; Full access says yes.
+        XCTAssertEqual(ask("Read", ["file_path": "/etc/hosts"], preset: .plan), .ask(name: "read_file", detail: "Read outside the project: /etc/hosts"))
+        XCTAssertEqual(ask("Read", ["file_path": "/etc/hosts"], preset: .fullAccess), .allow)
+        // Where Vision saved an attachment's text is readable without asking.
+        let store = URL(fileURLWithPath: "/tmp/vision-attachments/chat-1")
+        XCTAssertEqual(ClaudeCodePermissions.decide(ClaudeCodePermissionRequest(requestID: "r", toolName: "Read",
+                                                                                input: ["file_path": "/tmp/vision-attachments/chat-1/a.txt"]),
+                                                    policy: PermissionPolicy(preset: .workspaceWrite, workspaceRoot: workspace),
+                                                    readRoots: [store]), .allow)
+
+        // A symbolic link in the project that points out of it is outside; /tmp and /private/tmp are the same place.
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let project = dir.appendingPathComponent("proj"), outside = dir.appendingPathComponent("outside")
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: project.appendingPathComponent("escape"), withDestinationURL: outside)
+        let policy = PermissionPolicy(preset: .workspaceWrite, workspaceRoot: project)
+        func read(_ path: String) -> ClaudeCodePermissionDecision {
+            ClaudeCodePermissions.decide(ClaudeCodePermissionRequest(requestID: "r", toolName: "Read", input: ["file_path": .string(path)]),
+                                         policy: policy)
+        }
+        XCTAssertNotEqual(read(project.appendingPathComponent("escape/key.pem").path), .allow)
+        XCTAssertEqual(read(project.appendingPathComponent("a.txt").path), .allow)
+        XCTAssertEqual(read(ClaudeCodeTrust.realPath(project.path) + "/new/file.txt"), .allow, "the real path of the project")
+    }
+
+    func testACommandNamingAFileInTheHomeFolderAsks() {
+        for command in ["cat ~/.aws/credentials", "head -5 $HOME/.ssh/id_ed25519", "cat \"${HOME}/.netrc\"",
+                        "grep -r token ../../../../..\(NSHomeDirectory())/.config", "ls ~", "base64 < ~/.ssh/id_rsa"] {
+            XCTAssertEqual(ask("Bash", ["command": .string(command)]),
+                           .ask(name: "run_shell_command", detail: "Run command: \(command)"), command)
+            XCTAssertEqual(ask("Bash", ["command": .string(command)], preset: .fullAccess), .allow, command)
+        }
+        for command in ["ls -la", "cat README.md", "grep -rn TODO Sources", "ls /usr/local/bin", "git log -3",
+                        "cat /tmp/project/notes.md", "wc -l ./a.swift"] {
+            XCTAssertEqual(ask("Bash", ["command": .string(command)]), .allow, command)
+        }
+    }
+
+    func testAMessagesPicturesAndPDFsStayWithinItsTotals() {
+        func kinds(_ parts: [AttachmentWirePart]) -> [String] {
+            parts.map { part in
+                switch part {
+                case .text: "text"
+                case .image: "image"
+                case .document: "document"
+                }
+            }
+        }
+        let two = AttachmentReader.digested(MessageAttachment(kind: .file, name: "two.pdf", data: AttachmentFixtures.textPDF(["One.", "Two."])))
+        let three = AttachmentReader.digested(MessageAttachment(kind: .file, name: "three.pdf",
+                                                                data: AttachmentFixtures.textPDF(["A.", "B.", "C."])))
+        XCTAssertEqual(two.digest?.pages, 2)
+        // PDF pages in all: the one that would pass the limit goes as its text (and one over it alone says so on its chip).
+        let pages = AttachmentRoute(vision: true, documents: true, maxDocumentPages: 4)
+        XCTAssertEqual(kinds(AttachmentWire.parts(for: [two, three], route: pages)), ["document", "text"])
+        XCTAssertEqual(AttachmentWire.delivery(three, route: AttachmentRoute(vision: true, documents: true, maxDocumentPages: 2)), .text)
+        // Bytes in all, pictures and PDFs together.
+        let png = AttachmentFixtures.png(of: "42")
+        let pictures = (1...3).map { MessageAttachment(kind: .image, name: "p\($0).png", data: png) }
+        let budget = AttachmentRoute(vision: true, documents: true, maxTotalBytes: png.count * 2 + 10)
+        XCTAssertEqual(kinds(AttachmentWire.parts(for: pictures, route: budget)), ["image", "image", "text"])
+        let mixed = AttachmentRoute(vision: true, documents: true, maxTotalBytes: two.data.count + png.count / 2)
+        XCTAssertEqual(kinds(AttachmentWire.parts(for: [two, pictures[0]], route: mixed)), ["document", "text"])
+        XCTAssertEqual(AttachmentWire.delivery(two, route: AttachmentRoute(vision: true, documents: true, maxTotalBytes: 10)), .text)
+        // Claude Code's own limits.
+        let route = ClaudeCodeInput.attachmentRoute
+        XCTAssertEqual(route.maxImages, 20)
+        XCTAssertEqual(route.maxDocuments, 5)
+        XCTAssertEqual(route.maxDocumentPages, 100)
+        XCTAssertEqual(route.maxTotalBytes, 12 * 1024 * 1024)
+        XCTAssertLessThanOrEqual(route.maxImageBytes ?? .max, 5 * 1024 * 1024 * 3 / 4, "an image's 5 MB is counted on its base64")
+    }
+
+    // MARK: - Whose settings a turn loads
+
+    func testOnlyAFolderTrustedInClaudeCodeLoadsItsOwnSettings() throws {
+        let home = "/Users/me"
+        func trusted(_ folder: String, _ projects: [String: Bool]) -> Bool {
+            let config: [String: Any] = ["projects": projects.mapValues { ["hasTrustDialogAccepted": $0, "allowedTools": []] }]
+            return ClaudeCodeTrust.isTrusted(URL(fileURLWithPath: folder), config: try? JSONSerialization.data(withJSONObject: config),
+                                             home: home)
+        }
+        XCTAssertTrue(trusted("/Users/me/code/app", ["/Users/me/code/app": true]))
+        XCTAssertTrue(trusted("/Users/me/code/app/sub", ["/Users/me/code/app": true]), "a folder above it")
+        XCTAssertTrue(trusted("/Users/me/code/app/", ["/Users/me/code/app": true]))
+        XCTAssertFalse(trusted("/Users/me/code/app", ["/Users/me/code/app": false]))
+        XCTAssertFalse(trusted("/Users/me/code/app", ["/Users/me/code/other": true]))
+        XCTAssertFalse(trusted("/Users/me/code/app", ["/Users/me": true]), "never inherited from the home folder")
+        XCTAssertFalse(trusted("/Users/me/code/app", ["/": true]), "nor from /")
+        XCTAssertTrue(trusted("/Users/me", ["/Users/me": true]), "the home folder itself, when that is the chat's folder")
+        XCTAssertFalse(ClaudeCodeTrust.isTrusted(URL(fileURLWithPath: "/x"), config: Data("not json".utf8), home: home))
+        XCTAssertFalse(ClaudeCodeTrust.isTrusted(URL(fileURLWithPath: "/x"), config: nil, home: home))
+
+        // Claude Code's own config file, with the turn's environment.
+        XCTAssertEqual(ClaudeCodeTrust.configFile(environment: ["CLAUDE_CONFIG_DIR": "/cfg"], home: home).path, "/cfg/.claude.json")
+        XCTAssertEqual(ClaudeCodeTrust.configFile(environment: ["HOME": "/h"], home: home).path, "/h/.claude.json")
+        XCTAssertEqual(ClaudeCodeTrust.configFile(environment: [:], home: home).path, "/Users/me/.claude.json")
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let project = dir.appendingPathComponent("repo")
+        try FileManager.default.createDirectory(at: project.appendingPathComponent(".claude"), withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: ["projects": [ClaudeCodeTrust.realPath(project.path): ["hasTrustDialogAccepted": true]]])
+            .write(to: dir.appendingPathComponent(".claude.json"))
+        XCTAssertTrue(ClaudeCodeTrust.isTrusted(project, environment: ["CLAUDE_CONFIG_DIR": dir.path]),
+                      "the key is the real path (/private/var/…), the folder Vision's (/var/…)")
+        XCTAssertFalse(ClaudeCodeTrust.isTrusted(project, environment: ["HOME": dir.appendingPathComponent("nobody").path]))
+
+        // What a turn loads: a cloned repository's hooks and servers stay off unless trusted.
+        XCTAssertEqual(ClaudeCodeTrust.settings(for: project, install: everything, trusted: false), .userOnly(skipped: []))
+        try "{}".write(to: project.appendingPathComponent(".mcp.json"), atomically: true, encoding: .utf8)
+        try "{}".write(to: project.appendingPathComponent(".claude/settings.json"), atomically: true, encoding: .utf8)
+        try "# Notes".write(to: project.appendingPathComponent("CLAUDE.md"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(ClaudeCodeTrust.settings(for: project, install: everything, trusted: false),
+                       .userOnly(skipped: ["CLAUDE.md", ".claude/settings.json", ".mcp.json"]))
+        XCTAssertEqual(ClaudeCodeTrust.settings(for: project, install: everything, trusted: true), .trusted)
+        let old = ClaudeCodeInstall(path: "/x/claude", version: "1.0.20", flags: ["--print", "--output-format", "--input-format"])
+        XCTAssertEqual(ClaudeCodeTrust.settings(for: project, install: old, trusted: false),
+                       .cantSkip(skipped: ["CLAUDE.md", ".claude/settings.json", ".mcp.json"]))
+        XCTAssertEqual(ClaudeCodeTrust.skippedNotice(["CLAUDE.md", ".mcp.json"]),
+                       "Claude Code isn't using this folder's own settings (CLAUDE.md, .mcp.json): you haven't trusted the folder in Claude Code, so its hooks and MCP servers stay off. To use them, run  claude  once in this folder in a terminal and accept its trust question.")
+        XCTAssertEqual(ClaudeCodeTrust.cantSkipMessage(version: "1.0.20", files: [".mcp.json"]),
+                       "This folder has Claude Code settings of its own (.mcp.json), and Claude Code 1.0.20 can't be told to leave them out — their hooks and MCP servers would run without asking. Update it in a terminal (claude update), or trust the folder: run  claude  once in it and accept its trust question.")
+        XCTAssertTrue(ClaudeCodeError.untrustedFolder("x").isPermanent)
+    }
+
+    // MARK: - The shield on what Vision hands over
+
+    func testTheRecapIsMaskedAndTheMessageKeepsAllButSecrets() throws {
+        let key = "sk-ant-api03-" + String(repeating: "Qq11", count: 6)
+        let recap = try XCTUnwrap(ClaudeCodeRecap.build([.user("Mail pat@example.com the report, key \(key)"),
+                                                          LLMMessage(role: .assistant, content: "Sent to pat@example.com.")]))
+        let detector = SensitiveDetector(settings: ShieldSettings(), vaultValues: ["vault-value-123"])
+        let masked = ClaudeCodeShield.mask(recap: recap, message: "Now email pat@example.com with \(key) and vault-value-123",
+                                           parts: [.text("--- notes.md ---\ntoken \(key)"), .image(mime: "image/png", data: Data([1]))],
+                                           detector: detector)
+        let sentRecap = try XCTUnwrap(masked.recap)
+        XCTAssertTrue(sentRecap.hasPrefix(ClaudeCodeRecap.header + "\n" + ClaudeCodeShield.recapNote + "\n\nPerson: Mail ⟦EMAIL_1⟧ the report, key ⟦SECRET_1⟧"),
+                      sentRecap)
+        XCTAssertFalse(sentRecap.contains("pat@example.com"))
+        XCTAssertFalse(sentRecap.contains(key))
+        XCTAssertTrue(sentRecap.hasSuffix(ClaudeCodeRecap.footer))
+        // The person's new message keeps what Claude Code may need written as it is — only its secrets are masked, with
+        // the same placeholder as in the recap.
+        XCTAssertEqual(masked.message, "Now email pat@example.com with ⟦SECRET_1⟧ and ⟦SECRET_2⟧")
+        XCTAssertEqual(masked.parts, [.text("--- notes.md ---\ntoken ⟦SECRET_1⟧"), .image(mime: "image/png", data: Data([1]))])
+        XCTAssertEqual(masked.counts, [.secret: 2, .email: 1])
+        XCTAssertTrue(masked.unchecked, "a picture goes as it is")
+
+        // Nothing to mask: the recap as it was, no note. The shield off: everything as it is.
+        let plain = ClaudeCodeShield.mask(recap: "\(ClaudeCodeRecap.header)\n\nPerson: hi\n\n\(ClaudeCodeRecap.footer)", message: "go",
+                                          parts: [], detector: detector)
+        XCTAssertEqual(plain.recap, "\(ClaudeCodeRecap.header)\n\nPerson: hi\n\n\(ClaudeCodeRecap.footer)")
+        XCTAssertEqual(plain.counts, [:])
+        XCTAssertFalse(plain.unchecked)
+        let off = ClaudeCodeShield.mask(recap: recap, message: key, parts: [], detector: nil)
+        XCTAssertEqual(off.recap, recap)
+        XCTAssertEqual(off.message, key)
+        // Secrets switched off: the vault's values are still masked.
+        var noSecrets = ShieldSettings()
+        noSecrets.secrets = false
+        let vaultOnly = ClaudeCodeShield.mask(recap: nil, message: "\(key) vault-value-123", parts: [],
+                                              detector: SensitiveDetector(settings: noSecrets, vaultValues: ["vault-value-123"]))
+        XCTAssertEqual(vaultOnly.message, "\(key) ⟦SECRET_1⟧")
+    }
+
     // MARK: - The command line and stdin
 
     private let everything = ClaudeCodeInstall(path: "/usr/local/bin/claude", version: "2.1.299",
@@ -266,7 +452,7 @@ final class ClaudeCodeTests: XCTestCase {
         let parsed = ClaudeCodeInstall.parseHelp(ClaudeCodeFixtures.help)
         for flag in ["--print", "--output-format", "--input-format", "--include-partial-messages", "--verbose", "--model",
                      "--effort", "--permission-mode", "--session-id", "--resume", "--append-system-prompt", "--add-dir",
-                     "--system-prompt", "--tools", "--no-session-persistence"] {
+                     "--system-prompt", "--tools", "--no-session-persistence", "--setting-sources", "--strict-mcp-config"] {
             XCTAssertTrue(parsed.flags.contains(flag), flag)
         }
         XCTAssertTrue(parsed.commands.isSuperset(of: ["auth", "mcp", "update", "upgrade", "plugin", "plugins", "doctor"]))
@@ -281,11 +467,15 @@ final class ClaudeCodeTests: XCTestCase {
                                             appendSystemPrompt: "NOTE", addDirs: ["/tmp/att"]).arguments(for: everything), [
             "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
             "--model", "sonnet", "--effort", "high", "--permission-mode", "default", "--permission-prompt-tool", "stdio",
-            "--session-id", "1111", "--append-system-prompt", "NOTE", "--add-dir", "/tmp/att",
+            "--setting-sources", "user", "--session-id", "1111", "--append-system-prompt", "NOTE", "--add-dir", "/tmp/att",
         ])
         let plan = ClaudeCodeInvocation(model: "opus", preset: .plan, session: .resume("abc")).arguments(for: everything)
-        XCTAssertTrue(plan.joined(separator: " ").hasSuffix("--model opus --permission-mode plan --permission-prompt-tool stdio --resume abc"),
+        XCTAssertTrue(plan.joined(separator: " ").hasSuffix("--model opus --permission-mode plan --permission-prompt-tool stdio --setting-sources user --resume abc"),
                       plan.joined(separator: " "))
+        // A folder the person trusted in Claude Code: its own settings load, as in a terminal.
+        let trusted = ClaudeCodeInvocation(model: "opus", session: .resume("abc"), projectSettings: true).arguments(for: everything)
+        XCTAssertFalse(trusted.contains("--setting-sources"))
+        XCTAssertFalse(trusted.contains("--strict-mcp-config"))
         XCTAssertTrue(ClaudeCodeInvocation(model: "haiku", preset: .fullAccess).arguments(for: everything)
             .joined(separator: " ").contains("--permission-mode acceptEdits --permission-prompt-tool stdio"))
         XCTAssertFalse(ClaudeCodeInvocation(model: "default").arguments(for: everything).contains("--model"))
@@ -302,8 +492,11 @@ final class ClaudeCodeTests: XCTestCase {
 
     func testAOneShotSideTask() {
         let args = ClaudeCodeInvocation(model: "haiku", oneShotSystemPrompt: "Summarize.").arguments(for: everything)
-        XCTAssertEqual(Array(args.suffix(5)), ["--system-prompt", "Summarize.", "--tools", "", "--no-session-persistence"])
+        XCTAssertEqual(Array(args.suffix(8)), ["--setting-sources", "user", "--strict-mcp-config",
+                                               "--system-prompt", "Summarize.", "--tools", "", "--no-session-persistence"])
         XCTAssertFalse(args.contains("--permission-prompt-tool"))
+        XCTAssertTrue(ClaudeCodeInvocation(model: "haiku", oneShotSystemPrompt: "S.", projectSettings: true).arguments(for: everything)
+            .contains("--strict-mcp-config"), "a side task never loads anyone's servers")
     }
 
     func testWhatGoesDownStdin() throws {

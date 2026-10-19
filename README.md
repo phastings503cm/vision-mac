@@ -347,16 +347,26 @@ model menu.
   menu sets `--effort`; Claude Code's window comes from its own report.
 - Permissions: Claude Code asks Vision before each tool call that needs permission (`--permission-prompt-tool
   stdio`), and Vision answers with the chat's setting — *Plan only* → Claude Code's plan mode; *Workspace write* →
-  reads, edits inside the chat's folder and read-only commands go ahead, anything else asks you on the usual
-  permission card; *Full access* → everything goes ahead.
+  reads and edits inside the chat's folder and read-only commands go ahead, while reading files elsewhere (`~/.aws`,
+  `~/.ssh`), a command that names a file in your home folder outside the project, and anything else ask you on the
+  usual permission card; *Full access* → everything goes ahead. A question left open when the turn ends is answered
+  no and its card goes away.
+- A folder's own Claude Code settings — its `.claude/settings.json` hooks and `env`, the servers in its `.mcp.json`,
+  its `CLAUDE.md` — load only if you trusted the folder in Claude Code itself (`claude` in that folder, then yes to
+  its trust question). Otherwise Vision passes `--setting-sources user`: your own `~/.claude` settings and user MCP
+  servers apply, and the chat says once which of the folder's files were left out. (Headless, Claude Code would
+  otherwise run a cloned repository's hooks and servers without asking.)
 - Stop sends Claude Code's own interrupt (then ends the process if it doesn't stop). Run phases, the Prompts
   timeline, `/goal` (one `claude -p` per round), the task queue and `/compact` (Claude Code's own) all work. Your
   plan's limits show as they get close, and a used-up limit says when it resets.
 - A chat can move between Claude Code and any other model: the other model gets the conversation rebuilt from the
   chat (Claude Code's tool work included), and Claude Code gets what it missed as a recap on its next turn. A lost
   Claude Code session starts again with a recap of the chat so far.
-- Sensitive chats can't use Claude Code: it reads files itself, so the shield can't mask them. It is never a
-  subagent server or a backup (it runs its own agent and subagents).
+- Sensitive chats can't use Claude Code: it reads files itself, so the shield can't mask them. What Vision hands it
+  is shielded — the recap of the chat so far masked like any request, secrets (and your vault's values) masked in
+  your message and its attachments' text — and the shield under the reply says what. Pictures and PDFs go as
+  themselves (up to 20 pictures of 3.75 MB and 5 PDFs of 100 pages, 12 MB in all per message; past that, as their
+  text). It is never a subagent server or a backup (it runs its own agent and subagents).
 
 ## Tools
 
