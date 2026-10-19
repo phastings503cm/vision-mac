@@ -20,6 +20,45 @@ public enum GuardianProjects {
         return [".pem", ".key", ".pfx", ".p12"].contains { lower.hasSuffix($0) }
     }
 
+    // MARK: Downloading a copy
+
+    /// The folder name for a downloaded copy: Guardian's project name, made safe — no "/" or ":", no leading dots, no
+    /// ".." — or "guardian-project" when nothing is left.
+    public static func folderName(_ name: String) -> String {
+        let parts = name.filter { !$0.isNewline && $0 != "\0" }
+            .split(whereSeparator: { $0 == "/" || $0 == ":" || $0 == "\\" })
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && $0 != "." && $0 != ".." }
+        var clean = parts.joined(separator: "-")
+        while clean.hasPrefix(".") { clean.removeFirst() }
+        clean = clean.trimmingCharacters(in: .whitespaces)
+        return clean.isEmpty ? "guardian-project" : String(clean.prefix(120))
+    }
+
+    /// A new folder in `parent` for the copy: the project's name, or "name (2)", "name (3)", … — never one that is
+    /// already there, so a download never writes over a working tree.
+    public static func newFolder(for name: String, in parent: URL, fileManager: FileManager = .default) -> URL {
+        let base = folderName(name)
+        var candidate = parent.appendingPathComponent(base, isDirectory: true)
+        var n = 2
+        while fileManager.fileExists(atPath: candidate.path) {
+            candidate = parent.appendingPathComponent("\(base) (\(n))", isDirectory: true)
+            n += 1
+        }
+        return candidate
+    }
+
+    /// Where a manifest path goes under `root`, or nil when it would land outside it (absolute, "..", ".").
+    public static func file(_ path: String, under root: URL) -> URL? {
+        let segments = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard !path.isEmpty, !path.hasPrefix("/"), !segments.isEmpty,
+              !segments.contains(where: { $0.isEmpty || $0 == ".." || $0 == "." || $0.contains("\\") || $0.contains("\0") })
+        else { return nil }
+        let file = root.appendingPathComponent(path).standardizedFileURL
+        let base = root.standardizedFileURL.path
+        return file.path.hasPrefix(base.hasSuffix("/") ? base : base + "/") ? file : nil
+    }
+
     /// What an upload holds and what it left out.
     public struct Manifest: Sendable, Equatable {
         public var files: [String: String]

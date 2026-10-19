@@ -380,17 +380,18 @@ public final class GuardianService: ObservableObject {
         do { remoteProjects = try await client.projects() } catch { report(error) }
     }
 
-    /// Write a project's files from Guardian into `folder` (a new subfolder named after it). Returns the folder.
+    /// Write a project's files from Guardian into `folder`, in a new subfolder named after it ("name (2)" when that
+    /// name is taken — a copy never writes over a folder that is there, such as the working tree it came from).
+    /// Returns the folder.
     public func downloadProject(_ project: GuardianProject, into folder: URL) async -> URL? {
         guard let client else { return nil }
         do {
             let manifest = try await client.project(id: project.id)
-            let root = folder.appendingPathComponent(SkillNaming.slug(manifest.name).isEmpty ? "guardian-project" : manifest.name,
-                                                     isDirectory: true)
+            let root = GuardianProjects.newFolder(for: manifest.name, in: folder)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             for (path, text) in manifest.files {
-                let segments = path.split(separator: "/")
-                guard !segments.isEmpty, !segments.contains(where: { $0 == ".." || $0 == "." }), !path.hasPrefix("/") else { continue }
-                let file = root.appendingPathComponent(path)
+                // Every file stays inside the new folder.
+                guard let file = GuardianProjects.file(path, under: root) else { continue }
                 try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try text.write(to: file, atomically: true, encoding: .utf8)
             }

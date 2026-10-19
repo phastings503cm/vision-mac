@@ -213,6 +213,24 @@ final class GuardianServiceTests: XCTestCase {
         XCTAssertEqual(GuardianService.modelRouteURL(URL(string: "https://g.example.com/")!), "https://g.example.com/v1")
     }
 
+    /// Download a Copy into the folder that holds the project's working tree: a new "ledger (2)", the tree untouched.
+    func testDownloadingACopyNeverWritesOverTheFolderThatIsThere() async throws {
+        wire.routes["GET /api/harness/projects/p1"] = (200, ##"{"name":"../ledger","files":{"README.md":"# From Guardian","../outside.txt":"x","Sources/a.swift":"let a = 1"}}"##)
+        try await signIn()
+        let parent = dir.appendingPathComponent("code", isDirectory: true)
+        let tree = parent.appendingPathComponent("ledger", isDirectory: true)
+        try FileManager.default.createDirectory(at: tree, withIntermediateDirectories: true)
+        try "# My uncommitted edits".write(to: tree.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        let downloaded = await service.downloadProject(GuardianProject(id: "p1", name: "ledger"), into: parent)
+        let root = try XCTUnwrap(downloaded)
+        XCTAssertEqual(root.lastPathComponent, "ledger (2)")
+        XCTAssertEqual(try String(contentsOf: tree.appendingPathComponent("README.md"), encoding: .utf8), "# My uncommitted edits")
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("README.md"), encoding: .utf8), "# From Guardian")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("Sources/a.swift").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: parent.appendingPathComponent("outside.txt").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("outside.txt").path))
+    }
+
     func testAnExpiredSignInIsDroppedWithAPlainMessage() async throws {
         try await signIn()
         wire.routes["GET /api/harness/me"] = (401, #"{"error":"unauthorized","message":"revoked"}"#)

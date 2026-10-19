@@ -424,4 +424,28 @@ final class GuardianProjectsTests: XCTestCase {
         XCTAssertTrue(GuardianProjects.isCredentialFile("Signing.P12"))
         XCTAssertFalse(GuardianProjects.isCredentialFile("keyboard.swift"))
     }
+
+    /// Download a Copy (review: it overwrote a folder of the same name, and a name with ".." wrote outside the folder
+    /// the person chose): a new folder every time, a safe name, every file inside it.
+    func testADownloadedCopyGetsANewFolderAndStaysInsideIt() throws {
+        let parent = FileManager.default.temporaryDirectory.appendingPathComponent("vision-download-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        try FileManager.default.createDirectory(at: parent.appendingPathComponent("ledger"), withIntermediateDirectories: true)
+        XCTAssertEqual(GuardianProjects.folderName("ledger"), "ledger")
+        XCTAssertEqual(GuardianProjects.folderName("../../ledger"), "ledger")
+        XCTAssertEqual(GuardianProjects.folderName("client/ledger"), "client-ledger")
+        XCTAssertEqual(GuardianProjects.folderName(".hidden"), "hidden")
+        XCTAssertEqual(GuardianProjects.folderName(".."), "guardian-project")
+        XCTAssertEqual(GuardianProjects.newFolder(for: "ledger", in: parent).lastPathComponent, "ledger (2)",
+                       "the working tree that is already there is never written over")
+        XCTAssertEqual(GuardianProjects.newFolder(for: "../../ledger", in: parent).deletingLastPathComponent().standardizedFileURL,
+                       parent.standardizedFileURL)
+        try FileManager.default.createDirectory(at: parent.appendingPathComponent("ledger (2)"), withIntermediateDirectories: true)
+        XCTAssertEqual(GuardianProjects.newFolder(for: "ledger", in: parent).lastPathComponent, "ledger (3)")
+        let root = parent.appendingPathComponent("ledger (3)")
+        XCTAssertEqual(GuardianProjects.file("Sources/main.swift", under: root)?.path, root.appendingPathComponent("Sources/main.swift").standardizedFileURL.path)
+        for bad in ["../escape.txt", "a/../../b", "/etc/passwd", "./a", "a//b", ""] {
+            XCTAssertNil(GuardianProjects.file(bad, under: root), bad)
+        }
+    }
 }
