@@ -169,6 +169,49 @@ final class MachineActionsTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(backend.log.isEmpty)
     }
 
+    // MARK: Stopping input that is already going out (review: ⌘. / ⌃⌥⌘. didn't stop a long type)
+
+    /// A Stop during a 2,000-character type ends it at the next 20-character piece; nothing goes out after.
+    func testATypeStopsAtTheNextPieceWhenCancelled() async throws {
+        let pieces = String(repeating: "a", count: 2_000).unicodeChunks(size: 20)
+        XCTAssertEqual(pieces.count, 100)
+        let posted = Recorder<Int>()
+        let typing = Task { await MachineInputPacing.paced(Array(pieces.indices), pause: 8_000_000) { posted.append($0) } }
+        try await Task.sleep(nanoseconds: 80_000_000)
+        typing.cancel()
+        let count = await typing.value
+        XCTAssertGreaterThan(count, 0)
+        XCTAssertLessThan(count, 100, "the rest of the text is not posted")
+        XCTAssertEqual(posted.values.count, count)
+        try await Task.sleep(nanoseconds: 60_000_000)
+        XCTAssertEqual(posted.values.count, count, "and nothing after the stop")
+    }
+
+    /// ⌃⌥⌘. (stopAll) takes the controls while a tool holds them: its input stops at the next piece.
+    func testInputStopsWhenTheChatLosesTheControls() async throws {
+        let acting = actions(FakeMachineBackend.standard(), seat())
+        let posted = Recorder<Int>()
+        let typing = Task {
+            await acting.withControls(app: "TextEdit", touchesPerson: false) {
+                await MachineInputPacing.paced(Array(0..<500), pause: 5_000_000) { posted.append($0) }
+            }
+        }
+        try await waitUntil { posted.values.count >= 5 }
+        await arbiter.stopAll()
+        guard case .success(let count) = await typing.value else { return XCTFail("it held the controls") }
+        XCTAssertLessThan(count, 500)
+        XCTAssertEqual(posted.values.count, count)
+    }
+
+    /// A long type outlasts the idle release (0.2 s here) without losing the controls: each piece keeps the lease.
+    func testALongTypeKeepsTheControlsPastTheIdleRelease() async {
+        let acting = actions(FakeMachineBackend.standard(), seat())
+        let result = await acting.withControls(app: "TextEdit", touchesPerson: false) {
+            await MachineInputPacing.paced(Array(0..<60), pause: 8_000_000) { _ in }   // ~0.5 s
+        }
+        XCTAssertEqual(try? result.get(), 60)
+    }
+
     // MARK: Scope
 
     func testALimitedChatAsksBeforeAnotherAppAndRemembersTheAnswer() async {

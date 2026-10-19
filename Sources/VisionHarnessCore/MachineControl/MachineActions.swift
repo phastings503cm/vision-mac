@@ -83,7 +83,16 @@ public struct MachineActions: Sendable {
             }
         }
         seat.setActivity(.controlling(app: app))
-        let value = await body()
+        // Long input checks between pieces that this seat still has the controls (⌃⌥⌘. or a Stop takes them), and
+        // keeps the lease alive while it types.
+        let value = await MachineInputPacing.$stillHeld.withValue({
+            guard await arbiter.holds(me) else { return false }
+            await arbiter.notePosted()
+            await arbiter.touch(me)
+            return true
+        }) {
+            await body()
+        }
         await arbiter.notePosted()
         await arbiter.touch(me)
         seat.setActivity(.idle)

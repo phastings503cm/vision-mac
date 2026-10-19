@@ -11,6 +11,36 @@ import Darwin
 // live implementation below is the only code that calls those APIs; tests use
 // a scripted backend and check which of them a tool used.
 
+/// Long input — typing, a run of key presses — goes out a piece at a time, and stops between pieces once the
+/// tool is cancelled (the chat's Stop, ⌘.) or its chat no longer holds the mouse and keyboard (⌃⌥⌘.). Before, a
+/// cancelled sleep was swallowed and the rest of the text went out back to back — into whatever app was in front.
+public enum MachineInputPacing {
+    /// Set by `MachineActions.withControls` while a tool holds the controls: true while it still does (and keeps its
+    /// lease alive — a long type outlasts the idle release). Nil outside it (background input to one app).
+    @TaskLocal public static var stillHeld: (@Sendable () async -> Bool)?
+
+    /// Whether input may go on: not cancelled, and the seat (if any) still held.
+    public static func mayContinue() async -> Bool {
+        if Task.isCancelled { return false }
+        if let stillHeld, !(await stillHeld()) { return false }
+        return true
+    }
+
+    /// `post` each item, pausing `pause` nanoseconds between them; stops before the next item once input may not go
+    /// on. Returns how many were posted.
+    @discardableResult
+    public static func paced<T>(_ items: [T], pause: UInt64, _ post: (T) -> Void) async -> Int {
+        var posted = 0
+        for item in items {
+            guard await mayContinue() else { break }
+            post(item)
+            posted += 1
+            do { try await Task.sleep(nanoseconds: pause) } catch { break }
+        }
+        return posted
+    }
+}
+
 /// A mouse action through the real pointer.
 public enum MouseGesture: Sendable, Equatable {
     case click(CGPoint, button: String, clicks: Int)
@@ -386,7 +416,8 @@ public struct LiveMachineBackend: MachineBackend {
 
     public func postKeys(_ combos: [KeyboardTool.ResolvedCombo], to pid: pid_t?) async {
         guard let source = CGEventSource(stateID: .hidSystemState) else { return }
-        for combo in combos {
+        // A combo goes down and up whole; a Stop takes effect before the next one.
+        await MachineInputPacing.paced(combos, pause: 20_000_000) { combo in
             var flags = CGEventFlags(rawValue: 0)
             if combo.cmd { flags.insert(.maskCommand) }
             if combo.ctrl { flags.insert(.maskControl) }
@@ -397,13 +428,13 @@ public struct LiveMachineBackend: MachineBackend {
                 event.flags = flags
                 if let pid { event.postToPid(pid) } else { event.post(tap: .cghidEventTap) }
             }
-            try? await Task.sleep(nanoseconds: 20_000_000)
         }
     }
 
     public func postText(_ text: String, to pid: pid_t?) async {
         guard let source = CGEventSource(stateID: .hidSystemState) else { return }
-        for chunk in text.unicodeChunks(size: 20) {
+        // 20 characters at a time; a Stop (or the controls taken back) ends the typing before the next piece.
+        await MachineInputPacing.paced(text.unicodeChunks(size: 20), pause: 8_000_000) { chunk in
             var utf16 = Array(chunk.utf16)
             if let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true) {
                 down.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
@@ -414,7 +445,6 @@ public struct LiveMachineBackend: MachineBackend {
                 up.keyboardSetUnicodeString(stringLength: 0, unicodeString: &empty)
                 if let pid { up.postToPid(pid) } else { up.post(tap: .cghidEventTap) }
             }
-            try? await Task.sleep(nanoseconds: 8_000_000)
         }
     }
 
