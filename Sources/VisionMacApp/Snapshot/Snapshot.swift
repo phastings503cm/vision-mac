@@ -19,8 +19,9 @@ import VisionHarnessCore
 //
 //   --snapshot <folder>         where the PNGs go (or VISION_SNAPSHOT_DIR)
 //   --snapshot-scenes a,b       only these scenes (chat, code, setup, settings-models; and, only when named,
-//                               long-chat and long-chat-top — a 2,000-row chat opened, then scrolled to its
-//                               first row, measured into long-chat-measurements.txt)
+//                               long-chat, long-chat-top, -earlier, -jump, -huge, -huge-open, -stream — a
+//                               2,000-row chat opened, paged, jumped in, streamed into; measured into
+//                               long-chat-measurements.txt)
 //   --snapshot-live <profile>   run the chat for real first, on Amazon Bedrock with this AWS profile, and save what
 //                               happened as chat-transcript.json (the seeded chat is made from such a run)
 //   --snapshot-region <region>  the live run's Region (default us-west-2)
@@ -35,6 +36,15 @@ enum Snapshot {
         case longChat = "long-chat"
         /// The long chat scrolled from the bottom to its first row, a screenful at a time, measured.
         case longChatTop = "long-chat-top"
+        /// "Load earlier messages" clicked; the row at the top stays where it was.
+        case longChatEarlier = "long-chat-earlier"
+        /// Jumped to an early prompt: the page around it, flashing.
+        case longChatJump = "long-chat-jump"
+        /// The 10,000-line prompt collapsed, and opened with Show more.
+        case longChatHuge = "long-chat-huge"
+        case longChatHugeOpen = "long-chat-huge-open"
+        /// A turn streaming in: followed, then not once the person scrolls up.
+        case longChatStream = "long-chat-stream"
 
         /// What a plain `--snapshot` run takes (the README's pictures).
         static let standard: [Scene] = [.chat, .code, .setup, .models]
@@ -298,7 +308,7 @@ enum Snapshot {
             model.mode = .chat
             model.settingsTab = .models
             model.showSettings = true
-        case .longChat, .longChatTop:
+        case .longChat, .longChatTop, .longChatEarlier, .longChatJump, .longChatHuge, .longChatHugeOpen, .longChatStream:
             await SnapshotLongChat.stage(scene, model, window: window, output: options?.output ?? FileManager.default.temporaryDirectory)
         }
     }
@@ -318,7 +328,8 @@ enum Snapshot {
         case .code:
             model.mode = .chat
             setSidebarCollapsed(false, in: window)
-        case .chat, .longChat, .longChatTop: break
+        case .chat, .longChat, .longChatTop, .longChatEarlier, .longChatJump, .longChatHuge, .longChatHugeOpen,
+             .longChatStream: break
         }
     }
 

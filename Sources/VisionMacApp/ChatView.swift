@@ -74,74 +74,74 @@ struct ChatView: View {
 
     // MARK: - Transcript
 
+    /// The transcript draws a window of rows (`TranscriptPager`): the newest page, with earlier pages loaded as
+    /// the person scrolls up. The window bounds the rows, so the stack is eager — every drawn row is measured and
+    /// scrolling to one lands exactly.
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: Theme.rowSpacing) {
+                VStack(alignment: .leading, spacing: Theme.rowSpacing) {
+                    TranscriptTopMarker()
                     if session.entries.isEmpty {
                         ChatStarterView(session: session) { text in
                             model.send(text, in: session)
                         }
                         .padding(.top, 40)
                     }
-                    ForEach(session.entries) { entry in
+                    let pager = session.pager
+                    let rows = pager.rows(of: session.entries)
+                    if rows.hiddenBefore > 0 {
+                        EarlierMessagesBar(hidden: rows.hiddenBefore, pageSize: pager.window.pageSize) {
+                            pager.loadEarlier(session.entries)
+                        }
+                    }
+                    ForEach(rows.entries) { entry in
                         EntryRow(entry: entry, session: session)
-                            .id(entry.id)
+                            .modifier(TranscriptRowFrame(id: entry.id, watched: pager.isWatched(entry.id, in: rows),
+                                                         highlighted: pager.highlightID == entry.id))
                     }
-                    // The live turn-phase card sits under the newest entry
-                    // while a turn runs; the finished one stays until the
-                    // next turn replaces it.
-                    if let phase = session.turnPhase {
-                        PhaseCard(state: phase)
-                            .padding(.leading, Theme.gutter)
-                            .id("phase-\(phase.turnID)")
+                    if rows.hiddenAfter > 0 {
+                        NewerMessagesBar(hidden: rows.hiddenAfter, pageSize: pager.window.pageSize,
+                                         action: { pager.loadLater(session.entries) },
+                                         latest: { pager.showLatest() })
+                    } else {
+                        transcriptEnd
                     }
-                    if !session.running, session.promptHistory.count > 1 {
-                        PromptHistoryView(session: session)
-                            .padding(.leading, Theme.gutter)
-                    }
-                    if session.running, session.entries.last?.tool?.isFinished ?? true {
-                        ThinkingRow(session: session)
-                    }
-                    if !session.changedFiles.isEmpty {
-                        ProducedFilesRow(session: session)
-                    }
-                    Color.clear.frame(height: 1).id(bottomAnchor)
+                    TranscriptBottomMarker(id: bottomAnchor)
                 }
                 .padding(.horizontal, Theme.contentPadding)
                 .padding(.vertical, 20)
                 .frame(maxWidth: Theme.maxTranscriptWidth, alignment: .leading)
                 .frame(maxWidth: .infinity)
             }
-            .onChange(of: session.entries.count) { _, _ in scroll(proxy) }
-            .onChange(of: lastEntryLength) { _, _ in scroll(proxy) }
-            .onChange(of: session.id) { _, _ in
-                proxy.scrollTo(bottomAnchor, anchor: .bottom)
-            }
-            .onAppear {
-                proxy.scrollTo(bottomAnchor, anchor: .bottom)
-                // The first pass runs before the transcript has laid out, so
-                // repeat once the run loop has caught up.
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 120_000_000)
-                    proxy.scrollTo(bottomAnchor, anchor: .bottom)
-                }
-            }
+            .transcriptPaging(session: session, proxy: proxy, bottomAnchor: bottomAnchor)
+        }
+    }
+
+    /// What follows the newest row: the turn's phase card, the prompt history, the thinking line, changed files.
+    @ViewBuilder
+    private var transcriptEnd: some View {
+        // The live turn-phase card sits under the newest entry
+        // while a turn runs; the finished one stays until the
+        // next turn replaces it.
+        if let phase = session.turnPhase {
+            PhaseCard(state: phase)
+                .padding(.leading, Theme.gutter)
+                .id("phase-\(phase.turnID)")
+        }
+        if !session.running, session.promptHistory.count > 1 {
+            PromptHistoryView(session: session)
+                .padding(.leading, Theme.gutter)
+        }
+        if session.running, session.entries.last?.tool?.isFinished ?? true {
+            ThinkingRow(session: session)
+        }
+        if !session.changedFiles.isEmpty {
+            ProducedFilesRow(session: session)
         }
     }
 
     private let bottomAnchor = "transcript-bottom"
-
-    /// Streaming text changes the last entry without changing the count.
-    private var lastEntryLength: Int {
-        session.entries.last?.message?.text.count ?? 0
-    }
-
-    private func scroll(_ proxy: ScrollViewProxy) {
-        withAnimation(.easeOut(duration: 0.15)) {
-            proxy.scrollTo(bottomAnchor, anchor: .bottom)
-        }
-    }
 
     // MARK: - Gates
 
@@ -470,7 +470,12 @@ private struct EntryRow: View {
     var body: some View {
         switch entry.kind {
         case .message(let body):
-            MessageRow(body: body, at: entry.at, masked: session.masked[entry.id])
+            MessageRow(body: body, at: entry.at, masked: session.masked[entry.id],
+                       streaming: session.streamingID == entry.id,
+                       expanded: Binding(get: { session.pager.expanded.contains(entry.id) },
+                                         set: { open in
+                                             if open { session.pager.expanded.insert(entry.id) } else { session.pager.expanded.remove(entry.id) }
+                                         }))
         case .tool(let activity):
             if activity.name == UseSkillTool.name {
                 SkillCard(activity: activity)
@@ -495,25 +500,26 @@ private struct MessageRow: View {
     let at: Date
     /// What the shield masked before this answer's request went out.
     let masked: ShieldReport?
+    /// Still streaming in (a very long one shows its newest lines).
+    var streaming = false
+    /// A very long message the person opened ("Show more").
+    @Binding var expanded: Bool
 
-    init(body: MessageBody, at: Date, masked: ShieldReport? = nil) {
+    init(body: MessageBody, at: Date, masked: ShieldReport? = nil, streaming: Bool = false,
+         expanded: Binding<Bool> = .constant(false)) {
         self.body_ = body
         self.at = at
         self.masked = masked
+        self.streaming = streaming
+        self._expanded = expanded
     }
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             marker
             VStack(alignment: .leading, spacing: 4) {
-                if body_.role == .user {
-                    Text(body_.text)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    MarkdownView(source: body_.text)
-                }
+                TranscriptText(text: body_.text, markdown: body_.role != .user, streaming: streaming,
+                               expanded: $expanded)
                 if let masked, let summary = masked.summary {
                     MaskedChip(summary: summary, categories: masked.categories)
                 }
@@ -625,14 +631,20 @@ private struct ToolCard: View {
 
             if expanded, let output = activity.output, !output.isEmpty {
                 Divider().padding(.vertical, 6)
-                ScrollView(.horizontal, showsIndicators: false) {
-                    Text(output)
-                        .font(Theme.mono(11))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                if LongText.isLong(output) {
+                    // Thousands of lines: a text view that lays out only what is on screen.
+                    LongTextView(text: output, monospaced: true)
+                        .frame(height: 260)
+                } else {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        Text(output)
+                            .font(Theme.mono(11))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 260)
+                    .padding(.bottom, 2)
                 }
-                .frame(maxHeight: 260)
-                .padding(.bottom, 2)
             }
         }
         .padding(8)
@@ -1156,13 +1168,14 @@ struct PhaseCard: View {
 }
 
 /// A chat's prompts so far, with their outcomes and a way to reuse one: the
-/// prompt timeline. Click a row to expand it; copy it, drop it back into the
-/// composer to talk about it, and jump to the results card it produced.
+/// prompt timeline. Click a row to expand it; copy it (exactly as sent), drop it
+/// back into the composer to talk about it, or jump to it in the transcript.
 struct PromptHistoryView: View {
     @Environment(AppModel.self) private var model
     let session: SessionVM
     @State private var expandedID: String?
-    @State private var jumpTarget: String?
+    /// A prompt "Jump" couldn't find in the transcript (compacted away since).
+    @State private var missingID: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -1184,41 +1197,55 @@ struct PromptHistoryView: View {
     @ViewBuilder
     private func row(_ record: SessionVM.PromptRecord) -> some View {
         let isExpanded = expandedID == record.id
+        let long = LongText.isLong(record.text)
         VStack(alignment: .leading, spacing: 0) {
-            Button {
-                withAnimation(.easeOut(duration: 0.12)) { expandedID = isExpanded ? nil : record.id }
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "person.crop.circle")
-                        .font(.system(size: 11))
-                        .foregroundStyle(Theme.userTint)
-                    Text(record.text)
-                        .font(.system(size: 11.5))
-                        .lineLimit(isExpanded ? nil : 1)
-                        .multilineTextAlignment(.leading)
-                    Spacer(minLength: 4)
-                    outcomeChip(record)
-                    Text(record.at, style: .time)
-                        .font(Theme.mono(9.5))
-                        .foregroundStyle(.tertiary)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(.tertiary)
-                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+            HStack(spacing: 4) {
+                Button {
+                    withAnimation(.easeOut(duration: 0.12)) { expandedID = isExpanded ? nil : record.id }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "person.crop.circle")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.userTint)
+                        // A 10,000-line prompt is one line here; the row never lays out all of it.
+                        Text(long ? LongText.head(record.text, lines: 1, bytes: 300) : record.text)
+                            .font(.system(size: 11.5))
+                            .lineLimit(isExpanded && !long ? nil : 1)
+                            .multilineTextAlignment(.leading)
+                        Spacer(minLength: 4)
+                        outcomeChip(record)
+                        Text(record.at, style: .time)
+                            .font(Theme.mono(9.5))
+                            .foregroundStyle(.tertiary)
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 8, weight: .semibold))
+                            .foregroundStyle(.tertiary)
+                            .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    }
+                    .padding(6)
+                    .contentShape(Rectangle())
                 }
-                .padding(6)
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
 
             if isExpanded {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(record.text)
+                    Text(long ? LongText.head(record.text) : record.text)
                         .font(.system(size: 11))
                         .textSelection(.enabled)
                         .padding(8)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(Theme.surface.opacity(0.7), in: RoundedRectangle(cornerRadius: 6))
+                    if long {
+                        Text("First lines of \(LongText.lineCount(record.text).formatted()) — Copy gives all of it")
+                            .font(Theme.metaFont)
+                            .foregroundStyle(.secondary)
+                    }
+                    if missingID == record.id {
+                        Text("That prompt is no longer in the transcript — the conversation was compacted since.")
+                            .font(Theme.metaFont)
+                            .foregroundStyle(Theme.noticeTint)
+                    }
                     HStack(spacing: 10) {
                         Button("Copy") {
                             NSPasteboard.general.clearContents()
@@ -1227,9 +1254,7 @@ struct PromptHistoryView: View {
                         Button("Reuse in composer") {
                             model.pendingComposerText = record.text
                         }
-                        if record.turnID != nil {
-                            Button("Show its results") { jumpTarget = record.turnID }
-                        }
+                        Button("Jump to it") { jump(to: record) }
                         Spacer()
                     }
                     .font(Theme.metaFont)
@@ -1243,6 +1268,21 @@ struct PromptHistoryView: View {
         }
         .background(isExpanded ? Theme.surface.opacity(0.5) : Color.clear,
                     in: RoundedRectangle(cornerRadius: 6))
+        .contextMenu {
+            Button("Reuse in Composer") { model.pendingComposerText = record.text }
+            Button("Jump to Prompt") { jump(to: record) }
+        }
+    }
+
+    /// Scroll the transcript to the prompt's own message (loading the page around it) and flash it.
+    private func jump(to record: SessionVM.PromptRecord) {
+        guard let id = TranscriptPager.entryID(forPrompt: record.text, at: record.at, in: session.entries) else {
+            expandedID = record.id
+            missingID = record.id
+            return
+        }
+        missingID = nil
+        session.pager.jump(to: id)
     }
 
     @ViewBuilder

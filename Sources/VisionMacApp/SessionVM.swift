@@ -273,6 +273,8 @@ public final class SessionVM: Identifiable {
     }
     /// Id of the assistant entry currently receiving streamed deltas.
     public var streamingID: String?
+    /// Which rows of the transcript are drawn, and where the person is in it (`TranscriptPaging`).
+    let pager = TranscriptPager()
 
     public init(id: String, title: String, cwd: String?, preset: PermissionPreset = .workspaceWrite) {
         self.id = id

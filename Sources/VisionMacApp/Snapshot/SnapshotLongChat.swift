@@ -177,10 +177,25 @@ enum SnapshotLongChat {
 
     // MARK: Scenes
 
+    /// Held while the scenes run: no App Nap, so a measured timer tick is late only when the app was busy.
+    private static var activity: NSObjectProtocol?
+
     static func stage(_ scene: Snapshot.Scene, _ model: AppModel, window: NSWindow, output: URL) async {
+        if activity == nil {
+            activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical],
+                                                             reason: "Measuring the transcript")
+        }
+        // In front and key, as when a person uses it (focus and the Edit menu need a key window).
+        NSApp.activate()
+        window.makeKeyAndOrderFront(nil)
         switch scene {
         case .longChat: await open(model, window: window, output: output)
         case .longChatTop: await scrollToTop(model, window: window, output: output)
+        case .longChatEarlier: await loadEarlier(model, window: window, output: output)
+        case .longChatJump: await jump(model, window: window, output: output)
+        case .longChatHuge: await huge(model, window: window, output: output, open: false)
+        case .longChatHugeOpen: await huge(model, window: window, output: output, open: true)
+        case .longChatStream: await stream(model, window: window, output: output)
         default: break
         }
     }
@@ -199,22 +214,34 @@ enum SnapshotLongChat {
         let selected = Date()
         let busy = await busyTime(since: start)
         let after = footprint()
-        let rows = model.transport.sessions.first { $0.id == chatID }?.entries.count ?? 0
+        let vm = model.transport.sessions.first { $0.id == chatID }
+        let rows = vm?.entries.count ?? 0
+        let drawn = vm.map { $0.pager.rows(of: $0.entries).entries.count }.map { ", \($0) rows drawn" } ?? ""
         record("open long chat (\(rows) rows, one \(hugeLines)-line prompt): read in \(milliseconds(selected.timeIntervalSince(start)))"
                + ", busy until idle \(milliseconds(busy.untilIdle)), longest stall \(milliseconds(busy.longestStall))"
-               + ", memory \(megabytes(before)) → \(megabytes(after)) (+\(megabytes(after > before ? after - before : 0)))",
-               in: output)
+               + ", memory \(megabytes(before)) → \(megabytes(after)) (+\(megabytes(after > before ? after - before : 0)))"
+               + drawn, in: output)
+    }
+
+    /// The long chat, open at its newest row (opened again if it was open, as a person switching back to it).
+    private static func reopen(_ model: AppModel) async -> SessionVM? {
+        model.mode = .chat
+        model.config.planPanelOpen = false
+        if model.selectedSession?.id == chatID {
+            model.select(SnapshotSeed.mainChatID)
+            await Snapshot.pause(0.4)
+        }
+        model.select(chatID)
+        _ = await busyTime(since: Date())
+        await Snapshot.pause(0.5)
+        return model.selectedSession
     }
 
     /// Scroll the open long chat from the bottom to its very first row as a person would — a screenful at a time —
     /// and measure: how long it takes, the longest the app froze on one step, and the memory it ends up holding.
+    /// Paged, every arrival at the top loads the page above and keeps the reader's row in place.
     static func scrollToTop(_ model: AppModel, window: NSWindow, output: URL) async {
-        if model.selectedSession?.id != chatID {
-            model.mode = .chat
-            model.config.planPanelOpen = false
-            model.select(chatID)
-            _ = await busyTime(since: Date())
-        }
+        guard let vm = await reopen(model) else { return }
         guard let scroller = transcriptScrollView(in: window) else {
             record("scroll to top: the transcript's scroll view was not found", in: output)
             return
@@ -223,12 +250,18 @@ enum SnapshotLongChat {
         var steps = 0
         var longest: TimeInterval = 0
         var atTopSteps = 0
+        var loads = 0
+        var mostDrawn = 0
+        var worstDrift: CGFloat = 0
+        var drifts: [Int] = []
+        var lower = vm.pager.rows(of: vm.entries).hiddenBefore
         // Up a screenful at a time until the top has stayed the top for a few steps (rows above may still be on
         // their way in), or two minutes pass.
         while atTopSteps < 6, Date().timeIntervalSince(start) < 120 {
             let clip = scroller.contentView
-            let y = max(0, clip.bounds.origin.y - clip.bounds.height * 0.9)
-            atTopSteps = clip.bounds.origin.y <= 0.5 ? atTopSteps + 1 : 0
+            let top = -scroller.contentInsets.top
+            let y = max(top, clip.bounds.origin.y - clip.bounds.height * 0.9)
+            atTopSteps = clip.bounds.origin.y <= top + 0.5 ? atTopSteps + 1 : 0
             // The step's cost: drawing the rows it brings in happens partly inside the scroll call itself.
             let stepStart = Date()
             clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: y))
@@ -237,19 +270,140 @@ enum SnapshotLongChat {
             steps += 1
             let step = await busyTime(since: Date(), quiet: 5, limit: 20)
             longest = max(longest, inCall, step.longestStall)
+            let rows = vm.pager.rows(of: vm.entries)
+            mostDrawn = max(mostDrawn, rows.entries.count)
+            if rows.hiddenBefore < lower {
+                loads += 1
+                lower = rows.hiddenBefore
+                // Let the restore finish, then read how far the reader's row ended up from where it was.
+                for _ in 0..<40 where vm.pager.restore != nil { await Snapshot.pause(0.025) }
+                if let drift = vm.pager.lastRestoreDrift {
+                    worstDrift = max(worstDrift, abs(drift))
+                    drifts.append(Int(drift.rounded()))
+                }
+                atTopSteps = 0
+            }
         }
-        let first = topVisibleText(model)
+        let rows = vm.pager.rows(of: vm.entries)
+        let first = rows.entries.first?.message?.text.prefix(30) ?? "?"
         record("scroll to top: \(steps) steps in \(milliseconds(Date().timeIntervalSince(start))), longest stall "
-               + "\(milliseconds(longest)), memory after \(megabytes(footprint())), first row reached: \(first)", in: output)
+               + "\(milliseconds(longest)), memory after \(megabytes(footprint())); pages loaded by scrolling: \(loads), "
+               + "most rows drawn at once: \(mostDrawn), worst reader-row drift after a load: "
+               + String(format: "%.1f pt", worstDrift) + " \(drifts.filter { $0 != 0 })" + "; first row drawn: \"\(first)…\" (\(rows.hiddenBefore) above it)",
+               in: output)
     }
 
-    /// The chat's first row's text, to say whether the scroll reached it.
-    private static func topVisibleText(_ model: AppModel) -> String {
-        guard let first = model.selectedSession?.entries.first?.message?.text else { return "?" }
-        return "\"\(first.prefix(40))…\""
+    /// From the newest page, scroll up to the "Load earlier messages" bar (a picture of it), click it (as the button
+    /// does), and measure how far the row at the top moved.
+    static func loadEarlier(_ model: AppModel, window: NSWindow, output: URL) async {
+        guard let vm = await reopen(model), let scroller = transcriptScrollView(in: window) else { return }
+        let pager = vm.pager
+        // Hold the bar still for its picture: nothing loads by itself until it is clicked.
+        pager.settled = false
+        let clip = scroller.contentView
+        clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: -scroller.contentInsets.top))
+        scroller.reflectScrolledClipView(clip)
+        await Snapshot.pause(0.8)
+        await picture(window, "long-chat-earlier-bar", output)
+        let rows = pager.rows(of: vm.entries)
+        let anchor = rows.firstID ?? ""
+        let before = pager.geometry.rows[anchor]?.minY
+        let start = Date()
+        pager.loadEarlier(vm.entries)
+        let busy = await busyTime(since: start)
+        let after = pager.rows(of: vm.entries)
+        record("load earlier (button): \(rows.entries.count) → \(after.entries.count) rows drawn, \(after.hiddenBefore) still above; "
+               + "busy \(milliseconds(busy.untilIdle)); the top row was at y=" + String(format: "%.1f", before ?? -1)
+               + ", ended " + String(format: "%.1f pt", pager.lastRestoreDrift ?? .nan) + " from there",
+               in: output)
+        pager.settled = true
     }
 
-    /// The chat's transcript: the tallest vertical scroll view in the window that isn't a text editor's.
+    /// Jump to an early prompt (as the prompt history's "Jump to it" does): the page around it is drawn, it flashes.
+    static func jump(_ model: AppModel, window: NSWindow, output: URL) async {
+        guard let vm = await reopen(model) else { return }
+        // Ids are the app's own once a stored chat is read back; the row is found by position.
+        guard vm.entries.count > 32 else { return }
+        let target = vm.entries[32].id
+        let start = Date()
+        vm.pager.jump(to: target)
+        let busy = await busyTime(since: start)
+        await picture(window, "long-chat-jump-flash", output)
+        let rows = vm.pager.rows(of: vm.entries)
+        record("jump to row 32 (prompt #9): rows \(rows.hiddenBefore)–\(rows.hiddenBefore + rows.entries.count - 1) drawn"
+               + ", \(rows.hiddenAfter) below; highlighted: \(vm.pager.highlightID == target); following the end: "
+               + "\(vm.pager.following); busy \(milliseconds(busy.untilIdle))", in: output)
+    }
+
+    /// The 10,000-line prompt: collapsed to its first lines, or opened in its own scrolling view.
+    static func huge(_ model: AppModel, window: NSWindow, output: URL, open: Bool) async {
+        guard let vm = await reopen(model) else { return }
+        guard vm.entries.count > hugeRow else { return }
+        let id = vm.entries[hugeRow].id
+        vm.pager.jump(to: id)
+        _ = await busyTime(since: Date())
+        guard open else {
+            record("huge prompt collapsed: shows \(LongText.lineCount(LongText.head(vm.entries[hugeRow].message?.text ?? ""))) of "
+                   + "\(LongText.lineCount(vm.entries[hugeRow].message?.text ?? "")) lines", in: output)
+            return
+        }
+        let before = footprint()
+        let start = Date()
+        vm.pager.expanded.insert(id)
+        let busy = await busyTime(since: start)
+        vm.pager.jump(to: id)
+        _ = await busyTime(since: Date())
+        record("huge prompt opened (Show more): busy \(milliseconds(busy.untilIdle)), longest stall "
+               + "\(milliseconds(busy.longestStall)), memory +\(megabytes(footprint() > before ? footprint() - before : 0))",
+               in: output)
+    }
+
+    /// A turn streaming in at the end: followed to the newest line; then, scrolled up to read, it no longer moves
+    /// the transcript and "Latest" appears.
+    static func stream(_ model: AppModel, window: NSWindow, output: URL) async {
+        guard let vm = await reopen(model), let scroller = transcriptScrollView(in: window) else { return }
+        let pager = vm.pager
+        vm.appendMessage(.user, "Prompt #501: summarise the week's changes for the release notes.")
+        for word in 0..<80 {
+            vm.appendDelta(word % 12 == 11 ? "change \(word).\n\n" : "change \(word), ")
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        await Snapshot.pause(0.4)
+        let followed = pager.following && (pager.geometry.bottom.map { $0.maxY - (pager.geometry.viewport ?? 0) <= 48 } ?? false)
+        // The person scrolls up two screens to read while it keeps streaming.
+        let clip = scroller.contentView
+        clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: max(0, clip.bounds.origin.y - clip.bounds.height * 2)))
+        scroller.reflectScrolledClipView(clip)
+        await Snapshot.pause(0.4)
+        let readingAt = clip.bounds.origin.y
+        for word in 80..<160 {
+            vm.appendDelta(word % 12 == 11 ? "change \(word).\n\n" : "change \(word), ")
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        vm.endStreaming()
+        await Snapshot.pause(0.4)
+        let stayed = abs(clip.bounds.origin.y - readingAt) < 1
+        let moved = clip.bounds.origin.y - readingAt
+        let followingWhileReading = pager.following
+        await picture(window, "long-chat-stream-reading", output)
+        // A new prompt goes out while they read: the transcript goes to it.
+        vm.promptHistory.append(.init(text: "Prompt #502: and the README?"))
+        vm.appendMessage(.user, "Prompt #502: and the README?")
+        await Snapshot.pause(0.6)
+        let atNewPrompt = pager.following && (pager.geometry.bottom.map { $0.maxY - (pager.geometry.viewport ?? 0) <= 48 } ?? false)
+        record("streaming: followed to the newest line: \(followed); scrolled up to read, the view stayed put: \(stayed) "
+               + "(moved " + String(format: "%.0f pt", moved) + "), following: \(followingWhileReading), Latest button shown: "
+               + "\(!followingWhileReading); a new prompt sent then brought the view to it: \(atNewPrompt)", in: output)
+    }
+
+    /// A picture of the window now, beside the scenes'.
+    private static func picture(_ window: NSWindow, _ name: String, _ output: URL) async {
+        if let image = try? await Snapshot.capture(window), let data = try? Snapshot.png(image, points: window.frame.size) {
+            try? data.write(to: output.appendingPathComponent("\(name).png"), options: .atomic)
+        }
+    }
+
+    /// The chat's transcript: the tallest vertical scroll view in the window that isn't a text view's.
     static func transcriptScrollView(in window: NSWindow) -> NSScrollView? {
         var found: [NSScrollView] = []
         func walk(_ view: NSView) {
