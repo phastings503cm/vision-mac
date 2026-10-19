@@ -82,6 +82,8 @@ struct ChatView: View {
             for attachment in pending { add(attachment) }
             model.pendingComposerAttachments = nil
         }
+        // The chips say how each file goes to the chat's own model: a new model, a new answer (and a new window).
+        .onChange(of: session.routeID) { _, _ in refreshParts() }
         .onChange(of: model.pendingAttachmentPreview) { _, name in
             guard let name else { return }
             previewing = staged.first { $0.attachment.name == name }
