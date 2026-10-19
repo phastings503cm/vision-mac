@@ -473,6 +473,28 @@ Folder in Finder** is on the chat's right-click menu. Your own instruction files
 as "Using the deploy skill" when the model loads one); the open project's don't. A task such a chat puts
 on the Task Queue works in the same folder.
 
+### Chats from your other AI tools
+
+**File ▸ Import Chats…** (⇧⌘I, also Settings ▸ Import & Export) brings conversations from elsewhere in as real
+chats you can carry on with any model: **Claude Code** sessions (`~/.claude/projects` — subagents' own transcripts
+stay out; the chat says how many there were), **Codex** sessions (`~/.codex/sessions`), **OpenClaw** sessions (its
+session store and older transcript files, on the branch each session ended on), a **Claude.ai** or **ChatGPT**
+data export (the ZIP, its folder or `conversations.json`), a Vision chat file, and — signed in — your **Guardian**
+chats and the Vision chats your account keeps there. The list shows each chat's source, title, date and message
+count; tick some or all. Every message keeps its time, tool calls come in as tool cards, and a chat whose folder
+exists on this Mac opens in that project. A model never replays another tool's calls: they reach it as a written
+summary, so a Claude Code session can continue on Qwen, Bedrock or Guardian. Importing again brings only what is
+new (scheduled and scripted runs are hidden unless you ask). Reading changes nothing; nothing leaves the Mac except
+the calls to your signed-in Guardian. The first look at a long Claude Code history takes a few seconds; later ones
+read only what changed.
+
+**Export**: **File ▸ Export Chat ▸ Markdown… / JSON…** (or the chat's right-click menu), and **Send Chat to
+Guardian** to keep it with your account. The JSON imports back into Vision on any computer.
+
+**Search all chats** — the field above the chat list (⇧⌘F) — finds every word of a search in titles, prompts,
+answers and tool calls across every chat, made here or imported; its menu narrows it to one source. Click a
+result to open the chat at that row.
+
 ### Tasks: what the chat is doing, and what comes next
 
 **⇧⌘P** — or **Tasks** in the toolbar — opens the right column on the chat's tasks, in chat and code mode.
@@ -656,7 +678,7 @@ Guardian (guardian.503cm.com) is the account side of the family — models, prom
 | Prompt history | harness → Guardian | automatically, as you send prompts while signed in, and again with the outcome when each ends — masked first (your vault's secrets always, and what the sensitive-data shield masks); **Send my prompts to the notebook** in Settings ▸ Guardian turns it off |
 | Prompt history | Guardian → harness | Settings ▸ Guardian browses the account's notebook |
 | Skills | both ways | import the account's skills; deposit the project's `.vision/skills` |
-| Chats | both ways | export all loaded chats; import the account's exported ones back |
+| Chats | both ways | export all chats, or one with **Send Chat to Guardian**; **Import Chats** brings back the account's kept chats and your Guardian chats (read a page at a time) |
 | Code projects | both ways | upload the open project's text files to the account's private repo store — Guardian's own github-for-one, ready for the AI Coders module — never `.env` files, keys or certificates; download one back |
 
 **Estimates across users**: the turn-phase ETA cache that Vision keeps per machine (`eta-cache.json`) has a multitenant big sibling in Guardian, which aggregates durations per task kind and scope across its users — the client sends nothing but the kind, the scope number and the wall-clock.
@@ -702,6 +724,8 @@ VisionHarnessCore/         the harness. No AppKit, no SwiftUI — headlessly tes
   ChatTasks.swift          chat tasks' rules; which plan step a subagent works
   MachineControl/          screen control: the planner, the arbiter (taking turns), the seat, Accessibility
   OpenClaw/                reading a local OpenClaw; import and export
+  ChatImport/              chats from Claude Code, Codex, OpenClaw, Claude.ai/ChatGPT exports and Guardian;
+                           Markdown/JSON export; the search across chats
   GuardianHarnessAPI.swift browser sign-in (PKCE), /me, limits, vault, projects; GuardianProblems: refusals
 
 VisionMacApp/              SwiftUI
@@ -720,6 +744,7 @@ VisionMacApp/              SwiftUI
   ProjectStatusPanel.swift code mode's project status beside the chat
   ComposerAttachments.swift  chips, the preview sheet, the long-text viewer
   OpenClawSettings.swift   Settings › Import & Export
+  ChatImportSheet.swift    File › Import Chats… (ChatImportModel: sources, preview, import); ChatSearchModel
   GuardianService.swift    Guardian sign-in, organizations, limits, vault, prompt sync, refusal dialogs
   SparkController.swift    the boxes: status, switching, installs, routes that follow
   RouteMenu.swift          the primary / subagents / backups menu shared by toolbar and composer
