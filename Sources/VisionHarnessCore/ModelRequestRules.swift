@@ -151,6 +151,7 @@ public struct ModelRequestRules: Equatable, Sendable {
 
     /// The rules for `model` on `profile`'s server.
     public static func `for`(_ profile: ProviderProfile, model: String) -> ModelRequestRules {
+        if profile.kind == .claudeCode { return claudeCode }
         let id = normalized(model.isEmpty ? profile.model : model)
         let provider = KnownProvider.of(profile)
         switch provider {
@@ -167,6 +168,12 @@ public struct ModelRequestRules: Equatable, Sendable {
         let last = (model.components(separatedBy: "/").last ?? model).lowercased()
         return last.components(separatedBy: ":").first ?? last
     }
+
+    /// Claude Code: its `--effort` levels (low, medium, high, max); there is no Off — Claude decides how much to
+    /// think within the level. Nothing else is sent: the CLI makes the requests.
+    static let claudeCode = ModelRequestRules(provider: .other,
+                                              thinking: .effort(words: [.low: "low", .medium: "medium", .high: "high", .max: "max"],
+                                                                inTemplate: false))
 
     /// low / high / max, no Off: GLM-5.3, Kimi K3 (and GLM-5 elsewhere, as before).
     static let lowHighMax: [ThinkingLevel: String] = [.low: "low", .high: "high", .max: "max"]

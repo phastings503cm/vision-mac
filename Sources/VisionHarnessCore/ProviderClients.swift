@@ -2,9 +2,10 @@ import Foundation
 
 // MARK: - Provider clients
 //
-// Every configured route is served by one of two clients: Bedrock routes by `BedrockClient` (the
-// Converse API, signed with SigV4 or authorised with a Bedrock API key), everything else by
-// `OpenAIClient` (chat completions). The app asks for a client here instead of choosing one itself —
+// Every configured route is served by one of these clients: Bedrock routes by `BedrockClient` (the
+// Converse API, signed with SigV4 or authorised with a Bedrock API key), Claude Code routes by
+// `ClaudeCodeClient` (one-shot side tasks only — a chat's turns run through `ClaudeCodeTurn`), everything
+// else by `OpenAIClient` (chat completions). The app asks for a client here instead of choosing one itself —
 // which is also where a route that isn't private gets the sensitive-data shield (`ShieldClient`) and the
 // main model gets its backups (`FailoverClient`), each backup with its own shield.
 
@@ -63,7 +64,9 @@ public enum ProviderClients {
     /// One route's client — behind the shield when the route isn't private and there is something to mask.
     private static func single(_ profile: ProviderProfile, _ events: ClientEvents) -> any ProviderClient {
         let client: any ProviderClient
-        if profile.kind == .bedrock {
+        if profile.kind == .claudeCode {
+            client = ClaudeCodeClient(profile: profile)
+        } else if profile.kind == .bedrock {
             let usesAPIKey = profile.awsProfile == nil && !(profile.apiKey ?? "").isEmpty
             client = BedrockClient(profile: profile, credentials: usesAPIKey ? nil : awsCredentials?(profile))
         } else {

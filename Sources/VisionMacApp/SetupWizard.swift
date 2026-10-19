@@ -321,6 +321,7 @@ struct SetupWizard: View {
         case .openRouter: "Many hosted models behind one API. Needs an API key."
         case .bedrock: "Claude, Amazon Nova, Llama and more through your AWS account. Set up by its own guide."
         case .guardian: "Your Guardian account is the proxy: sign in with your guardian.503cm.com login and use the models your plan allows. Your prompts, skills, chats and code projects sync with Guardian too."
+        case .claudeCode: "The claude command on this Mac, signed in with your Claude Pro or Max plan. Set up by its own card."
         }
     }
 
@@ -431,6 +432,8 @@ struct SetupWizard: View {
             "Amazon Bedrock is set up by its own guide: Settings ▸ Models ▸ Add Amazon Bedrock…"
         case .guardian:
             "Sign in with your Guardian login (the email and password you use at guardian.503cm.com). Vision exchanges it for a session token that is kept in your Keychain — the password never is."
+        case .claudeCode:
+            "Claude Code is set up by its own card: Settings ▸ Models ▸ Add ▸ Claude Code…"
         }
     }
 
@@ -442,6 +445,7 @@ struct SetupWizard: View {
         case .openRouter: "https://openrouter.ai/api/v1"
         case .bedrock: "https://bedrock-runtime.us-east-1.amazonaws.com"
         case .guardian: "https://guardian.503cm.com"
+        case .claudeCode: ProviderProfile.claudeCodeBaseURL
         }
     }
 
@@ -484,6 +488,8 @@ struct SetupWizard: View {
             "Sign in to AWS again and check that your account is allowed to use the model."
         case .guardian:
             "Check your Guardian email and password, and that your plan covers the model you picked. If the sign-in has expired, sign in again."
+        case .claudeCode:
+            "Open the Claude Code card (Settings ▸ Models ▸ Add ▸ Claude Code…) and press Check Again: it says whether the claude command is installed and signed in."
         }
     }
 
@@ -877,6 +883,8 @@ struct SetupWizard: View {
             host = "https://bedrock-runtime.us-east-1.amazonaws.com"; port = ""; modelID = ""
         case .guardian:
             host = "https://guardian.503cm.com"; port = ""; modelID = ""
+        case .claudeCode:
+            host = ProviderProfile.claudeCodeBaseURL; port = ""; modelID = "sonnet"
         }
     }
 

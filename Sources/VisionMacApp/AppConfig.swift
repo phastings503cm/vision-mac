@@ -265,13 +265,13 @@ public final class AppConfig {
     /// may still collapse machines that are the same server — see
     /// `AppTransport.workerRoutes`.
     public var flaggedWorkers: [ProviderProfile] {
-        providers.filter { $0.isEnabled && $0.isSubagentWorker && $0.routeID != activeRoute }
+        providers.filter { $0.isEnabled && $0.isSubagentWorker && $0.runsVisionEngine && $0.routeID != activeRoute }
     }
 
     /// The routes that take over, in order, when the main model stops answering: switched on, marked
     /// "Use if the primary fails", and not the main model itself.
     public var backupRoutes: [ProviderProfile] {
-        providers.filter { $0.isEnabled && $0.isBackup && $0.routeID != activeRoute }
+        providers.filter { $0.isEnabled && $0.isBackup && $0.runsVisionEngine && $0.routeID != activeRoute }
     }
 
     /// Switch a route on or off. The main model can't be switched off (pick another one first): returns false.
@@ -596,6 +596,8 @@ public extension ProviderProfile {
         case .bedrock: return awsProfile == nil
         // Guardian signs in with the account login; the session token is stored like a key.
         case .guardian: return false
+        // Claude Code signs in with the person's Claude plan, inside the CLI — Vision holds nothing.
+        case .claudeCode: return false
         }
     }
 

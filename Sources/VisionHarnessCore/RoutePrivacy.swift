@@ -12,7 +12,8 @@ import Foundation
 public enum RoutePrivacy {
     /// The default for a route the user hasn't decided about.
     public static func isPrivateByDefault(_ route: ProviderProfile) -> Bool {
-        route.kind == .bedrock ? false : isPrivateAddress(route.baseURL)
+        // Bedrock is Amazon's service; Claude Code sends what it reads to Anthropic.
+        route.kind == .bedrock || route.kind == .claudeCode ? false : isPrivateAddress(route.baseURL)
     }
 
     /// Whether a base URL's host is your own: `localhost`, a loopback / private (RFC 1918) / link-local /

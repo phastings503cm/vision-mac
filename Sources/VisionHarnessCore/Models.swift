@@ -168,6 +168,11 @@ public struct ProviderProfile: Codable, Hashable, Sendable {
         /// same account also shares prompts, skills, chats and code projects
         /// with every harness on it (see `GuardianClient`).
         case guardian
+        /// Claude Code: the official `claude` command on this Mac, signed in with the person's Claude Pro or
+        /// Max plan. A chat on it runs each turn as `claude -p` (stream-json in and out) in the chat's folder;
+        /// the CLI does all the talking to Anthropic — Vision never reads or reuses its sign-in. The model is
+        /// a Claude Code alias ("opus", "sonnet", "haiku") or "default". See `ClaudeCodeTurn`.
+        case claudeCode
 
         /// The kinds the editor offers for a route made by hand. A Bedrock
         /// route comes from its guide (profile, Region and model together);
@@ -275,8 +280,17 @@ public struct ProviderProfile: Codable, Hashable, Sendable {
     /// Whether the plan behind the route is for interactive use only (see `interactiveOnly`).
     public var isInteractiveOnly: Bool { interactiveOnly ?? false }
     /// Whether the route may see sensitive data: the user's explicit choice, else the default for its address
-    /// (your own hardware is private; an online service is not).
-    public var isPrivateRoute: Bool { isPrivate ?? RoutePrivacy.isPrivateByDefault(self) }
+    /// (your own hardware is private; an online service is not). A route whose engine reads files itself
+    /// (Claude Code) is never private, whatever was stored.
+    public var isPrivateRoute: Bool { readsFilesDirectly ? false : (isPrivate ?? RoutePrivacy.isPrivateByDefault(self)) }
+    /// The engine behind the route reads files and runs commands itself and sends what it reads to its own
+    /// service (Claude Code), so Vision's shield can't mask it: never for a Sensitive chat.
+    public var readsFilesDirectly: Bool { kind == .claudeCode }
+    /// The route can run Vision's own engine (chat completions with Vision's tools), so it can serve subagents
+    /// and stand in as a backup. Claude Code runs its own agent loop instead: it is only ever a chat's engine.
+    public var runsVisionEngine: Bool { kind != .claudeCode }
+    /// The base URL every Claude Code route carries (the CLI is found on this Mac at run time).
+    public static let claudeCodeBaseURL = "claude-code://local"
 
     public static let presets: [ProviderProfile] = [
         .init(kind: .ollama, name: "Ollama (local)", baseURL: "http://127.0.0.1:11434/v1", model: "qwen3:8b"),
