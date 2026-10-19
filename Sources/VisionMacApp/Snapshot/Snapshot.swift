@@ -19,8 +19,8 @@ import VisionHarnessCore
 //
 //   --snapshot <folder>         where the PNGs go (or VISION_SNAPSHOT_DIR)
 //   --snapshot-scenes a,b       only these scenes (chat, code, setup, settings-models; and, only when named,
-//                               long-chat, long-chat-top, -earlier, -jump, -huge, -huge-open, -stream — a
-//                               2,000-row chat opened, paged, jumped in, streamed into; measured into
+//                               long-chat, long-chat-top, -earlier, -jump, -huge, -huge-open, -copy, -stream — a
+//                               2,000-row chat opened, paged, jumped in, copied from, streamed into; measured into
 //                               long-chat-measurements.txt)
 //   --snapshot-live <profile>   run the chat for real first, on Amazon Bedrock with this AWS profile, and save what
 //                               happened as chat-transcript.json (the seeded chat is made from such a run)
@@ -43,6 +43,8 @@ enum Snapshot {
         /// The 10,000-line prompt collapsed, and opened with Show more.
         case longChatHuge = "long-chat-huge"
         case longChatHugeOpen = "long-chat-huge-open"
+        /// The prompt clicked and copied with ⌘C (into a private pasteboard).
+        case longChatCopy = "long-chat-copy"
         /// A turn streaming in: followed, then not once the person scrolls up.
         case longChatStream = "long-chat-stream"
 
@@ -308,7 +310,8 @@ enum Snapshot {
             model.mode = .chat
             model.settingsTab = .models
             model.showSettings = true
-        case .longChat, .longChatTop, .longChatEarlier, .longChatJump, .longChatHuge, .longChatHugeOpen, .longChatStream:
+        case .longChat, .longChatTop, .longChatEarlier, .longChatJump, .longChatHuge, .longChatHugeOpen, .longChatCopy,
+             .longChatStream:
             await SnapshotLongChat.stage(scene, model, window: window, output: options?.output ?? FileManager.default.temporaryDirectory)
         }
     }
@@ -328,7 +331,7 @@ enum Snapshot {
         case .code:
             model.mode = .chat
             setSidebarCollapsed(false, in: window)
-        case .chat, .longChat, .longChatTop, .longChatEarlier, .longChatJump, .longChatHuge, .longChatHugeOpen,
+        case .chat, .longChat, .longChatTop, .longChatEarlier, .longChatJump, .longChatHuge, .longChatHugeOpen, .longChatCopy,
              .longChatStream: break
         }
     }

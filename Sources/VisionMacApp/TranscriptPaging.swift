@@ -18,6 +18,8 @@ final class TranscriptPager {
     var following = true
     /// A row to bring into view and flash (from the prompt history, a search). Set with `jump(to:)`.
     private(set) var jump: Jump?
+    /// The message the person clicked: Edit ▸ Copy Message (⇧⌘C) copies all of it.
+    var selectedID: String?
     /// The row drawn highlighted for a moment after a jump.
     var highlightID: String?
     /// Long messages the person opened with "Show more".
@@ -36,6 +38,7 @@ final class TranscriptPager {
     @ObservationIgnored var newerArmed = false
     /// How the last restore went, in points off where the row was (for the screenshot mode's measurements).
     @ObservationIgnored var lastRestoreDrift: CGFloat?
+    @ObservationIgnored private var recheckScheduled = false
 
     struct Jump: Equatable {
         let id: String
@@ -70,6 +73,7 @@ final class TranscriptPager {
         window.showLatest()
         if !following { following = true }
         settled = false
+        selectedID = nil
         earlierArmed = false
         newerArmed = false
         restore = nil
@@ -168,22 +172,45 @@ final class TranscriptPager {
             if window.isLatestPage { window.pin(in: entries().lazy.map(\.id)) }
         }
 
-        // A bar that comes into view loads its page — once it was out of view since the last load, so opening a
-        // chat or a load never sets off the next one by itself.
+        checkBars(entries)
+    }
+
+    /// A bar that is in view loads its page — once it was out of view since the last load, so opening a chat or a
+    /// load never sets off the next one by itself. Reached while the app's own scroll or a restore is still going
+    /// on (a fast scroll up), it loads as soon as that is over, without waiting for another scroll.
+    private func checkBars(_ entries: @escaping @MainActor () -> [ChatEntry]) {
+        guard let viewport = geometry.viewport, viewport > 1 else { return }
         let canLoad = settled && Date() >= programmaticUntil && restore == nil
+        var waiting = false
         if let bar = geometry.earlierBar {
             let visible = bar.maxY > 0 && bar.minY < viewport
-            if !visible { earlierArmed = true } else if earlierArmed, canLoad {
-                earlierArmed = false
-                DispatchQueue.main.async { [weak self] in self?.loadEarlier(entries()) }
+            if !visible { earlierArmed = true } else if earlierArmed {
+                if canLoad {
+                    earlierArmed = false
+                    DispatchQueue.main.async { [weak self] in self?.loadEarlier(entries()) }
+                } else {
+                    waiting = true
+                }
             }
         }
         if let bar = geometry.newerBar {
             let visible = bar.maxY > 0 && bar.minY < viewport
-            if !visible { newerArmed = true } else if newerArmed, canLoad {
-                newerArmed = false
-                DispatchQueue.main.async { [weak self] in self?.loadLater(entries()) }
+            if !visible { newerArmed = true } else if newerArmed {
+                if canLoad {
+                    newerArmed = false
+                    DispatchQueue.main.async { [weak self] in self?.loadLater(entries()) }
+                } else {
+                    waiting = true
+                }
             }
+        }
+        guard waiting, !recheckScheduled else { return }
+        recheckScheduled = true
+        let delay = max(0.05, programmaticUntil.timeIntervalSinceNow + 0.02)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            recheckScheduled = false
+            checkBars(entries)
         }
     }
 
@@ -193,11 +220,13 @@ final class TranscriptPager {
     /// A zero-height view at the top of each drawn row: what a restore scrolls to.
     static func markerID(_ id: String) -> String { "top-of-\(id)" }
 
-    /// The transcript row of a prompt the person sent: the user message with that text, the one nearest `at`.
+    /// The transcript row of a prompt the person sent: the user message with that text (or a goal's first round with
+    /// it as the goal), the one nearest `at`.
     static func entryID(forPrompt text: String, at: Date?, in entries: [ChatEntry]) -> String? {
         var best: (id: String, distance: TimeInterval)?
         for entry in entries {
-            guard let body = entry.message, body.role == .user, body.text == text else { continue }
+            guard let body = entry.message, body.role == .user,
+                  body.text == text || GoalTranscript.goal(inKickoff: body.text) == text else { continue }
             let distance = at.map { abs(entry.at.timeIntervalSince($0)) } ?? 0
             if best == nil || distance < best!.distance { best = (entry.id, distance) }
         }

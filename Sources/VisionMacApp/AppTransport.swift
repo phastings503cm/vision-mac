@@ -779,7 +779,8 @@ public final class AppTransport {
         // text is the prompt (unless this is a resume, which keeps its turn).
         if !resuming {
             phasesBegin(vm, prompt: task.goalText)
-            vm.promptHistory.append(.init(text: task.title, turnID: vm.turnPhase?.turnID))
+            // The whole task as it runs (title and details), so Copy and Reuse in the prompt history give all of it.
+            vm.promptHistory.append(.init(text: task.goalText, turnID: vm.turnPhase?.turnID))
         }
         do {
             let outcome = try await goalLoop(vm, goal: task.goalText, auto: true, resuming: resuming)
@@ -1454,7 +1455,7 @@ public final class AppTransport {
             // The latest goal already finished: nothing to resume.
             if body.role == .notice, body.text.hasPrefix("✅ Goal complete") { return nil }
             guard body.role == .user else { continue }
-            for prefix in ["🎯 /goal (resuming) ", "🎯 /goal "] where body.text.hasPrefix(prefix) {
+            for prefix in GoalTranscript.goalMarkers where body.text.hasPrefix(prefix) {
                 let goal = String(body.text.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
                 return goal.isEmpty ? nil : goal
             }
@@ -1867,18 +1868,17 @@ public final class AppTransport {
             if !kickedOff {
                 if auto {
                     modelText = resuming ? GoalProtocol.resumeAuto(goal) : GoalProtocol.kickoffAuto(goal)
-                    displayText = resuming ? "🚀 queue (resuming): \(goal)" : "🚀 queue: \(goal)"
                 } else {
                     modelText = resuming ? GoalProtocol.resume(goal) : GoalProtocol.kickoff(goal)
-                    displayText = resuming ? "🎯 /goal (resuming) \(goal)" : "🎯 /goal \(goal)"
                 }
+                displayText = GoalTranscript.kickoff(goal, queued: auto, resuming: resuming)
             } else {
                 modelText = auto
                     ? GoalProtocol.continuationAuto(goal, round: round, hitIterationLimit: hitLimit, error: lastError,
                                                     markerMisplaced: markerMisplaced)
                     : GoalProtocol.continuation(goal, round: round, hitIterationLimit: hitLimit, error: lastError,
                                                 markerMisplaced: markerMisplaced)
-                displayText = lastError == nil ? "↻ round \(round): keep going" : "↻ round \(round): recover and keep going"
+                displayText = GoalTranscript.round(round, recovering: lastError != nil)
             }
 
             do {

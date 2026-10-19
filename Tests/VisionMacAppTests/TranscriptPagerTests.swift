@@ -104,6 +104,29 @@ final class TranscriptPagerTests: XCTestCase {
         XCTAssertEqual(pager.restore?.id, "e1950")
     }
 
+    /// Scrolled up fast: the bar came into view while the last page's restore was still going on. It loads once
+    /// that is over, with no further scrolling.
+    func testABarReachedDuringARestoreLoadsWhenItEnds() {
+        let pager = TranscriptPager()
+        let entries = chat(2_000)
+        pager.settled = true
+        pager.observe(frames(top: -10, bottom: 4_000, rows: ["e1950": 60])) { entries }
+        pager.loadEarlier(entries)
+        let restore = pager.restore
+        XCTAssertNotNil(restore)
+        pager.observe(frames(top: -2_000, bottom: 2_000, earlier: CGRect(x: 0, y: -1_990, width: 300, height: 28),
+                             rows: ["e1950": 60])) { entries }
+        pager.observe(frames(top: -10, bottom: 4_000, earlier: CGRect(x: 0, y: 20, width: 300, height: 28),
+                             rows: ["e1950": 60])) { entries }
+        drainMainQueue()
+        XCTAssertEqual(pager.rows(of: entries).hiddenBefore, 1_900, "not while the restore runs")
+        if let restore { pager.restoreDone(restore) }
+        let loaded = expectation(description: "the waiting bar loads")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { loaded.fulfill() }
+        wait(for: [loaded], timeout: 2)
+        XCTAssertEqual(pager.rows(of: entries).hiddenBefore, 1_850)
+    }
+
     func testNothingLoadsBeforeTheChatHasSettledAtItsEnd() {
         let pager = TranscriptPager()
         let entries = chat(2_000)
@@ -128,11 +151,13 @@ final class TranscriptPagerTests: XCTestCase {
         let entries = chat(500)
         pager.window.reveal("e10", in: entries.map(\.id))
         pager.following = false
+        pager.selectedID = "e10"
         pager.settled = true
         pager.reset()
         XCTAssertTrue(pager.window.isLatestPage)
         XCTAssertTrue(pager.following)
         XCTAssertFalse(pager.settled)
+        XCTAssertNil(pager.selectedID)
     }
 
     func testAPromptIsFoundByItsTextNearestItsTime() {
@@ -143,6 +168,14 @@ final class TranscriptPagerTests: XCTestCase {
         XCTAssertEqual(TranscriptPager.entryID(forPrompt: "message 2", at: Date(timeIntervalSinceReferenceDate: 2_990), in: entries), "again")
         XCTAssertNil(TranscriptPager.entryID(forPrompt: "message 3", at: nil, in: entries), "a reply, not a prompt")
         XCTAssertNil(TranscriptPager.entryID(forPrompt: "never sent", at: nil, in: entries))
+
+        // A goal and a queued task show their prompt after a marker; Jump still finds them.
+        entries.append(ChatEntry(id: "goal", kind: .message(MessageBody(
+            role: .user, text: GoalTranscript.kickoff("ship it", queued: false, resuming: false)))))
+        entries.append(ChatEntry(id: "task", kind: .message(MessageBody(
+            role: .user, text: GoalTranscript.kickoff("Fix login\n\nThe 2FA step", queued: true, resuming: false)))))
+        XCTAssertEqual(TranscriptPager.entryID(forPrompt: "ship it", at: nil, in: entries), "goal")
+        XCTAssertEqual(TranscriptPager.entryID(forPrompt: "Fix login\n\nThe 2FA step", at: nil, in: entries), "task")
     }
 
     private func drainMainQueue() {

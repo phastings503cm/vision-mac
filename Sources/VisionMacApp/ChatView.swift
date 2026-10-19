@@ -476,6 +476,7 @@ private struct EntryRow: View {
                                          set: { open in
                                              if open { session.pager.expanded.insert(entry.id) } else { session.pager.expanded.remove(entry.id) }
                                          }))
+                .modifier(MessageCopyActions(entry: entry, pager: session.pager))
         case .tool(let activity):
             if activity.name == UseSkillTool.name {
                 SkillCard(activity: activity)
@@ -1174,6 +1175,7 @@ struct PromptHistoryView: View {
     @Environment(AppModel.self) private var model
     let session: SessionVM
     @State private var expandedID: String?
+    @State private var hoveredID: String?
     /// A prompt "Jump" couldn't find in the transcript (compacted away since).
     @State private var missingID: String?
 
@@ -1198,6 +1200,7 @@ struct PromptHistoryView: View {
     private func row(_ record: SessionVM.PromptRecord) -> some View {
         let isExpanded = expandedID == record.id
         let long = LongText.isLong(record.text)
+        let copyID = "prompt:\(record.id)"
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 4) {
                 Button {
@@ -1213,6 +1216,7 @@ struct PromptHistoryView: View {
                             .lineLimit(isExpanded && !long ? nil : 1)
                             .multilineTextAlignment(.leading)
                         Spacer(minLength: 4)
+                        CopiedBadge(id: copyID)
                         outcomeChip(record)
                         Text(record.at, style: .time)
                             .font(Theme.mono(9.5))
@@ -1226,6 +1230,11 @@ struct PromptHistoryView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                CopyButton(id: copyID, help: "Copy this prompt, exactly as sent") { record.text }
+                    .opacity(hoveredID == record.id || isExpanded ? 1 : 0)
+            }
+            .onHover { inside in
+                if inside { hoveredID = record.id } else if hoveredID == record.id { hoveredID = nil }
             }
 
             if isExpanded {
@@ -1247,10 +1256,7 @@ struct PromptHistoryView: View {
                             .foregroundStyle(Theme.noticeTint)
                     }
                     HStack(spacing: 10) {
-                        Button("Copy") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(record.text, forType: .string)
-                        }
+                        Button("Copy") { MessageCopy.copy(record.text, feedbackID: copyID) }
                         Button("Reuse in composer") {
                             model.pendingComposerText = record.text
                         }
@@ -1269,6 +1275,7 @@ struct PromptHistoryView: View {
         .background(isExpanded ? Theme.surface.opacity(0.5) : Color.clear,
                     in: RoundedRectangle(cornerRadius: 6))
         .contextMenu {
+            Button("Copy Prompt") { MessageCopy.copy(record.text, feedbackID: copyID) }
             Button("Reuse in Composer") { model.pendingComposerText = record.text }
             Button("Jump to Prompt") { jump(to: record) }
         }

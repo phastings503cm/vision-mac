@@ -195,6 +195,7 @@ enum SnapshotLongChat {
         case .longChatJump: await jump(model, window: window, output: output)
         case .longChatHuge: await huge(model, window: window, output: output, open: false)
         case .longChatHugeOpen: await huge(model, window: window, output: output, open: true)
+        case .longChatCopy: await copy(model, window: window, output: output)
         case .longChatStream: await stream(model, window: window, output: output)
         default: break
         }
@@ -356,6 +357,51 @@ enum SnapshotLongChat {
         record("huge prompt opened (Show more): busy \(milliseconds(busy.untilIdle)), longest stall "
                + "\(milliseconds(busy.longestStall)), memory +\(megabytes(footprint() > before ? footprint() - before : 0))",
                in: output)
+    }
+
+    /// Select the huge prompt (what a click on it does) and copy it with Edit ▸ Copy Message — the menu item ⇧⌘C
+    /// presses — into a private pasteboard: the copy must be the prompt exactly as sent, and say "Copied".
+    /// (Synthetic clicks and key presses don't reach SwiftUI's gestures and menu shortcuts here, so the click and the
+    /// key press themselves are not driven: the selection is set and the menu item's own action is sent.)
+    static func copy(_ model: AppModel, window: NSWindow, output: URL) async {
+        guard let vm = await reopen(model) else { return }
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("vision.snapshot.copy"))
+        pasteboard.clearContents()
+        let general = MessageCopy.pasteboard
+        MessageCopy.pasteboard = pasteboard
+        defer { MessageCopy.pasteboard = general }
+        guard vm.entries.count > hugeRow else { return }
+        let id = vm.entries[hugeRow].id
+        vm.pager.jump(to: id)
+        _ = await busyTime(since: Date())
+        await Snapshot.pause(0.3)
+        vm.pager.selectedID = id
+
+        let item = menuItem(titled: "Copy Message")
+        let binding = item.map {
+            ($0.keyEquivalentModifierMask.contains(.shift) ? "⇧" : "") + ($0.keyEquivalentModifierMask.contains(.command) ? "⌘" : "")
+                + $0.keyEquivalent.uppercased() + ($0.isEnabled ? "" : " (disabled)")
+        } ?? "missing"
+        if let item, let action = item.action { NSApp.sendAction(action, to: item.target, from: item) }
+        await Snapshot.pause(0.3)
+        await picture(window, "long-chat-copy-copied", output)
+        let copied = pasteboard.string(forType: .string)
+        let original = vm.entries[hugeRow].message?.text
+        record("copy: Edit ▸ Copy Message is \(binding); with the prompt selected it put \(copied?.utf8.count ?? 0) bytes on "
+               + "the pasteboard, exactly the prompt as sent: \(copied != nil && copied == original); \"Copied\" shown: "
+               + "\(CopyFeedback.shared.copiedID == MessageCopy.feedbackID(id))", in: output)
+        pasteboard.releaseGlobally()
+    }
+
+    private static func menuItem(titled title: String) -> NSMenuItem? {
+        func find(_ menu: NSMenu?) -> NSMenuItem? {
+            for item in menu?.items ?? [] {
+                if item.title == title { return item }
+                if let found = find(item.submenu) { return found }
+            }
+            return nil
+        }
+        return find(NSApp.mainMenu)
     }
 
     /// A turn streaming in at the end: followed to the newest line; then, scrolled up to read, it no longer moves

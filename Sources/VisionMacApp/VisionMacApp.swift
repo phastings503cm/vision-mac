@@ -93,6 +93,8 @@ struct AppCommands: Commands {
                 .disabled(model.code.activeBuffer == nil)
         }
 
+        MessageCopyCommands(model: model)
+
         CommandGroup(replacing: .appSettings) {
             Button("Settings…") { model.showSettings = true }
                 .keyboardShortcut(",", modifiers: .command)
