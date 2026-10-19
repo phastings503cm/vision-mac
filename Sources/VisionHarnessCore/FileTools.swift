@@ -63,6 +63,8 @@ enum FileText {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         }
         let temp = URL(fileURLWithPath: url.path + tempSuffix)
+        // The turn being recorded (if any) keeps what the file held before, and what this leaves (see `CheckpointStore`).
+        let checkpoint = TurnCheckpoint.current
         try withLock(url.path) {
             var isDir: ObjCBool = false
             if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
@@ -70,6 +72,7 @@ enum FileText {
                     NSLocalizedDescriptionKey: "\(url.lastPathComponent) is a directory.",
                 ])
             }
+            checkpoint?.willChange(url)
             do {
                 try data.write(to: temp)
                 if FileManager.default.fileExists(atPath: url.path) {
@@ -77,6 +80,7 @@ enum FileText {
                 } else {
                     try FileManager.default.moveItem(at: temp, to: url)
                 }
+                checkpoint?.didChange(url, data: data)
                 try? FileManager.default.removeItem(atPath: url.path + legacyTempSuffix)
             } catch {
                 try? FileManager.default.removeItem(at: temp)

@@ -806,7 +806,10 @@ public struct Engine: Sendable {
         // A (foreground) subagent — or a batch of them — is a whole task, not a quick tool call.
         let timeout = call.name == AgentTool.name || call.name == DelegateTool.name
             ? max(config.toolTimeout, 3_600) : config.toolTimeout
-        return await executeWithTimeout(executor, args: arguments, context: context, timeout: timeout)
+        // The turn's checkpoint records which tool changed a file.
+        return await TurnCheckpoint.$activeTool.withValue(call.name) {
+            await executeWithTimeout(executor, args: arguments, context: context, timeout: timeout)
+        }
     }
 
     private func executeWithTimeout(_ executor: any ToolExecutor,

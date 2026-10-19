@@ -25,11 +25,19 @@ public struct RunShellCommandTool: ToolExecutor {
         }
         let timeoutSec = min(600, max(5, Self.int(args, "timeout", default: 120)))
 
+        // In a git repository, the turn's checkpoint works out which files the command changed (see GitChanges.swift).
+        let checkpoint = TurnCheckpoint.current
+        let tool = TurnCheckpoint.activeTool ?? Self.name
+        let baseline = await Self.offPool { checkpoint?.gitBaseline(in: context.workspace) }
+
         // The pty is the controlling terminal; output streams straight into a
         // bounded tail. A prompt-block (no output for ~45s) or the total
         // deadline stops the run and `timedOut` is set.
         let result = await PTY.runCommand(command, cwd: context.workspace,
                                           timeout: TimeInterval(timeoutSec))
+        if let checkpoint, let baseline {
+            await Self.offPool { checkpoint.recordGitChanges(since: baseline, by: tool) }
+        }
         let text = String(decoding: result.output, as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -50,6 +58,13 @@ public struct RunShellCommandTool: ToolExecutor {
             return .init(output: text.isEmpty ? "(no output)" : Self.terminalText(text))
         }
         return .init(output: "Command exited with code \(result.exitStatus).\n\(Self.terminalText(text))")
+    }
+
+    /// Blocking work (git) on a utility queue, not on the async pool's threads.
+    static func offPool<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async { continuation.resume(returning: work()) }
+        }
     }
 
     /// Keep the tail of long output, capped like before (~16 KB).
