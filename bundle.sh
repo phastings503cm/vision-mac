@@ -32,8 +32,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <!-- The settings file is named after the identifier (AppIdentity.bundleIdentifier). The first launch brings
        over the settings, data folder and Keychain items of the build before the rename (LaunchMigration). -->
   <key>CFBundleIdentifier</key>      <string>com.503cm.vision.mac</string>
-  <key>CFBundleVersion</key>         <string>18</string>
-  <key>CFBundleShortVersionString</key> <string>0.16.0</string>
+  <key>CFBundleVersion</key>         <string>19</string>
+  <key>CFBundleShortVersionString</key> <string>0.16.1</string>
   <key>CFBundlePackageType</key>     <string>APPL</string>
   <key>CFBundleExecutable</key>      <string>Vision</string>
   <key>CFBundleIconFile</key>        <string>AppIcon</string>

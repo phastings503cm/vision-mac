@@ -12,6 +12,18 @@ prompt on first launch — right-click the app and choose **Open**, or run:
 xattr -d com.apple.quarantine /Applications/Vision.app
 ```
 
+## What's new in 0.16.1 — fixes from the 0.16.0 review
+
+- **Signing in to Guardian again renews the Guardian model routes too**, and signing out clears them, so chats on
+  Guardian's models stop failing with "sign in again" after you did. Settings ▸ Guardian has **Use Guardian's Models**.
+- **A `/goal` with a big paste starts a goal** (the paste goes with its first round) — also when queued or re-sent.
+- **Stop (⌘. or ⌃⌥⌘.) ends typing that is already going out**, and subagents driving the Mac light the glow and are
+  stopped by ⌃⌥⌘. too.
+- **Exporting keys to OpenClaw never writes Guardian's run-only secrets** to `~/.openclaw/.env`.
+- **Download a Copy from Guardian** goes into a new folder and never writes outside it.
+- The Task Queue panel shows only the unattended queue; deleting a chat task removes its saved attachments; Guardian's
+  background syncs no longer pop the refusal dialog; the browser sign-in page escapes the error text it shows.
+
 ## What's new in 0.16.0 — each chat its own model, files that just work, and you can see what runs where
 
 - **Each chat keeps its own model.** Pick a model in a chat's menu and only that
