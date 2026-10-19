@@ -154,6 +154,8 @@ public final class SessionVM: Identifiable {
     /// The chat is Sensitive: only private models, or others through the shield (see `SensitivityPolicy`). Stored
     /// with the conversation; a new chat starts with its project's default.
     public var sensitive = false
+    /// Where an imported chat came from (nil: made here). Shown in the chat list; the search can filter by it.
+    public var importSource: ChatSource?
     /// The model's live reasoning for the current step (not persisted).
     public var reasoning: String = ""
     public var reasoningStarted: Date?

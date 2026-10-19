@@ -73,6 +73,19 @@ struct AppCommands: Commands {
             Button("Open Project Folder…") { model.chooseProject() }
                 .keyboardShortcut("o", modifiers: .command)
             Divider()
+            Button("Import Chats…") { model.showChatImport = true }
+                .keyboardShortcut("i", modifiers: [.command, .shift])
+            Menu("Export Chat") {
+                Button("Markdown…") { ChatExportActions.save(.markdown, sessionID: model.transport.selectedID, transport: model.transport) }
+                Button("JSON…") { ChatExportActions.save(.json, sessionID: model.transport.selectedID, transport: model.transport) }
+            }
+            .disabled(model.transport.selectedID == nil)
+            Button("Send Chat to Guardian") {
+                ChatExportActions.sendToGuardian(sessionID: model.transport.selectedID, transport: model.transport,
+                                                 guardian: model.guardian)
+            }
+            .disabled(model.transport.selectedID == nil)
+            Divider()
             Button("New Terminal") {
                 model.mode = .code
                 model.code.newTerminal()
@@ -153,6 +166,11 @@ struct AppCommands: Commands {
                 model.toggleRunPanel(.prompts)
             }
             .keyboardShortcut("h", modifiers: [.command, .shift])
+            Button("Search All Chats") {
+                model.mode = .chat
+                model.chatSearch.focusRequest += 1
+            }
+            .keyboardShortcut("f", modifiers: [.command, .shift])
             Button("All Prompts…") { model.showAllPrompts = true }
                 .keyboardShortcut("h", modifiers: [.command, .shift, .option])
             Button("Background Activity") { model.showActivity.toggle() }
@@ -238,6 +256,10 @@ struct RootView: View {
         }
         .sheet(item: Binding(get: { model.transport.rewindRequest }, set: { model.transport.rewindRequest = $0 })) { request in
             RewindSheet(request: request).environment(model)
+        }
+        .sheet(isPresented: $model.showChatImport) {
+            ChatImportSheet(model: ChatImportModel(transport: model.transport, guardian: model.guardian))
+                .environment(model)
         }
         .sheet(item: $model.resultsRecord) { record in
             PromptResultsView(record: record).environment(model)

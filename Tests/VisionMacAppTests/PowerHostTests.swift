@@ -165,8 +165,15 @@ final class PowerHostTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(QueueTask.self, from: Data(json.utf8)).sensitive, true)
         XCTAssertFalse(String(decoding: try JSONEncoder().encode(QueueTask(title: "plain")), as: UTF8.self).contains("sensitive"))
 
-        // A chat downloaded from Guardian: Sensitive when it was, or when its project starts chats Sensitive.
-        XCTAssertTrue(String(decoding: GuardianSettingsForm.chatJSON(vm), as: UTF8.self).contains(#""sensitive":true"#))
+        // A chat sent to Guardian or exported as JSON says so; one coming back (from Guardian, a JSON file or
+        // another tool) is Sensitive when it was, or when its project starts chats Sensitive.
+        let doc = try XCTUnwrap(t.exportDocument(vm.id))
+        XCTAssertTrue(doc.sensitive)
+        XCTAssertTrue(String(decoding: ChatExport.guardianPayload(doc), as: UTF8.self).contains(#""sensitive":true"#))
+        XCTAssertTrue(String(decoding: ChatExport.json(doc), as: UTF8.self).contains(#""sensitive" : true"#))
+        var plainDoc = doc
+        plainDoc.sensitive = false
+        XCTAssertFalse(String(decoding: ChatExport.guardianPayload(plainDoc), as: UTF8.self).contains(#""sensitive":"#))
         t.setProjectStartsSensitive(true, path: dir.path)
         func payload(_ id: String, cwd: String?, sensitive: Bool?) throws -> Data {
             var chat: [String: Any] = ["id": id, "title": id, "rows": [["kind": "user", "text": "hi", "isError": false, "at": 0]]]
@@ -174,14 +181,19 @@ final class PowerHostTests: XCTestCase {
             if let sensitive { chat["sensitive"] = sensitive }
             return try JSONSerialization.data(withJSONObject: chat)
         }
+        var chats: [ImportedChat] = []
         for (id, cwd, sensitive) in [("g-project", dir.path, nil), ("g-marked", nil, true), ("g-plain", nil, nil)] as [(String, String?, Bool?)] {
-            GuardianSettingsForm.restoreChat(id: id, title: id, updatedAt: Date(), payload: try payload(id, cwd: cwd, sensitive: sensitive),
-                                             transport: t)
+            chats.append(try XCTUnwrap(GuardianChatImport.harnessChat(id: id, title: id, updatedAt: Date(),
+                                                                       payload: try payload(id, cwd: cwd, sensitive: sensitive))))
         }
-        t.reload()
+        let other = ImportedChat(source: .claudeCode, sourceID: "cc-1", title: "From Claude Code", createdAt: Date(),
+                                 updatedAt: Date(), cwd: dir.path,
+                                 rows: [ImportedRow(kind: .user, text: "hi", at: Date())])
+        XCTAssertEqual(t.importChats(chats + [other]).imported.count, 4)
         XCTAssertEqual(t.sessions.first { $0.id == "g-project" }?.sensitive, true, "its project starts chats Sensitive")
         XCTAssertEqual(t.sessions.first { $0.id == "g-marked" }?.sensitive, true)
         XCTAssertEqual(t.sessions.first { $0.id == "g-plain" }?.sensitive, false)
+        XCTAssertEqual(t.sessions.first { $0.title == "From Claude Code" }?.sensitive, true, "its project starts chats Sensitive")
     }
 
     // MARK: Rewind

@@ -945,6 +945,7 @@ public final class AppTransport {
             vm.routeID = row.route
             vm.thinking = row.thinking.flatMap(ThinkingLevel.init(rawValue:))
             vm.sensitive = row.sensitive ?? false
+            vm.importSource = row.source.flatMap(ChatSource.init(rawValue:))
             vm.updatedAt = row.updatedAt
             vm.loaded = false
             return vm
@@ -963,7 +964,11 @@ public final class AppTransport {
             // Anything added while the timeline was unloaded (a notice) goes after it.
             let added = vm.entries
             vm.entries = []
+            // Reading history back isn't using the chat: it keeps its place in the list (an imported chat stays
+            // where its own last message put it).
+            let stamp = vm.updatedAt
             replayLog(into: vm)
+            if added.isEmpty { vm.updatedAt = stamp }
             vm.entries.append(contentsOf: added)
             vm.loaded = true
         }
