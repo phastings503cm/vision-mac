@@ -127,6 +127,12 @@ final class SparkController {
     /// The box behind the main model.
     var primaryBox: SwapperBox? { box(serving: config.mainRoute) }
 
+    /// The box a bare `/swap <model>` switches in a chat: the one behind that chat's own model (each chat has its own,
+    /// as on Windows), else the primary's.
+    func swapHome(for vm: SessionVM) -> SwapperBox? {
+        transport.flatMap { box(serving: $0.chatRoute(vm)) } ?? primaryBox
+    }
+
     /// True while the box behind the main model switches models: sending waits for it.
     var isSwitchingMainModel: Bool { primaryBox?.isSwitching ?? false }
 
@@ -386,10 +392,10 @@ final class SparkController {
         }
     }
 
-    /// `/swap`: every box's models; `/swap <model>` on the box behind the main model (else the only box); `/swap
-    /// <box> <model>` names the box.
+    /// `/swap`: every box's models; `/swap <model>` on the box behind this chat's own model (else the primary's, else
+    /// the only box); `/swap <box> <model>` names the box.
     func handleCommand(_ arg: String?, in vm: SessionVM) async {
-        let command = SwapCommand.parse(arg, boxes: boxes.map(\.connection), primaryBox: primaryBox?.id)
+        let command = SwapCommand.parse(arg, boxes: boxes.map(\.connection), primaryBox: swapHome(for: vm)?.id)
         switch command {
         case .noBoxes:
             vm.note(SwapperError.notConfigured.errorDescription ?? "", role: .error)

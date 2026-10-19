@@ -97,7 +97,7 @@ The **model menu** under the composer shows the model in use and its window, and
   composer tracks the steps, sending is paused while it switches, and when it's done every route on that
   box follows the new model and window automatically (OpenClaw is repointed by the swapper). Models the
   box knows but hasn't downloaded are listed as *Not installed* — install them from **Settings ▸ Model
-  Servers**. `/swap` lists every box's models; `/swap flash` switches the box behind the primary (or the
+  Servers**. `/swap` lists every box's models; `/swap flash` switches the box behind this chat's model (or the
   only box); `/swap evo flash` names the box by the start of its name.
 - **Primary · Subagents · Backups · Other models**: every route that's switched on in **Settings ▸ AI
   Models**, each marked private (a lock) or masked (a shield). Picking one switches **this chat** only.
@@ -509,7 +509,7 @@ at the bottom.
 | `/compact [focus]` | Summarizes the conversation now, keeping a short recent tail. Earlier messages stay visible above the divider; the model carries the summary. |
 | `/think off\|low\|medium\|high\|max\|default` | Thinking level for this chat. |
 | `/context` | Window size, usage, and where the window figure came from. |
-| `/swap [box] [model]` | Lists every Swapper box's models, or switches what one serves — the box behind the primary unless you name one. |
+| `/swap [box] [model]` | Lists every Swapper box's models, or switches what one serves — the box behind this chat's model unless you name one. |
 | `/agents` | The kinds of subagent, the model servers they run on with how busy each is, and what is running now. |
 | `/skills` · `/skill <name>` · `/skill new <what>` · `/<name> args` | Skills: list, select for this chat, have the model write one, or run one. |
 | `/help` | Lists these. |
@@ -724,7 +724,7 @@ VisionMacApp/              SwiftUI
 swift test
 ```
 
-1,717 tests (1,490 on the harness core, 227 on the app host): the engine loop (tool round-trips, denials, iteration budget, usage accounting,
+1,718 tests (1,490 on the harness core, 228 on the app host): the engine loop (tool round-trips, denials, iteration budget, usage accounting,
 cancellation), permission containment, the Qwen XML fallback, glob, markdown, plugin interpolation
 and quoting, prompt assembly, editor-buffer conflict resolution, 34 over the terminal emulator, and 8
 that spawn a real shell on a real pty and assert on what lands on the screen — plus the fleet (server

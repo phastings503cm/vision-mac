@@ -45,6 +45,24 @@ final class SparkControllerTests: XCTestCase {
         return (SparkController(config: config, transport: transport, defaults: defaults(), secrets: MemorySecretStore()), config)
     }
 
+    /// A bare `/swap <model>` switches the box behind the chat's own model, not the primary's (each chat has its own).
+    func testSwapInAChatTargetsTheBoxBehindThatChatsModel() {
+        let a = ProviderProfile(kind: .openAICompat, name: "DGX Spark", baseURL: "https://10.0.0.1:11443/v1", model: "qwen")
+        let b = ProviderProfile(kind: .openAICompat, name: "Strix Halo", baseURL: "https://10.0.0.2:11443/v1", model: "glm")
+        let (spark, _) = controller([a, b])
+        let boxA = spark.add(SwapperConnection(name: "DGX Spark", url: "https://10.0.0.1:8999", auth: .token,
+                                               apiBase: "https://10.0.0.1:11443/v1"), secret: "sst_a")
+        let boxB = spark.add(SwapperConnection(name: "Strix Halo", url: "https://10.0.0.2:8999", auth: .token,
+                                               apiBase: "https://10.0.0.2:11443/v1"), secret: "sst_b")
+        let onA = transport.newSession(cwd: dir.path)
+        let onB = transport.newSession(cwd: dir.path)
+        transport.setRoute(b.routeID, for: onB)
+        transport.setRoute(a.routeID, for: onA)
+        XCTAssertEqual(spark.swapHome(for: onB)?.id, boxB.id)
+        XCTAssertEqual(spark.swapHome(for: onA)?.id, boxA.id)
+        XCTAssertEqual(spark.primaryBox?.id, boxA.id)
+    }
+
     func testTrustingABoxsCertificatePinsItsRoutesToo() {
         let onBox = ProviderProfile(kind: .openAICompat, name: "DGX Spark (spark-3f2a)", baseURL: "https://192.168.1.42:11443/v1",
                                     model: "Qwen3.8-27B")
