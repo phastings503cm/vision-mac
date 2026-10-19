@@ -16,8 +16,12 @@ final class FakePlanBackend: PlanGuideBackend {
         return try listResult.get()
     }
 
+    /// Per base URL, what a ping there throws (wins over `pingError`).
+    var pingErrors: [String: Error] = [:]
+
     func ping(route: ProviderProfile, model: String) async throws {
         calls.append("ping:\(model)")
+        if let error = pingErrors[route.baseURL] { throw error }
         if let pingError { throw pingError }
     }
 
@@ -201,6 +205,52 @@ final class PlanGuideModelTests: XCTestCase {
         XCTAssertEqual(c.apiKey(for: first), "sk-kimi-1")
         XCTAssertEqual(c.apiKey(for: second), "sk-kimi-2")
         XCTAssertEqual(c.mainRoute?.routeID, first.routeID, "the first one still leads")
+    }
+
+    // MARK: Z.ai (GLM)
+
+    /// The Z.ai entry opens on the Z.ai plan; a GLM Coding Plan key checked on the General API gets 1113 ("no
+    /// balance"), the guide finds that the key answers on the Coding Plan endpoint and offers to switch.
+    func testAZaiCodingPlanKeyOnTheGeneralEndpointIsSwitchedInOneClick() async throws {
+        let backend = FakePlanBackend()
+        backend.pingErrors[ZAIErrors.Endpoint.general.baseURL] = LLMError.rejected(
+            status: 429, message: "x",
+            body: #"{"error":{"code":"1113","message":"Insufficient balance or no resource package. Please recharge."}}"#,
+            permanent: true)
+        backend.listResult = .success(["glm-5.3", "glm-4.7", "embedding-3"])
+        let guide = PlanGuideModel(backend: backend, config: config(), planID: "zai")
+        XCTAssertEqual(guide.plan?.id, "zai")
+        XCTAssertEqual(guide.region?.name, "Coding Plan", "the Coding Plan endpoint is first")
+        guide.regionID = ZAIErrors.Endpoint.general.rawValue
+        guide.key = "abc123.def456"
+        guide.go(.check)
+        try await waitUntil("checked") { !guide.checking }
+        XCTAssertFalse(guide.checked)
+        XCTAssertEqual(guide.suggestedRegion, ZAIErrors.Endpoint.coding.rawValue)
+        XCTAssertTrue(guide.checkError?.hasPrefix("This looks like a GLM Coding Plan key — switch the endpoint to Coding Plan.") == true,
+                      guide.checkError ?? "")
+
+        guide.switchToSuggested()
+        try await waitUntil("checked again") { !guide.checking }
+        XCTAssertTrue(guide.checked)
+        XCTAssertNil(guide.checkError)
+        XCTAssertEqual(guide.region?.baseURL, "https://api.z.ai/api/coding/paas/v4")
+        XCTAssertEqual(guide.models.map(\.id), ["glm-5.3", "glm-4.7"], "Z.ai's list, its chat models only")
+        XCTAssertEqual(guide.route(model: "glm-5.3")?.name, "GLM Coding Plan")
+        XCTAssertEqual(backend.calls.filter { $0.hasPrefix("ping:") }, ["ping:glm-5.3", "ping:glm-5.3", "ping:glm-5.3"],
+                       "general (refused), coding (works), then coding again after the switch")
+    }
+
+    func testAZaiKeyThatWorksNowhereSaysWhy() async throws {
+        let backend = FakePlanBackend()
+        backend.pingError = LLMError.http(401, #"{"error":{"code":"401","message":"token expired or incorrect"}}"#)
+        let guide = PlanGuideModel(backend: backend, config: config(), planID: "zai")
+        guide.key = "abc123.def456"
+        guide.go(.check)
+        try await waitUntil("checked") { !guide.checking }
+        XCTAssertNil(guide.suggestedRegion)
+        XCTAssertTrue(guide.checkError?.hasPrefix("Z.ai didn't accept the key (401: token expired or incorrect).") == true,
+                      guide.checkError ?? "")
     }
 }
 

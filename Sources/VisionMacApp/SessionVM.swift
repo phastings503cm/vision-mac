@@ -140,6 +140,9 @@ public final class SessionVM: Identifiable {
 
     /// This chat's thinking level; nil = the provider's default.
     public var thinking: ThinkingLevel?
+    /// The route (`ProviderProfile.routeID`) this chat talks to — its own, stored with the conversation (see
+    /// `ChatRoutes.swift`). Nil = not chosen yet: it takes the primary when it next sends.
+    public var routeID: String?
     /// The model's live reasoning for the current step (not persisted).
     public var reasoning: String = ""
     public var reasoningStarted: Date?

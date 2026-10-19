@@ -33,6 +33,9 @@ public struct ToolContext: Sendable {
     /// The model servers subagents run on (workers first, the primary as
     /// overflow). Nil = a subagent uses this run's own client.
     public let fleet: AgentFleet?
+    /// This chat's own server, which stands in for the fleet's primary (see `AgentFleet.acquire`). Nil = the
+    /// configured primary.
+    public let fleetHome: FleetServer?
     /// Every subagent this chat has started, for the UI. Nil = not tracked.
     public let roster: AgentRoster?
     /// The kinds of subagent available (nil = the built-in ones).
@@ -57,8 +60,10 @@ public struct ToolContext: Sendable {
                 backgroundAgents: BackgroundAgents? = nil,
                 fleet: AgentFleet? = nil, roster: AgentRoster? = nil, agentTypes: AgentCatalog? = nil,
                 retry: RetryPolicy? = nil, visionEnabled: Bool = true,
-                temperature: Double? = nil, maxOutputTokens: Int? = nil, unattended: Bool = false) {
+                temperature: Double? = nil, maxOutputTokens: Int? = nil, unattended: Bool = false,
+                fleetHome: FleetServer? = nil) {
         self.workspace = workspace
+        self.fleetHome = fleetHome
         self.policy = policy
         self.client = client
         self.registry = registry

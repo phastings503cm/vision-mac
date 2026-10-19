@@ -104,6 +104,10 @@ struct ProviderEditor: View {
     @State private var detected: String?
     /// A certificate the server presented that this Mac doesn't trust (offered for pinning).
     @State private var untrusted: String?
+    /// Z.ai: the endpoint the key worked on instead, after Test.
+    @State private var betterEndpoint: ZAIErrors.Endpoint?
+    /// Bumped by Forget, so the learned line redraws.
+    @State private var forgotten = 0
     private let original: ProviderProfile
 
     init(profile: ProviderProfile) {
@@ -128,6 +132,16 @@ struct ProviderEditor: View {
                     TextField("Base URL", text: $draft.baseURL)
                         .font(Theme.mono(11))
                         .disabled(draft.kind == .bedrock)
+                    if let endpoint = ZAIErrors.Endpoint.of(baseURL: draft.baseURL) {
+                        Picker("Z.ai endpoint", selection: Binding(get: { endpoint }, set: {
+                            draft.baseURL = $0.baseURL
+                            betterEndpoint = nil
+                        })) {
+                            ForEach(ZAIErrors.Endpoint.allCases, id: \.self) { Text($0.name).tag($0) }
+                        }
+                        Text("A GLM Coding Plan key works only on Coding Plan; a key made at open.bigmodel.cn only on the China endpoints. Test says which one fits.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     if draft.kind == .bedrock {
                         Text("Bedrock's endpoint for the Region. To change the Region, model or AWS sign-in, use Change… on the Models page.")
                             .font(.caption).foregroundStyle(.secondary)
@@ -167,15 +181,24 @@ struct ProviderEditor: View {
                     Text(detected ?? "Leave blank to auto-detect from the server (vLLM/SGLang report max_model_len). Only set it to force a smaller window.")
                         .font(.caption).foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    Picker("Default thinking", selection: $reasoning) {
-                        Text("Server default").tag("")
-                        ForEach(ThinkingLevel.allCases, id: \.self) { level in
-                            Text("\(level.label) — \(level.blurb)").tag(level.rawValue)
+                    let rules = ModelRequestRules.for(draft, model: draft.model)
+                    if rules.thinkingLevels.isEmpty {
+                        LabeledContent("Default thinking") {
+                            Text(rules.alwaysThinks ? "Always on — this model takes no setting" : "None — this model has no thinking setting")
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        Picker("Default thinking", selection: $reasoning) {
+                            Text("Server default").tag("")
+                            ForEach(rules.thinkingLevels, id: \.self) { level in
+                                Text("\(rules.label(level)) — \(level.blurb)").tag(level.rawValue)
+                            }
                         }
                     }
-                    Text("Sent as enable_thinking / reasoning_effort. Each chat can override it from the composer or with /think.")
+                    Text("Only the levels this model takes. Each chat can override it from the composer or with /think.")
                         .font(.caption).foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                    learnedRow
                     Toggle("Interactive use only (plan terms)", isOn: Binding(
                         get: { draft.interactiveOnly ?? false },
                         set: { draft.interactiveOnly = $0 ? true : nil }))
@@ -204,6 +227,16 @@ struct ProviderEditor: View {
 
             HStack {
                 Button("Discover Models") { Task { await discover() } }
+                Button("Test") { Task { await test() } }
+                    .help("Send the model a one-word message with these settings")
+                if let better = betterEndpoint {
+                    Button("Switch to \(better.name)") {
+                        draft.baseURL = better.baseURL
+                        betterEndpoint = nil
+                        status = "Switched to \(better.name) — Save to keep it."
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
                 if let status {
                     Text(status).font(.caption).foregroundStyle(.secondary)
                         .lineLimit(2)
@@ -264,6 +297,42 @@ struct ProviderEditor: View {
                let url = URL(string: probe.endpoint(path: "models")) {
                 untrusted = await CertificatePin.probe(url)
             }
+        }
+    }
+
+    /// What servers refused before for this route's model, with a way to start over.
+    @ViewBuilder
+    private var learnedRow: some View {
+        let key = RequestAdaptationStore.key(baseURL: draft.baseURL, model: draft.model)
+        if forgotten >= 0, let learned = RequestAdaptationStore.shared.adaptation(for: key), !learned.isEmpty {
+            LabeledContent("Learned from the server") {
+                HStack(alignment: .top) {
+                    Text(learned.summary).font(.caption).fixedSize(horizontal: false, vertical: true)
+                    Button("Forget") {
+                        RequestAdaptationStore.shared.forget(prefix: key)
+                        forgotten += 1
+                    }
+                }
+            }
+        }
+    }
+
+    /// A one-word message with the draft's settings; for Z.ai, which endpoint the key fits when it doesn't.
+    private func test() async {
+        status = "Testing…"
+        betterEndpoint = nil
+        var probe = draft
+        probe.apiKey = apiKey.isEmpty ? nil : apiKey
+        if let result = await ZAIDiagnosis.test(probe) {
+            status = result.message
+            betterEndpoint = result.worksOn
+            return
+        }
+        do {
+            try await ZAIDiagnosis.ping(probe)
+            status = "✔ \(probe.model) answered."
+        } catch {
+            status = PlanCatalog.explainChatError(error, route: probe) ?? AppTransport.describe(error)
         }
     }
 

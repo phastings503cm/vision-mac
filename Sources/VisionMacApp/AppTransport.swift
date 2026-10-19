@@ -312,6 +312,8 @@ public final class AppTransport {
         if cwd == nil { vm.workFolder = workFolder }
         sessions.insert(vm, at: 0)
         log.upsert(id: id, cwd: cwd, title: "New chat", preset: resolved.rawValue, scratch: vm.workFolder)
+        // Its own model: what its project's chats last chose, else the primary.
+        assignInitialChoice(vm)
         if select { selectedID = id }
         return vm
     }
@@ -645,11 +647,13 @@ public final class AppTransport {
             } else if task.cwd == nil, let folder = task.workFolder {
                 // Queued from a chat without a project: a chat without one, working in that chat's folder.
                 vm = newSession(cwd: nil, select: false, workFolder: folder)
+                if task.routeID != nil { assignInitialChoice(vm, routeID: task.routeID, thinking: task.thinking) }
                 renameSession(vm.id, to: "🚀 \(task.title)")
                 queue.attachSession(taskID, vm.id)
             } else {
                 let cwd = task.cwd ?? projectContext?.root.path ?? sessions.first?.cwd
                 vm = newSession(cwd: cwd, select: false)
+                if task.routeID != nil { assignInitialChoice(vm, routeID: task.routeID, thinking: task.thinking) }
                 renameSession(vm.id, to: "🚀 \(task.title)")
                 queue.attachSession(taskID, vm.id)
             }
@@ -852,6 +856,8 @@ public final class AppTransport {
             let vm = SessionVM(id: row.id, title: row.title, cwd: cwd,
                                preset: PermissionPreset(rawValue: row.preset ?? "") ?? .workspaceWrite)
             if cwd == nil { vm.workFolder = row.scratch }
+            vm.routeID = row.route
+            vm.thinking = row.thinking.flatMap(ThinkingLevel.init(rawValue:))
             vm.updatedAt = row.updatedAt
             vm.loaded = false
             return vm
@@ -951,7 +957,8 @@ public final class AppTransport {
     // MARK: - Engine
 
     private func engine(for sessionID: String, vm: SessionVM, client: any LLMClient,
-                        window: Int, thinking: ThinkingLevel?, skillState: SkillState, unattended: Bool) -> Engine {
+                        window: Int, thinking: ThinkingLevel?, skillState: SkillState, unattended: Bool,
+                        home: FleetServer? = nil) -> Engine {
         // A chat without a project works in its own scratch folder, which the permission preset then confines it to
         // exactly as a project folder would.
         let workspace = vm.workspaceURL ?? scratchFolder(for: vm, create: true)
@@ -1042,7 +1049,8 @@ public final class AppTransport {
             backgroundAgents: backgroundPool(for: sessionID),
             fleet: fleet,
             roster: roster(for: sessionID),
-            agentTypes: agentCatalog(for: vm)
+            agentTypes: agentCatalog(for: vm),
+            fleetHome: home
         )
         engines[sessionID] = engine
         return engine
@@ -1086,7 +1094,7 @@ public final class AppTransport {
               let pool = backgroundPools[vm.id], pool.all.contains(where: { $0.status == .done || $0.status == .failed }),
               isServerSwitching?() != true else { return }
         // Carrying on by itself is unattended work, which an interactive-only plan doesn't allow.
-        if config.interactiveOnlyMain != nil {
+        if chatRoute(vm)?.isInteractiveOnly == true {
             vm.note("Background agents finished — reply to continue.")
             return
         }
@@ -1131,6 +1139,8 @@ public final class AppTransport {
         let task = queue.add(title, details: details, atFront: front, cwd: cwd,
                              workFolder: plain ? vm.map { scratchFolder(for: $0).path } : nil)
         queue.note(task.id, "Queued by the agent in “\(vm?.title ?? "a chat")”.")
+        // The task's chat runs on the model of the chat that queued it.
+        if let vm { queue.setRoute(id: task.id, routeID: chatRouteID(vm), thinking: vm.thinking?.rawValue) }
         let position = queue.position(of: task.id) ?? 0
         var out = "Queued “\(task.title)” at #\(position) (\(queue.queuedCount) waiting)."
         if queueRunning {
@@ -1299,7 +1309,7 @@ public final class AppTransport {
             vm.note("Commands:\n" + lines.joined(separator: "\n"))
 
         case .think(let arg):
-            let fallback = config.activeProvider?.thinking
+            let fallback = chatRoute(vm)?.thinking
             guard let arg else {
                 let current = vm.thinking ?? fallback
                 vm.note("Thinking: **\(current?.label ?? "server default")**"
@@ -1308,22 +1318,23 @@ public final class AppTransport {
                 return
             }
             if ["default", "reset", "auto"].contains(arg.lowercased()) {
-                vm.thinking = nil
+                setThinking(nil, for: vm)
                 vm.note("Thinking back to the provider default (\(fallback?.label ?? "server default")).")
             } else if let level = ThinkingLevel(userInput: arg) {
-                vm.thinking = level
-                vm.note("Thinking set to **\(level.label)** for this chat — \(level.blurb.lowercased()).")
+                setThinking(level, for: vm)
+                vm.note("Thinking set to **\(level.label)** for this chat — \(level.blurb.lowercased())."
+                        + Self.thinkingCaveat(level, rules: requestRules(for: vm)))
             } else {
                 vm.note("Unknown level “\(arg)”. Use off, low, medium, high, max, or default.", role: .error)
             }
 
         case .context:
             runTasks[vm.id] = Task {
-                _ = await resolveRoute(force: true)
-                let limit = contextLimit()
+                _ = await resolveRoute(vm, force: true)
+                let limit = contextLimit(for: vm)
                 let used = contextUsed(for: vm.id, draft: "")
-                let source = contextSource()
-                let model = config.activeProvider.map(effective)?.model ?? "?"
+                let source = contextSource(for: vm)
+                let model = modelID(for: vm) ?? "?"
                 vm.note("Context: \(used.formatted()) of \(limit.formatted()) tokens used "
                         + "(\(Int(Double(used) / Double(max(limit, 1)) * 100))%). Model `\(model)`; window \(source). "
                         + "Auto-compaction starts at \(Int(Compaction.triggerFraction * 100))%.")
@@ -1364,7 +1375,8 @@ public final class AppTransport {
             agentsCommand(vm)
 
         case .goal(let goal):
-            if let route = config.interactiveOnlyMain {
+            pinRouteIfUnset(vm)
+            if let route = chatRoute(vm), route.isInteractiveOnly {
                 vm.note(Self.interactiveOnlyGoalMessage(route), role: .error)
                 return
             }
@@ -1425,10 +1437,10 @@ public final class AppTransport {
         if transcripts[sessionID] == nil { hydrate(vm) }
         let messages = transcripts[sessionID] ?? []
         guard messages.contains(where: { $0.role == .user }) else { return .nothingYet }
-        guard let profile = await resolveRoute() else { return .noModel }
+        guard let profile = await resolveRoute(vm) else { return .noModel }
         let prompt = systemPrompts[sessionID] ?? basePrompt
         let before = TokenEstimate.request(systemPrompt: prompt, messages: messages)
-        guard let plan = Compaction.plan(usedTokens: before, limit: contextLimit(),
+        guard let plan = Compaction.plan(usedTokens: before, limit: contextLimit(for: vm),
                                          transcript: messages, force: true) else {
             return .alreadyCompact(before)
         }
@@ -1760,13 +1772,13 @@ public final class AppTransport {
                 log.recordItem(sessionID, kind: "notice", text: "Stopped.", toolName: nil, argSummary: nil, output: nil, isError: false)
                 return
             }
-            let message = PlanCatalog.explainChatError(error, route: config.activeProvider) ?? Self.describe(error)
+            let message = PlanCatalog.explainChatError(error, route: chatRoute(vm)) ?? Self.describe(error)
             phasesAbandon(vm, reason: message, completed: false)
             vm.endStreaming()
             vm.note(message, role: .error)
             log.recordItem(sessionID, kind: "error", text: message, toolName: nil, argSummary: nil, output: nil, isError: true)
             banner = message
-            awsSignInProfile = Self.expiredAWSProfile(for: error, route: config.activeProvider)
+            awsSignInProfile = Self.expiredAWSProfile(for: error, route: chatRoute(vm))
         }
     }
 
@@ -1775,9 +1787,9 @@ public final class AppTransport {
         "\(routeLabel(route)) is for interactive use only under its plan's terms, so the queue won't run on it. Make another model primary for unattended work."
     }
 
-    /// Why `/goal` won't start on the main model (a goal keeps working without the user).
+    /// Why `/goal` won't start on the chat's model (a goal keeps working without the user).
     static func interactiveOnlyGoalMessage(_ route: ProviderProfile) -> String {
-        "\(routeLabel(route)) is for interactive use only under its plan's terms, so /goal — which keeps working without you — won't run on it. Make another model primary for unattended work."
+        "\(routeLabel(route)) is for interactive use only under its plan's terms, so /goal — which keeps working without you — won't run on it. Choose another model for this chat (the model menu under the message box) for unattended work."
     }
 
     /// The AWS CLI profile to sign in again when `error` means a Bedrock route's sign-in ran out or was
@@ -1857,7 +1869,7 @@ public final class AppTransport {
             if Task.isCancelled { return .stopped }
             // The primary became an interactive-only plan while the goal ran (the user switched it): no more
             // unattended rounds on it.
-            if let route = config.interactiveOnlyMain {
+            if let route = chatRoute(vm), route.isInteractiveOnly {
                 let why = auto ? Self.interactiveOnlyQueueMessage(route) : Self.interactiveOnlyGoalMessage(route)
                 notice(why, error: true)
                 return .blocked(why)
@@ -1968,14 +1980,15 @@ public final class AppTransport {
             if !title.isEmpty { renameSession(sessionID, to: title) }
         }
 
-        // Re-read what the server serves right now: the Spark can swap models
-        // between turns, and the window/model id must follow.
-        guard let profile = await resolveRoute() else { throw LLMError.noModel }
-        let window = contextLimit()
+        // This chat's own model — never the one another chat picked. Re-read what its server serves right now: the
+        // Spark can swap models between turns, and the window/model id must follow.
+        pinRouteIfUnset(vm)
+        guard let profile = await resolveRoute(vm) else { throw LLMError.noModel }
+        let window = contextLimit(for: vm)
         let thinking = vm.thinking
         let skillState = self.skillState(for: vm)
         let unattended = isUnattended(vm)
-        let backups = backupProfiles(unattended: unattended)
+        let backups = backupProfiles(unattended: unattended, excluding: profile.routeID)
         let key = EngineKey(profile: profile, window: window, thinking: thinking, preset: vm.preset,
                             skills: skillState.signature, computerTools: config.computerToolsEnabled,
                             vision: visionOn(for: profile), vault: vault.revision, agents: agentsStamp(for: vm),
@@ -1988,7 +2001,8 @@ public final class AppTransport {
             engine = existing
         } else {
             engine = self.engine(for: sessionID, vm: vm, client: mainClient(profile, backups: backups, sessionID: sessionID),
-                                 window: window, thinking: thinking, skillState: skillState, unattended: unattended)
+                                 window: window, thinking: thinking, skillState: skillState, unattended: unattended,
+                                 home: fleetHome(for: vm, profile: profile))
             engineKeys[sessionID] = key
         }
         retryRoute[sessionID] = nil
@@ -2025,7 +2039,7 @@ public final class AppTransport {
             // smaller than we budgeted — learn it so the gauge and future
             // compaction use the true number.
             if case LLMError.overflow(let limit, _) = error, limit > 0,
-               let provider = config.activeProvider {
+               let provider = chatRoute(vm) {
                 overflowCeiling[provider.routeID] = min(limit, overflowCeiling[provider.routeID] ?? limit)
             }
             vm.retry = nil
@@ -2206,7 +2220,8 @@ public final class AppTransport {
     func visionOn(for profile: ProviderProfile?) -> Bool {
         guard let profile else { return true }
         if noVisionRoutes.contains(profile.routeID) { return false }
-        return profile.vision ?? true
+        // What the user set, else what the model is known to take (Z.ai's text models read no images).
+        return profile.vision ?? ModelRequestRules.for(profile, model: profile.model).acceptsImages ?? true
     }
 
     // MARK: - Skills
@@ -2350,7 +2365,7 @@ public final class AppTransport {
 
     /// Ask the model to write a skill (optionally from a chat, or improving one).
     public func generateSkill(goal: String, from vm: SessionVM?, improving: String? = nil) async throws -> GeneratedSkill {
-        guard let profile = await resolveRoute() else { throw LLMError.noModel }
+        guard let profile = await resolveRoute(vm) else { throw LLMError.noModel }
         if let vm, transcripts[vm.id] == nil { hydrate(vm) }
         let conversation = vm.flatMap { transcripts[$0.id] } ?? []
         let request = SkillGenerationRequest(goal: goal, conversation: conversation,
@@ -2420,8 +2435,15 @@ public final class AppTransport {
     /// effects (the probe) live in `ensureContextProbe`, called from the
     /// session lifecycle, so evaluating a SwiftUI body never fires a request.
     @MainActor
-    public func contextLimit() -> Int {
-        guard let provider = config.activeProvider else { return FallbackContextWindow.defaultLimit }
+    public func contextLimit() -> Int { contextLimit(for: selected) }
+
+    /// The window of the model a chat uses.
+    @MainActor
+    public func contextLimit(for vm: SessionVM?) -> Int { contextLimit(route: chatRoute(vm)) }
+
+    @MainActor
+    public func contextLimit(route: ProviderProfile?) -> Int {
+        guard let provider = route else { return FallbackContextWindow.defaultLimit }
         if let override = provider.contextWindow, override > 0 { return override }
         let learned: Int
         if let probed = probedContext[provider.routeID] {
@@ -2437,19 +2459,20 @@ public final class AppTransport {
 
     /// Where the current window figure came from, for `/context` and the gauge tooltip.
     @MainActor
-    public func contextSource() -> String {
-        guard let provider = config.activeProvider else { return "default" }
+    public func contextSource() -> String { contextSource(for: selected) }
+
+    @MainActor
+    public func contextSource(for vm: SessionVM?) -> String {
+        guard let provider = chatRoute(vm) else { return "default" }
         if let override = provider.contextWindow, override > 0 { return "set manually in Settings" }
         if probedContext[provider.routeID] != nil { return "detected from the server" }
         if FallbackContextWindow.limit(for: effective(provider).model) != nil { return "from the built-in model table (server did not report one)" }
         return "a conservative default (server did not report one — set it in Settings)"
     }
 
-    /// The model id actually in use for the active route (follows a swap).
+    /// The model id actually in use for the selected chat's route (follows a swap).
     @MainActor
-    public var activeModelID: String? {
-        config.activeProvider.map(effective)?.model
-    }
+    public var activeModelID: String? { modelID(for: selected) }
 
     /// The profile with the model the server actually serves.
     @MainActor
@@ -2462,10 +2485,11 @@ public final class AppTransport {
     /// Ask the server what it serves and how big its window is, then return the
     /// profile to use. Cached for a few seconds so `/goal` rounds don't re-ask;
     /// a failed probe keeps whatever we knew.
+    /// `vm` = the chat whose route to resolve; nil = the primary (the fleet's main server).
     @MainActor
     @discardableResult
-    func resolveRoute(force: Bool = false) async -> ProviderProfile? {
-        guard let provider = config.activeProvider else { return nil }
+    func resolveRoute(_ vm: SessionVM? = nil, force: Bool = false) async -> ProviderProfile? {
+        guard let provider = vm.map({ chatRoute($0) }) ?? config.activeProvider else { return nil }
         let routeID = provider.routeID
         let fresh = routeInfo[routeID].map { Date().timeIntervalSince($0.at) < 15 } ?? false
         if force || !fresh {
@@ -2486,20 +2510,23 @@ public final class AppTransport {
     /// differs from the one the session's engine was built with.
     @MainActor
     func rerouteForRetry(sessionID: String) async -> (client: any LLMClient, model: String)? {
-        guard let profile = await resolveRoute(force: true) else { return nil }
+        // The chat's own route: a retry never moves a chat onto the model another chat picked.
+        let vm = sessions.first { $0.id == sessionID }
+        guard let profile = await resolveRoute(vm, force: true) else { return nil }
         // Compare with the route the run is on now (a retry may have moved it).
         guard profile != (retryRoute[sessionID] ?? engineKeys[sessionID]?.profile) else { return nil }
         retryRoute[sessionID] = profile
-        let unattended = sessions.first(where: { $0.id == sessionID }).map(isUnattended) ?? false
-        return (mainClient(profile, backups: backupProfiles(unattended: unattended), sessionID: sessionID), profile.model)
+        let unattended = vm.map(isUnattended) ?? false
+        return (mainClient(profile, backups: backupProfiles(unattended: unattended, excluding: profile.routeID), sessionID: sessionID),
+                profile.model)
     }
 
     // MARK: - Backups
 
     /// The routes that take over when the main model fails before answering, with their keys. Unattended work
     /// leaves out the ones whose plans allow interactive use only.
-    func backupProfiles(unattended: Bool = false) -> [ProviderProfile] {
-        config.backupRoutes.filter { !unattended || !$0.isInteractiveOnly }.map { route in
+    func backupProfiles(unattended: Bool = false, excluding routeID: String? = nil) -> [ProviderProfile] {
+        config.backupRoutes.filter { (!unattended || !$0.isInteractiveOnly) && $0.routeID != routeID }.map { route in
             var profile = route
             let key = config.apiKey(for: route)
             profile.apiKey = key.isEmpty ? nil : key
@@ -2520,7 +2547,36 @@ public final class AppTransport {
             Task { @MainActor [weak self] in self?.noteFailover(notice, sessionID: sessionID) }
         }, shield: { [weak self] report in
             Task { @MainActor [weak self] in self?.noteMasked(report, sessionID: sessionID) }
+        }, notice: { [weak self] text in
+            Task { @MainActor [weak self] in self?.noteAdapted(text, sessionID: sessionID) }
         }))
+    }
+
+    /// A parameter the server refused was dropped (and remembered): one line in the chat, not an error.
+    private func noteAdapted(_ text: String, sessionID: String) {
+        guard let vm = sessions.first(where: { $0.id == sessionID }) else { return }
+        vm.note(text)
+        log.recordItem(sessionID, kind: "notice", text: text, toolName: nil, argSummary: nil, output: nil, isError: false)
+    }
+
+    /// For `/think`: what the chat's model makes of a level it doesn't offer ("" when it offers it).
+    static func thinkingCaveat(_ level: ThinkingLevel, rules: ModelRequestRules?) -> String {
+        guard let rules else { return "" }
+        if rules.thinkingLevels.isEmpty {
+            return rules.alwaysThinks ? " This model always thinks and takes no setting, so it changes nothing here." : " This model has no thinking setting."
+        }
+        guard let nearest = rules.nearestLevel(level), nearest != level else { return "" }
+        return " This model offers \(rules.thinkingLevels.map { rules.label($0) }.joined(separator: ", ")), so it gets \(rules.label(nearest))."
+    }
+
+    /// The fleet's stand-in primary for a chat's subagents: that chat's own route, as its turns resolve it.
+    @MainActor
+    func resolveHomeTarget(sessionID: String) async throws -> FleetTarget {
+        let vm = sessions.first { $0.id == sessionID }
+        guard let profile = await resolveRoute(vm) else { throw LLMError.noModel }
+        return FleetTarget(client: ProviderClients.make(profile), model: profile.model, contextWindow: contextLimit(route: profile),
+                           vision: visionOn(for: profile), temperature: profile.temperature,
+                           maxOutputTokens: profile.maxOutputTokens)
     }
 
     /// What the shield masked for a request in this chat: a chip on the turn's answer (and, the first time a
@@ -2559,13 +2615,14 @@ public final class AppTransport {
     /// recent answer is reused.
     @MainActor
     public func ensureContextProbe() {
-        guard let provider = config.activeProvider else { return }
+        let vm = selected
+        guard let provider = chatRoute(vm) else { return }
         let routeID = provider.routeID
         guard !probingContext.contains(routeID) else { return }
         if let info = routeInfo[routeID], Date().timeIntervalSince(info.at) < 60 { return }
         probingContext.insert(routeID)
         Task { [weak self] in
-            await self?.resolveRoute(force: true)
+            await self?.resolveRoute(vm, force: true)
             self?.probingContext.remove(routeID)
         }
     }
@@ -2633,7 +2690,7 @@ public final class AppTransport {
     /// when under the trigger or when there's nothing old enough to fold.
     @MainActor
     public func compactTranscript(sessionID: String, used: Int, messages: [LLMMessage]) async -> [LLMMessage] {
-        let limit = engineKeys[sessionID]?.window ?? contextLimit()
+        let limit = engineKeys[sessionID]?.window ?? contextLimit(for: sessions.first { $0.id == sessionID })
         guard let plan = Compaction.plan(usedTokens: used, limit: limit, transcript: messages) else {
             return messages
         }
@@ -2659,8 +2716,9 @@ public final class AppTransport {
     /// under the trigger.
     @MainActor
     private func summarize(sessionID: String, plan: Compaction.Plan) async -> String? {
-        await resolveRoute()
-        guard let profile = engineKeys[sessionID]?.profile ?? config.activeProvider.map(effective) else { return nil }
+        let vm = sessions.first { $0.id == sessionID }
+        await resolveRoute(vm)
+        guard let profile = engineKeys[sessionID]?.profile ?? chatRoute(vm).map(effective) else { return nil }
         return await Compaction.summarize(client: ProviderClients.make(profile), plan: plan, model: profile.model)
     }
 

@@ -40,6 +40,7 @@ public final class AppConfig {
         static let planPanelOpen = "planPanel.open.v1"
         static let planPanelWidth = "planPanel.width.v1"
         static let planPanelAutoOpen = "planPanel.autoOpen.v1"
+        static let projectChoices = "routes.byProject.v1"
     }
 
     private let defaults: UserDefaults
@@ -108,6 +109,10 @@ public final class AppConfig {
 
     /// Screen, mouse/keyboard and background-process tools offered to the agent.
     public var computerToolsEnabled: Bool = true { didSet { persist() } }
+
+    /// Per project folder ("" = chats without a project): the model and thinking level its chats last chose — what
+    /// a new chat there starts with (see `ChatRoutes.swift`).
+    public var projectChoices: [String: ChatChoice] = [:] { didSet { persist() } }
 
     // The plan panel.
     /// Whether the plan panel is showing (it follows whichever chat is selected).
@@ -457,6 +462,10 @@ public final class AppConfig {
         planPanelOpen = defaults.bool(forKey: Keys.planPanelOpen)
         planPanelWidth = defaults.object(forKey: Keys.planPanelWidth) as? Double ?? 320
         planPanelAutoOpen = defaults.object(forKey: Keys.planPanelAutoOpen) as? Bool ?? true
+        if let data = defaults.data(forKey: Keys.projectChoices),
+           let decoded = try? JSONDecoder().decode([String: ChatChoice].self, from: data) {
+            projectChoices = decoded
+        }
     }
 
     private func persist() {
@@ -484,6 +493,7 @@ public final class AppConfig {
         defaults.set(planPanelOpen, forKey: Keys.planPanelOpen)
         defaults.set(planPanelWidth, forKey: Keys.planPanelWidth)
         defaults.set(planPanelAutoOpen, forKey: Keys.planPanelAutoOpen)
+        if let data = try? JSONEncoder().encode(projectChoices) { defaults.set(data, forKey: Keys.projectChoices) }
     }
 }
 

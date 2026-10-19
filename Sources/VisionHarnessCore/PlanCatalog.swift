@@ -17,13 +17,23 @@ public struct SubscriptionPlan: Sendable, Equatable, Identifiable {
         public var keyPage: URL
         /// What to open on the key page when it isn't obvious ("Coding Plan", "API Keys").
         public var keyPlace: String?
+        /// The saved route's name, when this region (endpoint) names it differently ("GLM Coding Plan").
+        public var routeName: String?
+        /// One line under the picker ("Coding Plan keys work only here").
+        public var detail: String?
+        /// A subscription here, when it differs from the plan's own (Z.ai: Coding Plan vs the per-token API).
+        public var isSubscription: Bool?
 
-        public init(id: String, name: String, baseURL: String, keyPage: URL, keyPlace: String? = nil) {
+        public init(id: String, name: String, baseURL: String, keyPage: URL, keyPlace: String? = nil,
+                    routeName: String? = nil, detail: String? = nil, isSubscription: Bool? = nil) {
             self.id = id
             self.name = name
             self.baseURL = baseURL
             self.keyPage = keyPage
             self.keyPlace = keyPlace
+            self.routeName = routeName
+            self.detail = detail
+            self.isSubscription = isSubscription
         }
     }
 
@@ -65,6 +75,11 @@ public struct SubscriptionPlan: Sendable, Equatable, Identifiable {
     public var terms: String
     /// The terms allow only interactive use: the route is made `interactiveOnly`.
     public var interactiveOnly: Bool
+    /// What the guide calls the choice between regions: "Region", or "Endpoint" (Z.ai).
+    public var regionLabel = "Region"
+    /// Checking the key takes a one-token reply even when `/models` answers (Z.ai lists models for any valid key,
+    /// on any endpoint, while only the right endpoint can chat).
+    public var checksWithChat = false
 
     public var recommended: Model? { models.first }
 
@@ -76,7 +91,7 @@ public struct SubscriptionPlan: Sendable, Equatable, Identifiable {
     public func keySteps(region: Region) -> [String] {
         let site = region.keyPage.host ?? region.keyPage.absoluteString
         var steps = ["Sign in at **\(site)** (or create an account)."]
-        if isSubscription {
+        if region.isSubscription ?? isSubscription {
             let where_ = subscribeURL.map { " at **\($0.host ?? $0.absoluteString)\($0.path)**" } ?? ""
             steps.append("Subscribe to the plan\(where_) if you haven't yet.")
         } else {
@@ -92,36 +107,7 @@ public enum PlanCatalog {
     private static func url(_ text: String) -> URL { URL(string: text)! }
 
     public static let plans: [SubscriptionPlan] = [
-        SubscriptionPlan(
-            id: "zai-coding", provider: "Z.ai", name: "Z.ai — GLM Coding Plan", routeName: "GLM Coding Plan",
-            summary: "A monthly plan for GLM-5.3 in coding tools.",
-            regions: [
-                .init(id: "international", name: "International", baseURL: "https://api.z.ai/api/coding/paas/v4",
-                      keyPage: url("https://z.ai/manage-apikey/apikey-list"), keyPlace: "API Keys"),
-                .init(id: "china", name: "China (BigModel)", baseURL: "https://open.bigmodel.cn/api/coding/paas/v4",
-                      keyPage: url("https://open.bigmodel.cn/usercenter/apikeys"), keyPlace: "API Keys"),
-            ],
-            isSubscription: true, subscribeURL: url("https://z.ai/subscribe"),
-            keyHint: "A long string of letters and digits, usually with a dot in the middle. Coding Plan keys work only on the coding address.",
-            models: [.init("glm-5.3", note: "1M context", contextWindow: 1_000_000)],
-            listsModels: false,
-            terms: "Z.ai offers the Coding Plan for use in coding tools.",
-            interactiveOnly: false),
-        SubscriptionPlan(
-            id: "zai-api", provider: "Z.ai", name: "Z.ai — pay-as-you-go API", routeName: "Z.ai API",
-            summary: "GLM-5.3, billed per token.",
-            regions: [
-                .init(id: "international", name: "International", baseURL: "https://api.z.ai/api/paas/v4",
-                      keyPage: url("https://z.ai/manage-apikey/apikey-list"), keyPlace: "API Keys"),
-                .init(id: "china", name: "China (BigModel)", baseURL: "https://open.bigmodel.cn/api/paas/v4",
-                      keyPage: url("https://open.bigmodel.cn/usercenter/apikeys"), keyPlace: "API Keys"),
-            ],
-            isSubscription: false, subscribeURL: nil,
-            keyHint: "An API key (not a Coding Plan key): a long string of letters and digits, usually with a dot in the middle.",
-            models: [.init("glm-5.3", note: "1M context", contextWindow: 1_000_000)],
-            listsModels: false,
-            terms: "Billed per token.",
-            interactiveOnly: false),
+        zai,
         SubscriptionPlan(
             id: "kimi-code", provider: "Kimi", name: "Kimi Code (subscription)", routeName: "Kimi Code",
             summary: "Kimi's coding subscription: K2.8 with up to 1M context, and K3.",
@@ -199,7 +185,52 @@ public enum PlanCatalog {
             interactiveOnly: false),
     ]
 
-    public static func plan(_ id: String) -> SubscriptionPlan? { plans.first { $0.id == id } }
+    /// Z.ai (GLM): one provider, four endpoints. A GLM Coding Plan key works only on the Coding Plan endpoint (on
+    /// the General API it gets 1113 "Insufficient balance"); a key made at open.bigmodel.cn works only on the China
+    /// endpoints. Models from docs.z.ai (2026-10-18): glm-5.3 (1M, always thinks: low/high/max), glm-5.2, glm-5.1,
+    /// glm-5, glm-4.7, glm-4.6 (text), glm-5.3-flash / -flashx (vision).
+    static let zai = configured(SubscriptionPlan(
+        id: "zai", provider: "Z.ai", name: "Z.ai (GLM)", routeName: "Z.ai",
+        summary: "GLM-5.3 and the other GLM models — with a GLM Coding Plan, or pay-as-you-go.",
+        regions: [
+            .init(id: ZAIErrors.Endpoint.coding.rawValue, name: "Coding Plan", baseURL: ZAIErrors.Endpoint.coding.baseURL,
+                  keyPage: url("https://z.ai/manage-apikey/apikey-list"), keyPlace: "API Keys", routeName: "GLM Coding Plan",
+                  detail: "For a GLM Coding Plan subscription — Coding Plan keys work only here.", isSubscription: true),
+            .init(id: ZAIErrors.Endpoint.general.rawValue, name: "General API", baseURL: ZAIErrors.Endpoint.general.baseURL,
+                  keyPage: url("https://z.ai/manage-apikey/apikey-list"), keyPlace: "API Keys", routeName: "Z.ai API",
+                  detail: "Pay-as-you-go: billed per token from the account's balance.", isSubscription: false),
+            .init(id: ZAIErrors.Endpoint.chinaCoding.rawValue, name: "China — Coding Plan", baseURL: ZAIErrors.Endpoint.chinaCoding.baseURL,
+                  keyPage: url("https://open.bigmodel.cn/usercenter/apikeys"), keyPlace: "API Keys", routeName: "GLM Coding Plan (China)",
+                  detail: "A Coding Plan bought at open.bigmodel.cn.", isSubscription: true),
+            .init(id: ZAIErrors.Endpoint.chinaGeneral.rawValue, name: "China — General API", baseURL: ZAIErrors.Endpoint.chinaGeneral.baseURL,
+                  keyPage: url("https://open.bigmodel.cn/usercenter/apikeys"), keyPlace: "API Keys", routeName: "Z.ai API (China)",
+                  detail: "Pay-as-you-go at open.bigmodel.cn.", isSubscription: false),
+        ],
+        isSubscription: true, subscribeURL: url("https://z.ai/subscribe"),
+        keyHint: "A long string of letters and digits with a dot in the middle (not sk-…). A Coding Plan key works only on the Coding Plan endpoint.",
+        models: [.init("glm-5.3", note: "1M context · always thinks", contextWindow: 1_000_000),
+                 .init("glm-5.2"), .init("glm-5.1"), .init("glm-5"), .init("glm-4.7"), .init("glm-4.6"),
+                 .init("glm-5.3-flash", note: "reads images")],
+        listsModels: true,
+        terms: "Z.ai offers the GLM Coding Plan for use in coding tools; the General API is billed per token.",
+        interactiveOnly: false)) {
+            $0.regionLabel = "Endpoint"
+            $0.checksWithChat = true
+        }
+
+    private static func configured(_ plan: SubscriptionPlan, _ edit: (inout SubscriptionPlan) -> Void) -> SubscriptionPlan {
+        var plan = plan
+        edit(&plan)
+        return plan
+    }
+
+    /// Plan ids from earlier builds, still understood.
+    static let renamed = ["zai-coding": "zai", "zai-api": "zai"]
+
+    public static func plan(_ id: String) -> SubscriptionPlan? {
+        let id = renamed[id] ?? id
+        return plans.first { $0.id == id }
+    }
 
     /// The plan a route was made from, recognised by its address (nil for anything else).
     public static func plan(for route: ProviderProfile) -> SubscriptionPlan? {
@@ -230,7 +261,7 @@ public enum PlanCatalog {
             if !key.hasPrefix("sk-") { return "OpenAI keys start with sk-. Copy the key from platform.openai.com/api-keys." }
         case "kimi-code", "moonshot-api":
             if !key.hasPrefix("sk-") { return "Kimi and Moonshot keys start with sk-." }
-        case "zai-coding", "zai-api":
+        case "zai":
             if key.hasPrefix("sk-") { return "That looks like another service's key. Z.ai keys come from z.ai (or open.bigmodel.cn) and don't start with sk-." }
         default:
             break
@@ -260,11 +291,19 @@ public enum PlanCatalog {
 
     static func explain(status: Int, body: String, plan: SubscriptionPlan, region: SubscriptionPlan.Region) -> String {
         let regionName = region.name.components(separatedBy: " (").first ?? region.name
+        if plan.id == "zai", let explained = ZAIErrors.explain(status: status, body: body,
+                                                                endpoint: ZAIErrors.Endpoint(rawValue: region.id),
+                                                                model: plan.recommended?.id ?? "glm-5.3") {
+            return explained.message
+        }
+        if plan.id == "kimi-code" || plan.id == "moonshot-api",
+           let explained = KimiErrors.explain(status: status, body: body, provider: plan.id == "kimi-code" ? .kimiCode : .moonshot,
+                                              model: plan.recommended?.id ?? "") {
+            return explained.message
+        }
         switch status {
         case 401:
-            var text = "The key wasn't accepted — check it's a \(plan.name) key for the \(regionName) region."
-            if plan.id == "zai-coding" { text += " (A Coding Plan key works only on the coding address.)" }
-            return text
+            return "The key wasn't accepted — check it's a \(plan.name) key for the \(regionName) region."
         case 403:
             if plan.id == "kimi-code" { return kimiRestriction }
             return "\(plan.name) refused the request (403): \(snippet(body)). The plan may not include this model, or this kind of app."
@@ -307,6 +346,15 @@ public enum PlanCatalog {
     public static func models(for plan: SubscriptionPlan, listed: [String]?) -> [SubscriptionPlan.Model] {
         guard let listed, !listed.isEmpty, plan.listsModels else { return plan.models }
         var ids = listed
+        // Z.ai's list carries other kinds of model (images, speech, embeddings): the chat ones are glm-*.
+        if plan.id == "zai" {
+            ids = listed.filter { id in
+                let lower = id.lowercased()
+                return lower.hasPrefix("glm-") && !["embedding", "image", "video", "voice", "asr", "tts", "realtime", "ocr"]
+                    .contains { lower.contains($0) }
+            }
+            if ids.isEmpty { return plan.models }
+        }
         if plan.id == "openai" {
             ids = listed.filter(isOpenAIChatModel)
             if let best = recommendedOpenAIModel(listed) { ids = [best] + ids.filter { $0 != best } }

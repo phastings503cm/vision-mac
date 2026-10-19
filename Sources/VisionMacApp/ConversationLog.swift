@@ -41,6 +41,11 @@ public struct LogSession: Identifiable, Hashable, Codable, Sendable {
     /// A chat without a project working in a folder other than its own scratch folder (a queue task from a chat
     /// without a project works in that chat's folder). Nil = its own.
     public var scratch: String?
+    /// The route (`ProviderProfile.routeID`) this chat talks to, and its thinking level — each chat's own, so two
+    /// chats in two projects never share a model by accident. Nil = not chosen yet (an older chat: it takes the
+    /// primary when it next sends).
+    public var route: String?
+    public var thinking: String?
 }
 
 private struct StoredItem: Codable {
@@ -180,6 +185,15 @@ public final class ConversationLog {
         items[session.id] = newItems
         dirty.insert(session.id)
         flush(wait: true)
+    }
+
+    /// Store the chat's own model choice.
+    public func setChoice(id: String, route: String?, thinking: String?) {
+        guard var row = rows[id], row.route != route || row.thinking != thinking else { return }
+        row.route = route
+        row.thinking = thinking
+        rows[id] = row
+        persist(id)
     }
 
     public func touch(_ id: String) {

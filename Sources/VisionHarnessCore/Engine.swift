@@ -222,6 +222,8 @@ public struct Engine: Sendable {
     /// The model servers subagents run on (see `AgentFleet`); nil = this
     /// engine's own client.
     public let fleet: AgentFleet?
+    /// This chat's own server, the fleet's primary for its subagents (nil = the configured primary).
+    public let fleetHome: FleetServer?
     /// Where this chat's subagent runs are recorded for the UI.
     public let roster: AgentRoster?
     /// The kinds of subagent this chat offers.
@@ -243,7 +245,9 @@ public struct Engine: Sendable {
                 backgroundAgents: BackgroundAgents? = nil,
                 fleet: AgentFleet? = nil,
                 roster: AgentRoster? = nil,
-                agentTypes: AgentCatalog? = nil) {
+                agentTypes: AgentCatalog? = nil,
+                fleetHome: FleetServer? = nil) {
+        self.fleetHome = fleetHome
         self.client = client
         self.registry = registry
         self.systemPrompt = systemPrompt
@@ -322,7 +326,7 @@ public struct Engine: Sendable {
                         fleet: fleet, roster: roster, agentTypes: agentTypes,
                         retry: config.retry, visionEnabled: config.visionEnabled,
                         temperature: config.temperature, maxOutputTokens: config.maxOutputTokens,
-                        unattended: config.unattended)
+                        unattended: config.unattended, fleetHome: fleetHome)
         }
 
         for iteration in 0..<config.maxIterations {

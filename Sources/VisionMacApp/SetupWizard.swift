@@ -171,8 +171,12 @@ struct SetupWizard: View {
                         detail: "Paste the connection code from the Swapper's Connect tab. Sets up the model, switching, and the security certificate in one go.") {
                 model.showSwapperGuide(closing: true)
             }
-            guideChoice(icon: "creditcard", title: "A subscription or API plan — GLM, Kimi, Qwen, OpenAI",
-                        detail: "Use your Z.ai, Kimi, Alibaba Cloud or OpenAI plan. A guide shows where to get the key.") {
+            guideChoice(icon: "sparkles", title: "Z.ai (GLM) — GLM Coding Plan or API key",
+                        detail: "GLM-5.3 and the other GLM models. Pick the endpoint your key is for (Coding Plan, General API, or China); the check tells you if another one fits.") {
+                model.showPlanGuide(closing: true, plan: "zai")
+            }
+            guideChoice(icon: "creditcard", title: "A subscription or API plan — Kimi, Qwen, OpenAI, GLM",
+                        detail: "Use your Kimi, Alibaba Cloud, OpenAI or Z.ai plan. A guide shows where to get the key.") {
                 model.showPlanGuide(closing: true)
             }
 

@@ -391,8 +391,11 @@ private struct ModelMenu: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
+        // The selected chat's own model (each chat has one; choosing here changes that chat only).
+        let session = model.transport.selected
+        let route = model.transport.chatRoute(session)
         Menu {
-            RouteMenuSections()
+            RouteMenuSections(session: session)
             Divider()
             Button("Configure…") {
                 model.settingsTab = .models
@@ -400,11 +403,11 @@ private struct ModelMenu: View {
             }
             Button("Run Setup Wizard…") { model.showWizard = true }
         } label: {
-            Label(model.config.activeProvider?.model ?? "No model", systemImage: "cpu")
+            Label(model.transport.modelID(for: session) ?? route?.model ?? "No model", systemImage: "cpu")
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .help(model.config.activeProvider.map { "Primary: \($0.displayName)" } ?? "No model configured")
+        .help(route.map { session == nil ? "Primary: \($0.displayName)" : "This chat: \($0.displayName)" } ?? "No model configured")
     }
 }
 

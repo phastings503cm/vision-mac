@@ -138,7 +138,7 @@ public struct AgentTool: ToolExecutor {
                     do {
                         // A task that needs sensitive data runs only on a private server.
                         lease = try await fleet.acquire(preferred: definition.server, sensitive: sensitive,
-                                                        unattended: context.unattended)
+                                                        unattended: context.unattended, home: context.fleetHome)
                     } catch let unavailable as FleetUnavailableError {
                         if let runID { roster?.finish(runID, status: .failed, report: unavailable.message) }
                         return SubagentOutcome(ok: false, report: unavailable.message, agentType: definition.name,

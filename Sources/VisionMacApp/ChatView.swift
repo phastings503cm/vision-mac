@@ -1335,7 +1335,7 @@ private struct ContextGaugeView: View {
     let draft: String
 
     var body: some View {
-        let limit = model.transport.contextLimit()
+        let limit = model.transport.contextLimit(for: session)
         let used = model.transport.contextUsed(for: session.id, draft: draft)
         let fraction = limit > 0 ? Double(used) / Double(limit) : 0
         return HStack(spacing: 6) {
@@ -1354,7 +1354,7 @@ private struct ContextGaugeView: View {
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
         }
-        .help("Context window in use for \(model.transport.activeModelID ?? "this model"): \(used.formatted()) of \(limit.formatted()) tokens — window \(model.transport.contextSource()). Type /compact to free space.")
+        .help("Context window in use for \(model.transport.modelID(for: session) ?? "this model"): \(used.formatted()) of \(limit.formatted()) tokens — window \(model.transport.contextSource(for: session)). Type /compact to free space.")
     }
 
     private func tint(_ fraction: Double) -> Color {
@@ -1485,32 +1485,47 @@ private struct ThinkingMenu: View {
     let session: SessionVM
 
     var body: some View {
-        let fallback = model.config.activeProvider?.thinking
-        let current = session.thinking ?? fallback
-        Menu {
-            Button {
-                session.thinking = nil
-            } label: {
-                Label("Provider default (\(fallback?.label ?? "server default"))",
-                      systemImage: session.thinking == nil ? "checkmark" : "")
-            }
-            Divider()
-            ForEach(ThinkingLevel.allCases, id: \.self) { level in
+        let fallback = model.transport.chatRoute(session)?.thinking
+        // Only the levels this chat's model takes (Kimi K2.7 Code always thinks; GLM-5.3 has Low, High and Max).
+        let rules = model.transport.requestRules(for: session)
+        let offered = rules?.thinkingLevels ?? ThinkingLevel.allCases
+        let chosen = session.thinking ?? fallback
+        let current = chosen.flatMap { rules?.nearestLevel($0) ?? $0 }
+        let name = { (level: ThinkingLevel) in rules?.label(level) ?? level.label }
+        if offered.isEmpty {
+            Label(rules?.alwaysThinks == true ? "Always thinks" : "No thinking setting", systemImage: "brain")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize()
+                .help(rules?.alwaysThinks == true
+                      ? "This model always thinks and takes no thinking setting."
+                      : "This model has no thinking setting.")
+        } else {
+            Menu {
                 Button {
-                    session.thinking = level
+                    model.transport.setThinking(nil, for: session)
                 } label: {
-                    Label("\(level.label) — \(level.blurb)",
-                          systemImage: session.thinking == level ? "checkmark" : level.symbol)
+                    Label("Provider default (\(fallback.map { rules?.nearestLevel($0).map(name) ?? $0.label } ?? "server default"))",
+                          systemImage: session.thinking == nil ? "checkmark" : "")
                 }
+                Divider()
+                ForEach(offered, id: \.self) { level in
+                    Button {
+                        model.transport.setThinking(level, for: session)
+                    } label: {
+                        Label("\(name(level)) — \(level.blurb)",
+                              systemImage: current == level && session.thinking != nil ? "checkmark" : level.symbol)
+                    }
+                }
+            } label: {
+                Label("Thinking: \(current.map(name) ?? "Default")", systemImage: current?.symbol ?? "brain")
             }
-        } label: {
-            Label("Thinking: \(current?.label ?? "Default")", systemImage: current?.symbol ?? "brain")
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .foregroundStyle(.secondary)
+            .disabled(session.running)
+            .help("How hard this chat's model thinks before answering — only the levels it takes are offered. Also: /think <level>")
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .foregroundStyle(.secondary)
-        .disabled(session.running)
-        .help("How hard the model thinks before answering (sent as reasoning_effort / enable_thinking). Also: /think <level>")
     }
 }
 
@@ -1586,7 +1601,7 @@ private struct ChatStarterView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(session.projectName ?? session.title)
                         .font(.title3.weight(.semibold))
-                    Text(model.config.activeProvider.map { "Running on \($0.displayName)" }
+                    Text(model.transport.chatRoute(session).map { "Running on \($0.displayName)" }
                          ?? "No model configured")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -1680,8 +1695,8 @@ private struct ModelMenu: View {
 
     var body: some View {
         let spark = model.spark
-        let current = model.transport.activeModelID ?? model.config.activeProvider?.model ?? "No model"
-        let limit = model.transport.contextLimit()
+        let current = model.transport.modelID(for: session) ?? model.transport.chatRoute(session)?.model ?? "No model"
+        let limit = model.transport.contextLimit(for: session)
         Menu {
             if spark.isConfigured {
                 ForEach(spark.boxes) { box in
@@ -1708,7 +1723,7 @@ private struct ModelMenu: View {
             } else {
                 Button("Connect a Spark Swapper…") { model.showSwapperGuide() }
             }
-            RouteMenuSections()
+            RouteMenuSections(session: session)
         } label: {
             Label("\(current) · \(ModelSizes.short(limit))", systemImage: spark.isSwitchingMainModel ? "hourglass" : "cpu")
         }

@@ -98,7 +98,10 @@ final class InteractiveOnlyTests: XCTestCase {
         unattended.release()
     }
 
-    func testAGoalStopsWhenThePrimaryBecomesInteractiveOnly() async throws {
+    /// Each chat has its own model, so it's the chat's route that matters: when the user marks it interactive-only
+    /// while a goal runs, the goal stops (changing the app's primary no longer moves a running chat — see
+    /// `ChatRouteTests`).
+    func testAGoalStopsWhenItsChatsModelBecomesInteractiveOnly() async throws {
         let config = transport.config
         config.makeMain(config.providers[1].routeID)
         let gate = DispatchSemaphore(value: 0)
@@ -113,8 +116,9 @@ final class InteractiveOnlyTests: XCTestCase {
             if Date() > deadline { return XCTFail("the goal never started") }
             try await Task.sleep(nanoseconds: 10_000_000)
         }
-        // While round 1 runs, the user makes the Qwen Coding Plan the primary.
-        config.makeMain(config.providers[0].routeID)
+        // While round 1 runs, the user marks this chat's model (Spark) as interactive-only.
+        XCTAssertEqual(vm.routeID, config.providers[1].routeID)
+        config.providers[1].interactiveOnly = true
         gate.signal()
         deadline = Date().addingTimeInterval(10)
         while vm.running {
@@ -122,7 +126,7 @@ final class InteractiveOnlyTests: XCTestCase {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         XCTAssertEqual(FakeModelServer.seen.count, 1, "no second round on it")
-        XCTAssertTrue(vm.entries.contains { $0.message?.text.hasPrefix("Qwen Coding Plan is for interactive use only") == true })
+        XCTAssertTrue(vm.entries.contains { $0.message?.text.hasPrefix("Spark is for interactive use only") == true })
     }
 }
 

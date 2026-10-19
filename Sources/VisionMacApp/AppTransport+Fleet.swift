@@ -47,7 +47,7 @@ extension AppTransport {
 
     private func resolvePrimaryTarget() async throws -> FleetTarget {
         guard let profile = await resolveRoute() else { throw LLMError.noModel }
-        return FleetTarget(client: ProviderClients.make(profile), model: profile.model, contextWindow: contextLimit(),
+        return FleetTarget(client: ProviderClients.make(profile), model: profile.model, contextWindow: contextLimit(route: profile),
                            vision: visionOn(for: profile), temperature: profile.temperature,
                            maxOutputTokens: profile.maxOutputTokens)
     }

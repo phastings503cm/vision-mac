@@ -8,6 +8,8 @@ import VisionHarnessCore
 struct ProviderSettings: View {
     @Environment(AppModel.self) private var model
     @State private var editing: ProviderProfile?
+    /// The screenshot mode opens a route's editor this way.
+    static var editOnAppear: ProviderProfile?
     @State private var removing: ProviderProfile?
     @State private var status: StatusLine?
     /// The last test's answer for each route, shown on its row.
@@ -33,6 +35,12 @@ struct ProviderSettings: View {
             Divider()
             footer
         }
+        .onAppear {
+            if let route = Self.editOnAppear {
+                Self.editOnAppear = nil
+                editing = route
+            }
+        }
         .sheet(item: Binding(get: { editing.map(EditableProvider.init) },
                              set: { editing = $0?.profile })) { wrapper in
             ProviderEditor(profile: wrapper.profile)
@@ -56,6 +64,7 @@ struct ProviderSettings: View {
         HStack(spacing: 8) {
             Menu {
                 Button("Spark Swapper (connection code)…") { model.showSwapperGuide() }
+                Button("Z.ai (GLM)…") { model.showPlanGuide(plan: "zai") }
                 Button("Subscription plan…") { model.showPlanGuide() }
                 Button("Amazon Bedrock…") { model.showBedrockGuide() }
                 Button("Other OpenAI-compatible server…") {
@@ -135,6 +144,10 @@ struct ProviderSettings: View {
 
     /// Does the route answer, and what does it serve?
     private static func check(_ provider: ProviderProfile) async -> StatusLine {
+        // Z.ai: only a real reply proves the key fits the endpoint — and a failure says which endpoint it fits.
+        if let result = await ZAIDiagnosis.test(provider) {
+            return StatusLine(text: result.message, tone: result.ok ? .success : .failure)
+        }
         let client = ProviderClients.make(provider)
         do {
             let models = try await client.listModels()

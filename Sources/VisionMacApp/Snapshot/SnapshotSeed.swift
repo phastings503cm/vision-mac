@@ -38,6 +38,12 @@ enum SnapshotSeed {
         ]
     }
 
+    /// Routes the provider scenes add: Kimi K2.7 Code on Moonshot, GLM-5.3 on Z.ai's General API (no keys).
+    static let kimiRoute = ProviderProfile(kind: .openAICompat, name: "Moonshot", baseURL: "https://api.moonshot.ai/v1",
+                                           model: "kimi-k2.7-code")
+    static let zaiRoute = ProviderProfile(kind: .openAICompat, name: "Z.ai API", baseURL: ZAIErrors.Endpoint.general.baseURL,
+                                          model: "glm-5.3")
+
     // MARK: Writing it
 
     /// Write the workspace into `home` (the isolated home folder) and the app's isolated settings and data folder.
@@ -193,4 +199,23 @@ enum SnapshotSeed {
             process.waitUntilExit()
         } catch {}
     }
+}
+
+/// The Z.ai guide's scripted backend for the screenshot mode: the General API answers 1113 ("no balance"), the
+/// Coding Plan endpoint answers — what a GLM Coding Plan key on the wrong endpoint looks like. No network.
+@MainActor
+final class SnapshotPlanBackend: PlanGuideBackend {
+    func listModels(route: ProviderProfile) async throws -> [String] { ["glm-5.3", "glm-5.2", "glm-4.7"] }
+
+    func ping(route: ProviderProfile, model: String) async throws {
+        try await Task.sleep(nanoseconds: 150_000_000)
+        if route.baseURL == ZAIErrors.Endpoint.general.baseURL {
+            throw LLMError.rejected(status: 429, message: "",
+                                    body: #"{"error":{"code":"1113","message":"Insufficient balance or no resource package. Please recharge."}}"#,
+                                    permanent: true)
+        }
+    }
+
+    func sayHello(route: ProviderProfile) async throws -> String { "Hello!" }
+    func open(_ url: URL) {}
 }

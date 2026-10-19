@@ -61,6 +61,8 @@ final class AppModel {
     init() {
         // Bedrock routes sign their requests with credentials the AWS CLI exports for their profile.
         AWSAccounts.install()
+        // What model servers refused before (a temperature Kimi fixes, …) is remembered across launches.
+        RequestAdaptationStore.shared.fileURL = AppPaths.requestAdaptationsFile
         transport = AppTransport(config: config)
         spark = SparkController(config: config, transport: transport)
         // Guardian's shared state: prompts on submit, turn durations for the
@@ -164,9 +166,10 @@ final class AppModel {
         openGuide(closing: sheet) { $0.swapperGuide = SwapperGuideRequest() }
     }
 
-    /// Open the "Connect a subscription plan" guide (GLM, Kimi, Qwen, OpenAI).
-    func showPlanGuide(closing sheet: Bool = false) {
-        openGuide(closing: sheet) { $0.planGuide = PlanGuideRequest() }
+    /// Open the "Connect a subscription plan" guide (GLM, Kimi, Qwen, OpenAI) — on one plan when `plan` names it
+    /// (the Z.ai (GLM) entries open it on "zai").
+    func showPlanGuide(closing sheet: Bool = false, plan: String? = nil) {
+        openGuide(closing: sheet) { $0.planGuide = PlanGuideRequest(planID: plan) }
     }
 
     /// Open a guide's sheet. From another sheet (the wizard, Settings), that one closes first so this one can open.

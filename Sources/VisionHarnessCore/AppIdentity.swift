@@ -119,6 +119,8 @@ public enum AppPaths {
     public static var conversations: URL { support.appendingPathComponent("conversations", isDirectory: true) }
     /// The task queue.
     public static var taskQueueFile: URL { support.appendingPathComponent("task-queue.json") }
+    /// What model servers refused, per server and model (see `RequestAdaptationStore`).
+    public static var requestAdaptationsFile: URL { support.appendingPathComponent("request-adaptations.json") }
     /// The user's own plugin manifests.
     public static var plugins: URL { support.appendingPathComponent("plugins", isDirectory: true) }
 

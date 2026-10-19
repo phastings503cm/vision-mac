@@ -17,9 +17,16 @@ public struct OpenAIClient: LLMClient {
     private let session: URLSession
     /// The session's certificate handling: the route's pin, and which certificate each host showed.
     private let trust: PinningDelegate
+    /// What servers refused before, per server and model (see `RequestAdaptations`).
+    let adaptations: RequestAdaptationStore
+    /// One line for the chat when the client adapted to a refusal ("… doesn't take `temperature` …").
+    let onNotice: (@Sendable (String) -> Void)?
 
-    public init(profile: ProviderProfile, session: URLSession = .shared) {
+    public init(profile: ProviderProfile, session: URLSession = .shared,
+                adaptations: RequestAdaptationStore = .shared, onNotice: (@Sendable (String) -> Void)? = nil) {
         self.profile = profile
+        self.adaptations = adaptations
+        self.onNotice = onNotice
         var cfg = URLSessionConfiguration.default
         // Idle timeout between bytes. Generous: a local server prefilling a
         // few hundred thousand tokens sends nothing until the first token, and
@@ -94,7 +101,8 @@ public struct OpenAIClient: LLMClient {
                     })
                     continuation.yield(.done(calls: result.calls,
                                              finish: result.finish,
-                                             usage: result.usage))
+                                             usage: result.usage,
+                                             providerState: result.providerState))
                     continuation.finish()
                 } catch let e as URLError where e.code == .cancelled {
                     // Our Stop, or the system dropping the request (which is
@@ -265,12 +273,18 @@ public struct OpenAIClient: LLMClient {
         let calls: [ToolCall]
         let finish: String?
         let usage: LLMUsage?
+        /// The reasoning to send back with this message, for a model that wants it (see `ReasoningEcho`).
+        var providerState: String? = nil
     }
+
+    /// How many refused parameters one request adapts to before the refusal is reported.
+    static let maxAdaptations = 3
 
     private func runTurn(_ request: LLMRequest,
                          onText: @escaping @Sendable (String) -> Void,
                          onReasoning: @escaping @Sendable (String) -> Void = { _ in },
-                         isRetry: Bool = false) async throws -> TurnResult {
+                         isRetry: Bool = false,
+                         adapted: Int = 0) async throws -> TurnResult {
         guard let url = URL(string: profile.endpoint(path: "chat/completions")) else {
             throw LLMError.unsupported("bad base URL: \(profile.baseURL)")
         }
@@ -278,7 +292,8 @@ public struct OpenAIClient: LLMClient {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         applyHeaders(&req)
-        req.httpBody = try makeBody(request)
+        let bodyObject = makeBodyObject(request)
+        req.httpBody = try JSONSerialization.data(withJSONObject: bodyObject, options: [.sortedKeys])
 
         let bytes: URLSession.AsyncBytes, response: URLResponse
         do {
@@ -307,10 +322,32 @@ public struct OpenAIClient: LLMClient {
             if let limit = Self.overflowLimit(in: body) {
                 throw LLMError.overflow(limit: limit, detail: body)
             }
+            // A parameter this server or model refuses ("invalid temperature: only 1 is allowed for this model"):
+            // leave it out from now on, say so in one line, and try again — once per parameter.
+            let key = adaptationKey(request)
+            if adapted < Self.maxAdaptations,
+               let change = ParameterRejection.change(status: http.statusCode, body: body, sent: RequestBody.keys(bodyObject)),
+               !(adaptations.adaptation(for: key)?.contains(change) ?? false) {
+                adaptations.learn(change, for: key)
+                let rules = ModelRequestRules.for(profile, model: requestModel(request))
+                let who = rules.provider == .other ? (profile.name.isEmpty ? "The model server" : profile.name) : rules.provider.label
+                onNotice?(ParameterRejection.notice(change, provider: who, model: requestModel(request)))
+                return try await runTurn(request, onText: onText, onReasoning: onReasoning, isRetry: isRetry,
+                                         adapted: adapted + 1)
+            }
             // A proxy in front of the model (nginx's client_max_body_size)
             // refusing the body: the conversation must shrink, like an overflow.
             if http.statusCode == 413 {
                 throw LLMError.overflow(limit: 0, detail: "request too large for the server (HTTP 413)")
+            }
+            // Z.ai's prompt-too-long business code.
+            if ParameterRejection.businessCode(in: body) == "1261", KnownProvider.of(profile) == .zai {
+                throw LLMError.overflow(limit: 0, detail: "Z.ai: prompt too long (1261)")
+            }
+            // A provider error that means something specific (Z.ai's "no balance" 429 is not a rate limit).
+            if let explained = providerExplanation(status: http.statusCode, body: body, model: requestModel(request)) {
+                throw LLMError.rejected(status: http.statusCode, message: explained.message, body: body,
+                                        permanent: explained.permanent)
             }
             throw LLMError.http(http.statusCode, body)
         }
@@ -376,12 +413,43 @@ public struct OpenAIClient: LLMClient {
             }
         }
 
-        return TurnResult(text: stream.text, calls: calls, finish: stream.finish, usage: stream.usage)
+        var result = TurnResult(text: stream.text, calls: calls, finish: stream.finish, usage: stream.usage)
+        if echoesReasoning(request), !stream.reasoning.isEmpty {
+            result.providerState = ReasoningEcho.state(stream.reasoning)
+        }
+        return result
+    }
+
+    /// The key lessons are kept under for this request's server and model.
+    func adaptationKey(_ request: LLMRequest) -> String {
+        RequestAdaptationStore.key(baseURL: profile.baseURL, model: requestModel(request))
+    }
+
+    /// Whether this request's model wants its reasoning back on assistant tool-call messages.
+    func echoesReasoning(_ request: LLMRequest) -> Bool {
+        ModelRequestRules.for(profile, model: requestModel(request)).echoReasoning
+            || (adaptations.adaptation(for: adaptationKey(request))?.echoReasoning ?? false)
+    }
+
+    /// A provider's error in plain words, when Vision knows what it means.
+    func providerExplanation(status: Int, body: String, model: String) -> ProviderErrorExplanation? {
+        let provider = KnownProvider.of(profile)
+        switch provider {
+        case .zai:
+            return ZAIErrors.explain(status: status, body: body, endpoint: ZAIErrors.Endpoint.of(baseURL: profile.baseURL),
+                                     model: model)
+        case .moonshot, .kimiCode:
+            return KimiErrors.explain(status: status, body: body, provider: provider, model: model)
+        default:
+            return nil
+        }
     }
 
     /// Everything one streamed reply accumulates.
     struct StreamState {
         var text = ""
+        /// The reasoning that streamed (kept only for models that want it back).
+        var reasoning = ""
         var usage: LLMUsage?
         var finish: String?
         var pending: [Int: (id: String, name: String, args: String)] = [:]
@@ -438,6 +506,7 @@ public struct OpenAIClient: LLMClient {
 
         if let delta = first["delta"] as? [String: Any] {
             if let r = (delta["reasoning_content"] as? String) ?? (delta["reasoning"] as? String), !r.isEmpty {
+                if state.reasoning.utf8.count < 400_000 { state.reasoning += r }
                 onReasoning(r)
             }
             if let content = delta["content"] as? String, !content.isEmpty {
@@ -527,6 +596,20 @@ public struct OpenAIClient: LLMClient {
     }
 
     func makeBody(_ request: LLMRequest) throws -> Data {
+        try JSONSerialization.data(withJSONObject: makeBodyObject(request), options: [.sortedKeys])
+    }
+
+    /// The request body: the messages, then only the parameters this model takes (`ModelRequestRules`), minus
+    /// what the server refused before (`RequestAdaptationStore`).
+    func makeBodyObject(_ request: LLMRequest) -> [String: Any] {
+        let rules = ModelRequestRules.for(profile, model: requestModel(request))
+        let learned = adaptations.adaptation(for: adaptationKey(request))
+        let echo = rules.echoReasoning || (learned?.echoReasoning ?? false)
+        // A stand-in is only needed while the model thinks (K2.6 with thinking switched off wants none).
+        let thinkingOff: Bool = {
+            if case .toggle = rules.thinking { return thinkingLevel(for: request) == .off }
+            return false
+        }()
         var messages: [[String: Any]] = []
         // Some OpenAI-compatible servers (SGLang on the DGX Spark, notably)
         // reject any request with more than one system message, or with one
@@ -542,7 +625,8 @@ public struct OpenAIClient: LLMClient {
             case .system:
                 if let c = m.content, !c.isEmpty { systemParts.append(c) }
             case .user:
-                messages.append(["role": "user", "content": userContent(for: m)])
+                messages.append(["role": "user",
+                                 "content": rules.textOnlyContent ? Self.textOnlyContent(for: m) : userContent(for: m)])
             case .assistant:
                 var msg: [String: Any] = ["role": "assistant"]
                 msg["content"] = m.content ?? ""
@@ -550,6 +634,15 @@ public struct OpenAIClient: LLMClient {
                     msg["tool_calls"] = calls.map { c -> [String: Any] in
                         ["id": c.id, "type": "function",
                          "function": ["name": c.name, "arguments": Self.safeArguments(c.arguments.raw)]]
+                    }
+                }
+                // Kimi (thinking): an assistant message that called tools must carry its reasoning. One rebuilt
+                // from text (a relaunch, compaction) no longer has it: a short stand-in keeps the request valid.
+                if echo {
+                    if let reasoning = ReasoningEcho.reasoning(from: m.providerState) {
+                        msg["reasoning_content"] = reasoning
+                    } else if m.toolCalls?.isEmpty == false, !thinkingOff {
+                        msg["reasoning_content"] = ReasoningEcho.placeholder
                     }
                 }
                 messages.append(msg)
@@ -580,9 +673,15 @@ public struct OpenAIClient: LLMClient {
         if profile.kind == .openAI || profile.kind == .openRouter || profile.kind == .openAICompat {
             body["stream_options"] = ["include_usage": true]
         }
-        if let t = request.temperature ?? profile.temperature { body["temperature"] = t }
-        if let mt = request.maxTokens ?? profile.maxOutputTokens { body["max_tokens"] = mt }
-        applyThinking(request, to: &body)
+        if rules.sendsTemperature, var t = request.temperature ?? profile.temperature {
+            if let range = rules.temperatureRange { t = min(max(t, range.lowerBound), range.upperBound) }
+            body["temperature"] = t
+        }
+        if var mt = request.maxTokens ?? profile.maxOutputTokens {
+            if let cap = rules.maxOutputTokens { mt = min(mt, cap) }
+            body[rules.maxTokensField] = mt
+        }
+        applyThinking(request, rules: rules, to: &body)
         if !request.tools.isEmpty {
             body["tools"] = request.tools.map { spec -> [String: Any] in
                 // SGLang (Pydantic) rejects a bare "{}" string here — it must be
@@ -599,8 +698,27 @@ public struct OpenAIClient: LLMClient {
                                      "parameters": params]]
             }
         }
-        let data = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
-        return data
+        if let learned { RequestBody.apply(learned, to: &body) }
+        return body
+    }
+
+    /// A user message as one string, for APIs that take text only (Z.ai's text models): text files are folded
+    /// in, anything else is named in a line so the model knows it was there.
+    static func textOnlyContent(for m: LLMMessage) -> String {
+        var text = m.content ?? ""
+        for a in m.attachments ?? [] {
+            switch a.kind {
+            case .file:
+                if let s = String(data: a.data, encoding: .utf8), !s.contains("\u{0}") {
+                    text += "\n\n--- \(a.name) ---\n\(s)"
+                } else {
+                    text += "\n\n[\(a.name) is attached, but it isn't text and this model reads text only.]"
+                }
+            case .image:
+                text += "\n\n[Image \(a.name) not sent: this model reads text only.]"
+            }
+        }
+        return text
     }
 
     // MARK: Thinking
@@ -623,9 +741,15 @@ public struct OpenAIClient: LLMClient {
     /// nil when none is sent.
     func effortWord(for request: LLMRequest) -> String? {
         guard let level = thinkingLevel(for: request) else { return nil }
-        // GLM-5.3 always thinks and has its own words for how hard (see `GLMThinking`).
-        if GLMThinking.applies(to: profile, model: requestModel(request)) { return GLMThinking.effort(level) }
-        guard let word = level.wireEffort else { return nil }
+        let rules = ModelRequestRules.for(profile, model: requestModel(request))
+        let word: String?
+        switch rules.thinking {
+        // A fixed vocabulary (GLM-5.3: low/high/max; Kimi Code: none/low/high/max): the nearest offered level's word.
+        case .effort: word = rules.effortWord(level)
+        case .template, .effortField: word = level.wireEffort
+        case .toggle, .alwaysOn, .none: word = nil
+        }
+        guard let word else { return nil }
         if let learned = ReasoningEffortCache.shared.accepted(route: effortRoute(request), requested: word) {
             return learned.isEmpty ? nil : learned
         }
@@ -639,29 +763,36 @@ public struct OpenAIClient: LLMClient {
     /// plus the top-level `reasoning_effort` (SGLang forwards it to the
     /// template too; vLLM's gpt-oss path reads it there). Hosted APIs only
     /// understand the top-level field, and only when thinking is on.
-    func applyThinking(_ request: LLMRequest, to body: inout [String: Any]) {
+    func applyThinking(_ request: LLMRequest, rules: ModelRequestRules, to body: inout [String: Any]) {
         guard let level = thinkingLevel(for: request) else { return }
         let effort = effortWord(for: request)
-        // A model that always thinks is never told not to (that fails the request): only how hard.
-        if GLMThinking.applies(to: profile, model: requestModel(request)) {
-            if let effort { body["reasoning_effort"] = effort }
-            if profile.isSelfHosted && profile.kind != .ollama && profile.kind != .lmStudio, let effort {
-                body["chat_template_kwargs"] = ["reasoning_effort": effort]
-            }
-            return
-        }
-        if profile.isSelfHosted && (profile.kind == .openAICompat || profile.kind == .openAI || profile.kind == .openRouter) {
-            var kwargs: [String: Any] = ["enable_thinking": level != .off]
-            if let effort {
-                kwargs["reasoning_effort"] = effort
+        switch rules.thinking {
+        case .template:
+            if profile.kind == .openAICompat || profile.kind == .openAI || profile.kind == .openRouter {
+                var kwargs: [String: Any] = ["enable_thinking": level != .off]
+                if let effort {
+                    kwargs["reasoning_effort"] = effort
+                    body["reasoning_effort"] = effort
+                }
+                body["chat_template_kwargs"] = kwargs
+            } else if profile.kind == .ollama || profile.kind == .lmStudio {
+                if level == .off { body["chat_template_kwargs"] = ["enable_thinking": false] }
+                if let effort { body["reasoning_effort"] = effort }
+            } else if let effort {
                 body["reasoning_effort"] = effort
             }
-            body["chat_template_kwargs"] = kwargs
-        } else if profile.kind == .ollama || profile.kind == .lmStudio {
-            if level == .off { body["chat_template_kwargs"] = ["enable_thinking": false] }
+        case .effortField:
             if let effort { body["reasoning_effort"] = effort }
-        } else if let effort {
-            body["reasoning_effort"] = effort
+        case .effort(_, let inTemplate):
+            // A model that always thinks is never told not to (that fails the request): only how hard.
+            if let effort {
+                body["reasoning_effort"] = effort
+                if inTemplate { body["chat_template_kwargs"] = ["reasoning_effort": effort] }
+            }
+        case .toggle:
+            body["thinking"] = ["type": level == .off ? "disabled" : "enabled"]
+        case .alwaysOn, .none:
+            break
         }
     }
 
@@ -766,7 +897,9 @@ public enum FallbackContextWindow {
         "llama3.3-70b-instruct": 131_072, "llama3.1-8b-instruct": 131_072,
         "glm-4.5": 131_072, "glm-4.5-air": 131_072, "glm-4.6": 131_072,
         // The subscription plans' models (see `PlanCatalog`).
-        "glm-5.3": 1_000_000, "kimi-for-coding": 1_000_000, "k3-256k": 262_144,
+        "glm-5.3": 1_000_000, "kimi-for-coding": 1_000_000, "k3-256k": 262_144, "k3": 1_000_000,
+        // Moonshot's platform (platform.kimi.ai/docs/models, 2026-10-18).
+        "kimi-k3": 1_000_000, "kimi-k2.7-code": 262_144, "kimi-k2.7-code-highspeed": 262_144, "kimi-k2.6": 262_144,
     ]
 
     /// Prefix rules on the base name, checked after the exact table.
@@ -784,6 +917,7 @@ public enum FallbackContextWindow {
         ("mistral-large", 131_072), ("mistral-small", 131_072),
         ("mixtral", 32_768), ("llama", 131_072), ("smollm", 131_072),
         ("glm-4.5", 131_072), ("glm-4.6", 131_072), ("glm-4", 131_072),
+        ("kimi-k3", 1_000_000), ("kimi-k2.", 262_144),
     ]
 
     /// Look up a context window for a model name, or nil if unknown.
@@ -826,5 +960,26 @@ public final class ReasoningEffortCache: @unchecked Sendable {
     public func reset() {
         lock.lock(); defer { lock.unlock() }
         map.removeAll()
+    }
+}
+
+// MARK: - Reasoning sent back
+
+/// Kimi's thinking models want each assistant message that called tools to carry the reasoning that led to it
+/// (`reasoning_content`), or they answer 400 "thinking is enabled but reasoning_content is missing". The client keeps
+/// a reply's reasoning in the message's `providerState` and sends it back from there.
+public enum ReasoningEcho {
+    private static let prefix = "openai.reasoning_content:"
+
+    /// What a message would be sent back with when its reasoning wasn't kept (the transcript was rebuilt from text).
+    public static let placeholder = "(Earlier reasoning was not kept.)"
+
+    static func state(_ reasoning: String) -> String { prefix + reasoning }
+
+    /// The reasoning in a `providerState` this client wrote (nil for another client's state, e.g. Bedrock's).
+    static func reasoning(from state: String?) -> String? {
+        guard let state, state.hasPrefix(prefix) else { return nil }
+        let text = String(state.dropFirst(prefix.count))
+        return text.isEmpty ? nil : text
     }
 }

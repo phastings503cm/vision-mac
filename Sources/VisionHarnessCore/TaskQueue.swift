@@ -86,6 +86,10 @@ public struct QueueTask: Identifiable, Codable, Hashable, Sendable {
     public var cwd: String?
     /// For a task queued from a chat without a project: that chat's scratch folder, which the task works in.
     public var workFolder: String?
+    /// The route and thinking level of the chat that queued it: the task's chat runs on them (nil = the project's
+    /// last choice).
+    public var routeID: String?
+    public var thinking: String?
     public var log: [QueueLogLine]
 
     public init(id: String = UUID().uuidString,
@@ -130,7 +134,7 @@ public struct QueueTask: Identifiable, Codable, Hashable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case id, title, details, status, enteredAt, startedAt, finishedAt, rounds
-        case promptTokens, completionTokens, sessionID, cwd, workFolder, log
+        case promptTokens, completionTokens, sessionID, cwd, workFolder, routeID, thinking, log
     }
 
     /// Tolerant decoding: a missing field (a file from an older or newer
@@ -151,6 +155,8 @@ public struct QueueTask: Identifiable, Codable, Hashable, Sendable {
         sessionID = try c.decodeIfPresent(String.self, forKey: .sessionID)
         cwd = try c.decodeIfPresent(String.self, forKey: .cwd)
         workFolder = try c.decodeIfPresent(String.self, forKey: .workFolder)
+        routeID = try? c.decodeIfPresent(String.self, forKey: .routeID)
+        thinking = try? c.decodeIfPresent(String.self, forKey: .thinking)
         log = (try? c.decodeIfPresent([QueueLogLine].self, forKey: .log)) ?? []
     }
 }
@@ -251,6 +257,14 @@ public extension TaskQueue {
         if atFront { tasks.insert(task, at: tasks.firstIndex { $0.status == .queued } ?? tasks.endIndex) }
         else { tasks.append(task) }
         return task
+    }
+
+    /// The model the task's chat runs on (the queuing chat's).
+    mutating func setRoute(id: String, routeID: String?, thinking: String?) {
+        guard var t = task(id) else { return }
+        t.routeID = routeID
+        t.thinking = thinking
+        self[t.id] = t
     }
 
     mutating func update(id: String, title: String?, details: String?) {

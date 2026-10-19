@@ -56,6 +56,11 @@ enum PlanRole: String, CaseIterable, Identifiable {
 
 struct PlanGuideRequest: Identifiable {
     let id = UUID()
+    /// Open on this plan, already chosen ("zai" for the Z.ai (GLM) entry in the wizard and Settings).
+    var planID: String? = nil
+    /// The screenshot mode's stand-ins: a scripted backend, and what to do once the guide is up.
+    var backend: (any PlanGuideBackend)? = nil
+    var stage: (@MainActor (PlanGuideModel) -> Void)? = nil
 }
 
 /// What the guide does outside: the plan's API, and the browser.
@@ -104,6 +109,8 @@ final class PlanGuideModel {
     private(set) var checking = false
     private(set) var checked = false
     private(set) var checkError: String?
+    /// The region (Z.ai: endpoint) the key turned out to work on instead — offered as a one-click switch.
+    private(set) var suggestedRegion: String?
     /// What `/models` listed (nil when it wasn't asked or didn't answer).
     private(set) var listed: [String]?
 
@@ -129,10 +136,11 @@ final class PlanGuideModel {
 
     @ObservationIgnored private var task: Task<Void, Never>?
 
-    init(backend: any PlanGuideBackend, config: AppConfig) {
+    init(backend: any PlanGuideBackend, config: AppConfig, planID: String? = nil) {
         self.backend = backend
         self.config = config
         role = config.mainRoute == nil ? .primary : .justAdd
+        if let planID { choose(planID) }
     }
 
     func dispose() { task?.cancel() }
@@ -150,6 +158,7 @@ final class PlanGuideModel {
     private func resetCheck() {
         checked = false
         checkError = nil
+        suggestedRegion = nil
         listed = nil
         selectedModel = nil
         saved = nil
@@ -209,7 +218,8 @@ final class PlanGuideModel {
     /// privacy the user chose (stored only when it differs from the default), interactive-only when the plan says.
     func route(model: String) -> ProviderProfile? {
         guard let plan, let region else { return nil }
-        let name = plan.regions.count > 1 && region.id != "international" ? "\(plan.routeName) (\(region.name.components(separatedBy: " (").first ?? region.name))" : plan.routeName
+        let name = region.routeName
+            ?? (plan.regions.count > 1 && region.id != "international" ? "\(plan.routeName) (\(region.name.components(separatedBy: " (").first ?? region.name))" : plan.routeName)
         let defaultPrivacy = RoutePrivacy.isPrivateAddress(region.baseURL)
         return ProviderProfile(kind: plan.id == "openai" ? .openAI : .openAICompat, name: name, baseURL: region.baseURL,
                                apiKey: cleanKey.isEmpty ? nil : cleanKey, model: model,
@@ -225,7 +235,12 @@ final class PlanGuideModel {
         guard let plan, let region, let probe = route(model: plan.recommended?.id ?? "") else { return }
         checking = true
         checkError = nil
+        suggestedRegion = nil
         task?.cancel()
+        if plan.checksWithChat, let endpoint = ZAIErrors.Endpoint(rawValue: region.id), let model = plan.recommended?.id {
+            task = Task { await checkZai(probe: probe, endpoint: endpoint, model: model) }
+            return
+        }
         task = Task {
             defer { checking = false }
             do {
@@ -246,6 +261,35 @@ final class PlanGuideModel {
                 checkError = PlanCatalog.explain(error, plan: plan, region: region)
             }
         }
+    }
+
+    /// Z.ai: a one-token reply on the chosen endpoint (listing models proves nothing — any valid key lists them, on
+    /// any endpoint). When the key doesn't fit, it is tried on the endpoints it may belong to, and the guide says
+    /// which one it works on ("This looks like a GLM Coding Plan key — switch the endpoint to Coding Plan").
+    private func checkZai(probe: ProviderProfile, endpoint: ZAIErrors.Endpoint, model: String) async {
+        defer { checking = false }
+        let backend = self.backend
+        let result = await ZAIDiagnosis.run(endpoint: endpoint, model: model) { candidate in
+            var route = probe
+            route.baseURL = candidate.baseURL
+            try await backend.ping(route: route, model: model)
+        }
+        if Task.isCancelled { return }
+        guard result.ok else {
+            checkError = result.message
+            suggestedRegion = result.worksOn?.rawValue
+            return
+        }
+        listed = try? await backend.listModels(route: probe)
+        checked = true
+        selectedModel = models.first?.id
+    }
+
+    /// Switch to the region (endpoint) the key worked on, and check again there.
+    func switchToSuggested() {
+        guard let suggested = suggestedRegion else { return }
+        regionID = suggested
+        runCheck()
     }
 
     /// `/models` isn't there (404, 405): the key may still be fine.

@@ -10,7 +10,9 @@ struct PlanGuideView: View {
 
     init(request: PlanGuideRequest, appModel: AppModel) {
         self.appModel = appModel
-        _guide = State(initialValue: PlanGuideModel(backend: LivePlanBackend(), config: appModel.config))
+        let guide = PlanGuideModel(backend: request.backend ?? LivePlanBackend(), config: appModel.config, planID: request.planID)
+        request.stage?(guide)
+        _guide = State(initialValue: guide)
     }
 
     var body: some View {
@@ -101,9 +103,22 @@ struct PlanChoicePage: View {
                 GuideChoice(systemImage: icon(plan), title: plan.name, detail: plan.summary,
                             selected: guide.plan?.id == plan.id) { guide.choose(plan.id) }
             }
-            if let plan = guide.plan, plan.regions.count > 1 {
-                GuideField(label: "Region", hint: "Where your account is. A key works only in its own region.") {
-                    Picker("Region", selection: $guide.regionID) {
+            if let plan = guide.plan, plan.regions.count > 2 {
+                // Z.ai: which endpoint the key is for — the Coding Plan, the per-token API, or either in China.
+                GuideField(label: plan.regionLabel, hint: "A GLM Coding Plan key works only on the Coding Plan endpoint; a key made at open.bigmodel.cn only on the China ones. Not sure? Pick one — the check says if another fits.") {
+                    Picker(plan.regionLabel, selection: $guide.regionID) {
+                        ForEach(plan.regions) { region in Text(region.name).tag(region.id) }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: 280)
+                }
+                if let detail = guide.region?.detail {
+                    GuideAside(detail + " · " + (guide.region?.baseURL ?? ""))
+                }
+            } else if let plan = guide.plan, plan.regions.count > 1 {
+                GuideField(label: plan.regionLabel, hint: "Where your account is. A key works only in its own region.") {
+                    Picker(plan.regionLabel, selection: $guide.regionID) {
                         ForEach(plan.regions) { region in Text(region.name).tag(region.id) }
                     }
                     .labelsHidden()
@@ -172,12 +187,21 @@ struct PlanCheckPage: View {
         VStack(alignment: .leading, spacing: 14) {
             GuideIcon(systemName: "checkmark.shield")
             GuideHeading("Check it")
-            GuideLead("Vision asks \(guide.region?.baseURL ?? "the plan") which models the key can use (or, where that isn't offered, sends it a one-word message).")
+            GuideLead(guide.plan?.checksWithChat == true
+                      ? "Vision sends \(guide.region?.baseURL ?? "the endpoint") a one-word message with the key."
+                      : "Vision asks \(guide.region?.baseURL ?? "the plan") which models the key can use (or, where that isn't offered, sends it a one-word message).")
             if guide.checking {
                 GuideBusy("Checking the key…")
             } else if let error = guide.checkError {
                 GuideNote(.error, error, title: "Not working yet") {
-                    Button("Try Again") { guide.runCheck() }
+                    HStack {
+                        if let suggested = guide.suggestedRegion,
+                           let name = guide.plan?.regions.first(where: { $0.id == suggested })?.name {
+                            Button("Switch to \(name)") { guide.switchToSuggested() }
+                                .buttonStyle(.borderedProminent)
+                        }
+                        Button("Try Again") { guide.runCheck() }
+                    }
                 }
             } else if guide.checked {
                 GuideNote(.success, guide.listed.map { "The key works — \($0.count) model\($0.count == 1 ? "" : "s") available." } ?? "The key works.")

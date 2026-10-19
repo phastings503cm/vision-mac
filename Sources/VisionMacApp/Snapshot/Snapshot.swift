@@ -29,6 +29,12 @@ enum Snapshot {
     enum Scene: String, CaseIterable, Sendable {
         case chat, code, setup
         case models = "settings-models"
+        /// The Z.ai (GLM) guide's check, with a Coding Plan key on the General API endpoint (scripted, no network).
+        case zaiGuide = "zai-guide"
+        /// The chat on Kimi K2.7 Code: its own model in the composer, thinking "always on".
+        case chatKimi = "chat-kimi"
+        /// A Z.ai route in Settings ▸ AI Models' editor: the endpoint picker, Test, what was learned.
+        case zaiRoute = "settings-zai-route"
     }
 
     struct Live: Equatable, Sendable {
@@ -286,6 +292,33 @@ enum Snapshot {
             model.mode = .chat
             model.settingsTab = .models
             model.showSettings = true
+        case .zaiGuide:
+            model.mode = .chat
+            model.config.planPanelOpen = false
+            model.planGuide = PlanGuideRequest(planID: "zai", backend: SnapshotPlanBackend(), stage: { guide in
+                guide.regionID = ZAIErrors.Endpoint.general.rawValue
+                guide.key = "0a1b2c3d4e5f.demoKeyForScreenshots"
+                guide.go(.check)
+            })
+        case .chatKimi:
+            model.mode = .chat
+            model.config.planPanelOpen = false
+            showMainChat(chatID, model)
+            let kimi = SnapshotSeed.kimiRoute
+            if !model.config.providers.contains(where: { $0.routeID == kimi.routeID }) { model.config.providers.append(kimi) }
+            if let vm = model.transport.sessions.first(where: { $0.id == chatID }) {
+                model.transport.setRoute(kimi.routeID, for: vm)
+                model.transport.setThinking(.high, for: vm)
+            }
+        case .zaiRoute:
+            model.mode = .chat
+            let zai = SnapshotSeed.zaiRoute
+            if !model.config.providers.contains(where: { $0.routeID == zai.routeID }) { model.config.providers.append(zai) }
+            RequestAdaptationStore.shared.learn(.drop("stream_options"),
+                                                for: RequestAdaptationStore.key(baseURL: zai.baseURL, model: zai.model))
+            ProviderSettings.editOnAppear = zai
+            model.settingsTab = .models
+            model.showSettings = true
         }
     }
 
@@ -300,7 +333,13 @@ enum Snapshot {
     private static func unstage(_ scene: Scene, _ model: AppModel, window: NSWindow) async {
         switch scene {
         case .setup: model.showWizard = false
-        case .models: model.showSettings = false
+        case .models, .zaiRoute: model.showSettings = false
+        case .zaiGuide: model.planGuide = nil
+        case .chatKimi:
+            if let vm = model.transport.sessions.first(where: { $0.id == (liveChatID ?? SnapshotSeed.mainChatID) }),
+               let main = model.config.activeRoute {
+                model.transport.setRoute(main, for: vm)
+            }
         case .code:
             model.mode = .chat
             setSidebarCollapsed(false, in: window)

@@ -20,14 +20,18 @@ public protocol ProviderClient: LLMClient {
 
 extension OpenAIClient: ProviderClient {}
 
-/// What the app hears from the clients it asks for: a turn that ran on a backup, and what was masked.
+/// What the app hears from the clients it asks for: a turn that ran on a backup, what was masked, and a line when
+/// a client adapted to a parameter the server refused.
 public struct ClientEvents: Sendable {
     public var failover: (@Sendable (FailoverNotice) -> Void)?
     public var shield: (@Sendable (ShieldReport) -> Void)?
+    public var notice: (@Sendable (String) -> Void)?
 
-    public init(failover: (@Sendable (FailoverNotice) -> Void)? = nil, shield: (@Sendable (ShieldReport) -> Void)? = nil) {
+    public init(failover: (@Sendable (FailoverNotice) -> Void)? = nil, shield: (@Sendable (ShieldReport) -> Void)? = nil,
+                notice: (@Sendable (String) -> Void)? = nil) {
         self.failover = failover
         self.shield = shield
+        self.notice = notice
     }
 }
 
@@ -63,7 +67,7 @@ public enum ProviderClients {
             let usesAPIKey = profile.awsProfile == nil && !(profile.apiKey ?? "").isEmpty
             client = BedrockClient(profile: profile, credentials: usesAPIKey ? nil : awsCredentials?(profile))
         } else {
-            client = OpenAIClient(profile: profile)
+            client = OpenAIClient(profile: profile, onNotice: events.notice)
         }
         guard !profile.isPrivateRoute, let detector = shield?.detector() else { return client }
         return ShieldClient(inner: client, detector: detector, onReport: events.shield)

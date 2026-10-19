@@ -6,10 +6,16 @@ final class PlanCatalogTests: XCTestCase {
     private func plan(_ id: String) -> SubscriptionPlan { PlanCatalog.plan(id)! }
 
     func testTheCatalogHasEveryPlanWithItsAddresses() {
-        XCTAssertEqual(PlanCatalog.plans.map(\.id), ["zai-coding", "zai-api", "kimi-code", "moonshot-api", "openai", "qwen-coding", "qwen-api"])
+        XCTAssertEqual(PlanCatalog.plans.map(\.id), ["zai", "kimi-code", "moonshot-api", "openai", "qwen-coding", "qwen-api"])
+        // Z.ai is one provider with four endpoints (the Coding Plan's keys work only on its own).
+        XCTAssertEqual(plan("zai").regions.map(\.baseURL),
+                       ["https://api.z.ai/api/coding/paas/v4", "https://api.z.ai/api/paas/v4",
+                        "https://open.bigmodel.cn/api/coding/paas/v4", "https://open.bigmodel.cn/api/paas/v4"])
+        XCTAssertEqual(plan("zai").regions.map(\.name), ["Coding Plan", "General API", "China — Coding Plan", "China — General API"])
+        XCTAssertEqual(plan("zai").regionLabel, "Endpoint")
+        XCTAssertEqual(PlanCatalog.plan("zai-coding")?.id, "zai", "the old ids still find it")
+        XCTAssertEqual(PlanCatalog.plan("zai-api")?.id, "zai")
         let expected: [String: [String]] = [
-            "zai-coding": ["https://api.z.ai/api/coding/paas/v4", "https://open.bigmodel.cn/api/coding/paas/v4"],
-            "zai-api": ["https://api.z.ai/api/paas/v4", "https://open.bigmodel.cn/api/paas/v4"],
             "kimi-code": ["https://api.kimi.ai/coding/v1", "https://api.kimi.com/coding/v1"],
             "moonshot-api": ["https://api.moonshot.ai/v1", "https://api.moonshot.cn/v1"],
             "openai": ["https://api.openai.com/v1"],
@@ -20,8 +26,7 @@ final class PlanCatalogTests: XCTestCase {
             XCTAssertEqual(plan(id).regions.map(\.baseURL), urls, id)
             XCTAssertEqual(plan(id).regions.first?.name, "International", id)
         }
-        XCTAssertEqual(plan("zai-coding").name, "Z.ai — GLM Coding Plan")
-        XCTAssertEqual(plan("zai-api").name, "Z.ai — pay-as-you-go API")
+        XCTAssertEqual(plan("zai").name, "Z.ai (GLM)")
         XCTAssertEqual(plan("kimi-code").name, "Kimi Code (subscription)")
         XCTAssertEqual(plan("moonshot-api").name, "Moonshot (Kimi) — pay-as-you-go API")
         XCTAssertEqual(plan("openai").name, "OpenAI API")
@@ -30,9 +35,13 @@ final class PlanCatalogTests: XCTestCase {
     }
 
     func testWhereEachKeyComesFrom() {
-        XCTAssertEqual(plan("zai-coding").regions.map(\.keyPage.absoluteString),
-                       ["https://z.ai/manage-apikey/apikey-list", "https://open.bigmodel.cn/usercenter/apikeys"])
-        XCTAssertEqual(plan("zai-coding").subscribeURL?.absoluteString, "https://z.ai/subscribe")
+        XCTAssertEqual(plan("zai").regions.map(\.keyPage.absoluteString),
+                       ["https://z.ai/manage-apikey/apikey-list", "https://z.ai/manage-apikey/apikey-list",
+                        "https://open.bigmodel.cn/usercenter/apikeys", "https://open.bigmodel.cn/usercenter/apikeys"])
+        XCTAssertEqual(plan("zai").subscribeURL?.absoluteString, "https://z.ai/subscribe")
+        // Subscribing is a step only on the Coding Plan endpoints.
+        XCTAssertTrue(plan("zai").keySteps(region: plan("zai").regions[0]).contains { $0.hasPrefix("Subscribe") })
+        XCTAssertFalse(plan("zai").keySteps(region: plan("zai").regions[1]).contains { $0.hasPrefix("Subscribe") })
         XCTAssertEqual(plan("kimi-code").regions.first?.keyPage.absoluteString, "https://www.kimi.com/code/console")
         XCTAssertEqual(plan("moonshot-api").regions.map(\.keyPage.absoluteString),
                        ["https://platform.moonshot.ai/console/api-keys", "https://platform.moonshot.cn/console/api-keys"])
@@ -49,8 +58,11 @@ final class PlanCatalogTests: XCTestCase {
     }
 
     func testTheModelsRecommendedFirst() {
-        XCTAssertEqual(plan("zai-coding").models.map(\.id), ["glm-5.3"])
-        XCTAssertEqual(plan("zai-coding").recommended?.contextWindow, 1_000_000)
+        XCTAssertEqual(plan("zai").models.map(\.id), ["glm-5.3", "glm-5.2", "glm-5.1", "glm-5", "glm-4.7", "glm-4.6", "glm-5.3-flash"])
+        XCTAssertEqual(plan("zai").recommended?.contextWindow, 1_000_000)
+        // What Z.ai's /models lists is filtered to its chat models, glm-5.3 first.
+        XCTAssertEqual(PlanCatalog.models(for: plan("zai"), listed: ["embedding-3", "glm-4.7", "cogview-4", "glm-5.3", "glm-asr"]).map(\.id),
+                       ["glm-5.3", "glm-4.7"])
         XCTAssertEqual(plan("kimi-code").models.map(\.id), ["kimi-for-coding", "k3", "k3-256k", "kimi-for-coding-highspeed"])
         XCTAssertEqual(plan("moonshot-api").models.map(\.id), ["kimi-k2.7-code"])
         XCTAssertEqual(plan("qwen-coding").models.map(\.id),
@@ -65,7 +77,7 @@ final class PlanCatalogTests: XCTestCase {
         XCTAssertTrue(plan("qwen-coding").terms.contains("interactive"))
         XCTAssertEqual(plan("openai").terms,
                        "A ChatGPT Plus or Pro subscription doesn't include API access — the API is billed separately at platform.openai.com.")
-        XCTAssertEqual(plan("zai-coding").terms, "Z.ai offers the Coding Plan for use in coding tools.")
+        XCTAssertEqual(plan("zai").terms, "Z.ai offers the GLM Coding Plan for use in coding tools; the General API is billed per token.")
     }
 
     func testEveryPlanRouteIsAnOnlineServiceAndNotPrivate() {
@@ -107,9 +119,13 @@ final class PlanCatalogTests: XCTestCase {
             .hasPrefix("The plan's usage limit is used up for now"))
         XCTAssertTrue(PlanCatalog.explain(LLMError.connection("offline"), plan: kimi, region: intl)
             .contains("https://api.kimi.ai/coding/v1"))
-        let zai = plan("zai-coding")
-        XCTAssertEqual(PlanCatalog.explain(LLMError.http(401, ""), plan: zai, region: zai.regions[1]),
-                       "The key wasn't accepted — check it's a Z.ai — GLM Coding Plan key for the China region. (A Coding Plan key works only on the coding address.)")
+        let zai = plan("zai")
+        // The real 401 body api.z.ai sends for a wrong key (recorded 2026-10-18).
+        XCTAssertEqual(PlanCatalog.explain(LLMError.http(401, #"{"error":{"code":"401","message":"token expired or incorrect"}}"#),
+                                           plan: zai, region: zai.regions[2]),
+                       "Z.ai didn't accept the key (401: token expired or incorrect). Keys made at open.bigmodel.cn work on the China endpoints; a key from z.ai needs the international ones.")
+        XCTAssertTrue(PlanCatalog.explain(LLMError.http(429, #"{"error":{"code":"1113","message":"Insufficient balance or no resource package. Please recharge."}}"#),
+                                          plan: zai, region: zai.regions[1]).contains("switch the endpoint to Coding Plan"))
         let openai = plan("openai")
         XCTAssertEqual(PlanCatalog.explain(LLMError.http(500, #"{"error":{"message":"server melted"}}"#), plan: openai, region: openai.regions[0]),
                        "OpenAI API replied 500: server melted")

@@ -272,14 +272,18 @@ public final class AgentFleet: @unchecked Sendable {
     /// `unattended` one (for the queue or `/goal`) never runs on a server whose plan allows interactive use only.
     /// Throws `FleetUnavailableError` when no server can be reached (or, for a sensitive task, none is private), and
     /// `CancellationError` when the task is cancelled while it waits (a lease already being resolved is given back).
-    public func acquire(preferred: String? = nil, sensitive: Bool = false, unattended: Bool = false) async throws -> FleetLease {
+    /// `home` is the asking chat's own server: it stands in for the configured primary, so a chat's subagents fall
+    /// back to the model that chat uses — never to the one another chat picked (the workers are shared).
+    public func acquire(preferred: String? = nil, sensitive: Bool = false, unattended: Bool = false,
+                        home: FleetServer? = nil) async throws -> FleetLease {
         var tried = Set<String>()
         var lastError: (any Error)?
         while true {
             try Task.checkCancellation()
             let step: Step = try lock.withLock {
-                if configured.isEmpty { throw FleetUnavailableError("No model server is configured.") }
-                let eligible = eligibleLocked(sensitive: sensitive, unattended: unattended)
+                let servers = serversLocked(home: home)
+                if servers.isEmpty { throw FleetUnavailableError("No model server is configured.") }
+                let eligible = eligibleLocked(sensitive: sensitive, unattended: unattended, among: servers)
                 if eligible.isEmpty, !sensitive {
                     throw FleetUnavailableError("No model server here may take unattended work: each one is for interactive use only under its plan's terms.")
                 }
@@ -291,7 +295,8 @@ public final class AgentFleet: @unchecked Sendable {
                                                 + (lastError.map { ": \($0.localizedDescription)" } ?? "."),
                                                 underlying: lastError)
                 }
-                if let chosen = chooseLocked(preferred: preferred, tried: tried, among: eligible, sensitive: sensitive) {
+                if let chosen = chooseLocked(preferred: preferred, tried: tried, among: eligible, sensitive: sensitive,
+                                             servers: servers) {
                     states[chosen.id, default: State()].inFlight += 1
                     return .chosen(chosen)
                 }
@@ -393,20 +398,27 @@ public final class AgentFleet: @unchecked Sendable {
     /// The servers a task may run on: any, or for a sensitive task the private workers — and the primary when it is
     /// private and may take subagents (it always may when there are no workers at all). Unattended work leaves out
     /// the servers that are for interactive use only.
-    private func eligibleLocked(sensitive: Bool, unattended: Bool) -> [FleetServer] {
-        let allowed = unattended ? configured.filter { !$0.interactiveOnly } : configured
+    private func eligibleLocked(sensitive: Bool, unattended: Bool, among servers: [FleetServer]) -> [FleetServer] {
+        let allowed = unattended ? servers.filter { !$0.interactiveOnly } : servers
         guard sensitive else { return allowed }
-        let primaryMay = primaryTakesSensitiveLocked()
+        let primaryMay = primaryTakesSensitiveLocked(servers)
         return allowed.filter { $0.isPrivate && (!$0.isPrimary || primaryMay) }
     }
 
-    private func primaryTakesSensitiveLocked() -> Bool {
-        guard configured.contains(where: { $0.isPrimary && $0.isPrivate }) else { return false }
-        return primaryTakesOverflow || !configured.contains(where: { !$0.isPrimary })
+    /// The servers one request may use: the configured ones, with the asking chat's own server as the primary.
+    private func serversLocked(home: FleetServer?) -> [FleetServer] {
+        guard var home else { return configured }
+        home.isPrimary = true
+        return configured.filter { !$0.isPrimary && $0.id != home.id } + [home]
+    }
+
+    private func primaryTakesSensitiveLocked(_ servers: [FleetServer]) -> Bool {
+        guard servers.contains(where: { $0.isPrimary && $0.isPrivate }) else { return false }
+        return primaryTakesOverflow || !servers.contains(where: { !$0.isPrimary })
     }
 
     private func chooseLocked(preferred: String?, tried: Set<String>, among eligible: [FleetServer],
-                              sensitive: Bool) -> FleetServer? {
+                              sensitive: Bool, servers: [FleetServer]) -> FleetServer? {
         let at = now()
         let candidates = eligible.filter { !tried.contains($0.id) }
         if candidates.isEmpty { return nil }
@@ -418,7 +430,7 @@ public final class AgentFleet: @unchecked Sendable {
             var best: (server: FleetServer, load: Double, index: Int)?
             for server in pool where hasCapacityLocked(server) {
                 let load = Double(states[server.id]?.inFlight ?? 0) / Double(max(1, server.maxParallel))
-                let index = configured.firstIndex { $0.id == server.id } ?? Int.max
+                let index = servers.firstIndex { $0.id == server.id } ?? Int.max
                 if let current = best, (current.load, current.index) <= (load, index) { continue }
                 best = (server, load, index)
             }
