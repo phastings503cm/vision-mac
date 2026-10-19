@@ -95,10 +95,17 @@ final class AttachmentTurnTests: XCTestCase {
 
     private var logDir: URL { dir.appendingPathComponent("log", isDirectory: true) }
 
+    struct NoReply: Error {}
+
+    /// Waits for the turn to end with `replies` answers; a timeout fails the test and stops it there (it throws), so a
+    /// slow run (Apple's OCR under load) fails one test instead of crashing the bundle on an empty request list.
     private func waitForIdle(_ vm: SessionVM, replies: Int = 1) async throws {
         let deadline = Date().addingTimeInterval(30)
         while vm.running || vm.entries.filter({ $0.message?.role == .assistant }).count < replies {
-            if Date() > deadline { return XCTFail("no reply; entries: \(vm.entries.map { $0.message?.text ?? $0.tool?.name ?? "?" })") }
+            if Date() > deadline {
+                XCTFail("no reply; entries: \(vm.entries.map { $0.message?.text ?? $0.tool?.name ?? "?" })")
+                throw NoReply()
+            }
             try await Task.sleep(nanoseconds: 10_000_000)
         }
     }
@@ -158,7 +165,7 @@ final class AttachmentTurnTests: XCTestCase {
                        attachments: [PastedText.attachment(HostFixtures.lines(3_000, width: 40))])
         try await waitForIdle(vm)
         XCTAssertEqual(RawModelServer.bodies.count, 2)
-        let messages = RawModelServer.bodies[1]["messages"] as? [[String: Any]] ?? []
+        let messages = try XCTUnwrap(RawModelServer.bodies.dropFirst().first)["messages"] as? [[String: Any]] ?? []
         let result = messages.last { $0["role"] as? String == "tool" }?["content"] as? String ?? ""
         let partSize = AttachmentBudget(window: 32_768).partChars
         let parts = AttachmentPrep.split(HostFixtures.lines(3_000, width: 40), size: partSize)
@@ -172,7 +179,7 @@ final class AttachmentTurnTests: XCTestCase {
         let picture = MessageAttachment(kind: .image, name: "shot.png", data: HostFixtures.png(of: "TOTAL 42"))
         transport.send("read it", sessionID: vm.id, attachments: [picture])
         try await waitForIdle(vm)
-        let first = RawModelServer.bodies[0]["_raw"] as? String ?? ""
+        let first = try XCTUnwrap(RawModelServer.bodies.first)["_raw"] as? String ?? ""
         XCTAssertTrue(first.contains("image_url"))
 
         let old = try XCTUnwrap(transport.config.activeProvider)
