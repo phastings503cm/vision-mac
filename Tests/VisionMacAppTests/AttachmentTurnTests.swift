@@ -312,6 +312,34 @@ final class AttachmentTurnTests: XCTestCase {
         XCTAssertNil(AppTransport.commandAttachmentRefusal("Summarise these"))
     }
 
+    /// The Task Queue panel's delete and "Clear finished" also delete what a chat task kept (review: the bytes stayed
+    /// until the whole chat was deleted). The panel itself lists only the unattended queue.
+    func testEveryWayAChatTaskLeavesDeletesWhatItKept() async throws {
+        let vm = transport.newSession(cwd: dir.path)
+        transport.chatTasksPaused[vm.id] = "Paused — nothing new starts until you resume."
+        let first = try XCTUnwrap(transport.addChatTask("one", sessionID: vm.id,
+                                                        attachments: [MessageAttachment(kind: .file, name: "a.md", data: Data("# A".utf8))]))
+        let second = try XCTUnwrap(transport.addChatTask("two", sessionID: vm.id,
+                                                         attachments: [MessageAttachment(kind: .file, name: "b.md", data: Data("# B".utf8))]))
+        _ = transport.queueAdd("an unattended task", details: "", atFront: false)
+        XCTAssertEqual(transport.queue.unattended.tasks.map(\.title), ["an unattended task"], "what the panel lists and counts")
+        let store = transport.attachmentStore(for: vm.id)
+        let bytesA = try XCTUnwrap(store.queuedURL(try XCTUnwrap(first.attachments?.first)))
+        let bytesB = try XCTUnwrap(store.queuedURL(try XCTUnwrap(second.attachments?.first)))
+
+        transport.queueRemove(id: first.id)   // the panel's delete, given a chat task
+        XCTAssertNil(transport.queue.task(first.id))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: bytesA.path))
+
+        transport.queue.start(second.id, sessionID: vm.id)
+        transport.queue.finish(second.id, status: .complete, reason: nil, sessionID: vm.id)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: bytesB.path))
+        transport.clearFinishedChatTasks(vm.id)
+        XCTAssertNil(transport.queue.task(second.id))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: bytesB.path))
+        XCTAssertTrue(RawModelServer.bodies.isEmpty)
+    }
+
     func testDeletingAChatDeletesItsSavedAttachments() async throws {
         let vm = transport.newSession(cwd: dir.path)
         transport.send("keep", sessionID: vm.id,

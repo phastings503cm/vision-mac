@@ -281,6 +281,10 @@ extension AppTransport {
     public func clearFinishedChatTasks(_ sessionID: String) {
         for task in queue.chatTasks(sessionID) where task.status != .queued && task.status != .running {
             queue.remove(id: task.id)
+            // What it kept (a 10,000-line paste) goes with it.
+            if queue.task(task.id) == nil, let kept = task.attachments, !kept.isEmpty {
+                attachmentStore(for: sessionID).removeQueued(kept)
+            }
         }
     }
 

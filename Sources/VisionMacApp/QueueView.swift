@@ -23,7 +23,10 @@ struct QueueView: View {
 
     private var transport: AppTransport { model.transport }
     private var queue: TaskQueue { transport.queue }
-    private var queueTasksKey: [String] { queue.tasks.map(\.id) }
+    /// What this panel lists, counts and reorders: the unattended queue only. A chat's own tasks (chatID set) live in
+    /// that chat's task list, not here.
+    private var listed: TaskQueue { transport.queue.unattended }
+    private var queueTasksKey: [String] { listed.tasks.map(\.id) }
     private var selectedTask: QueueTask? {
         guard let id = selectedTaskID else { return nil }
         return queue.task(id)
@@ -42,11 +45,11 @@ struct QueueView: View {
             Divider()
             // The add card lives in the list, so the list shows while adding
             // even when the queue is still empty.
-            if queue.tasks.isEmpty && !adding {
+            if listed.tasks.isEmpty && !adding {
                 QueueEmptyView(onAdd: { beginAdd() })
             } else {
                 TaskListPane(
-                    tasks: queue.tasks,
+                    tasks: listed.tasks,
                     positions: positionMap,
                     selectedID: selectedTaskID,
                     adding: adding,
@@ -105,7 +108,7 @@ struct QueueView: View {
     }
 
     private var subtitle: String {
-        let s = queue.stats()
+        let s = listed.stats()
         if transport.queueRunningNow {
             let active = transport.queueActiveTaskID.flatMap { queue.task($0) } ?? queue.runningTask
             if transport.queueOnlyTasks != nil, let active {
@@ -127,8 +130,9 @@ struct QueueView: View {
 
     private var positionMap: [String: Int] {
         var m: [String: Int] = [:]
-        for t in queue.tasks where t.status == .queued {
-            m[t.id] = queue.position(of: t.id)
+        let listed = self.listed
+        for t in listed.tasks where t.status == .queued {
+            m[t.id] = listed.position(of: t.id)
         }
         return m
     }

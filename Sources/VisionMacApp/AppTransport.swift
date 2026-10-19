@@ -466,6 +466,11 @@ public final class AppTransport {
     }
 
     public func queueRemove(id: String) {
+        // A chat's task is that chat's: its own removal stops the chat if it runs and deletes what the task kept.
+        if queue.task(id)?.chatID != nil {
+            removeChatTask(id)
+            return
+        }
         // If a session is currently working this task, stop it first. The
         // store marks a running task skipped (keeping its record), so the
         // runner moves on to the next task rather than pausing.
@@ -503,7 +508,11 @@ public final class AppTransport {
 
     public func queueMove(id: String, by offset: Int) { queue.move(id: id, by: offset) }
     public func queueMove(id: String, before target: String?) { queue.move(id: id, before: target) }
-    public func queueMove(id: String, onto target: String) { queue.move(id: id, onto: target) }
+    /// The panel's drag: within the unattended queue only (a chat's tasks are reordered in that chat's list).
+    public func queueMove(id: String, onto target: String) {
+        guard let a = queue.task(id), let b = queue.task(target), a.chatID == nil, b.chatID == nil else { return }
+        queue.move(id: id, onto: target)
+    }
 
     /// Archive a finished task's session so a long queue doesn't pile up in
     /// RAM: persist the (possibly auto-compacted) timeline to disk, then drop
