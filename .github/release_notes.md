@@ -12,6 +12,23 @@ prompt on first launch — right-click the app and choose **Open**, or run:
 xattr -d com.apple.quarantine /Applications/Vision.app
 ```
 
+## What's new in 0.16.5 — your chats from Claude Code, Codex, OpenClaw, Claude.ai, ChatGPT and Guardian
+
+- **Import Chats.** **File ▸ Import Chats…** (⇧⌘I) brings in your conversations from **Claude Code**, **Codex**,
+  **OpenClaw**, a **Claude.ai** or **ChatGPT** data export (the ZIP, its folder or `conversations.json`), a Vision
+  chat file, and — signed in — your **Guardian** chats and the Vision chats your account keeps there. Tick some or
+  all; every message keeps its time, tool calls come in as tool cards, and a chat whose folder is on this Mac opens
+  in that project. Carry any of them on with any model — a Claude Code session can continue on Bedrock, Guardian or
+  your own hardware. Importing again brings only what's new, and a chat you already have (here, or the same one
+  Guardian imported) shows as imported. Reading changes nothing in the other tools.
+- **Export a chat.** **File ▸ Export Chat ▸ Markdown… / JSON…** (or the chat's right-click menu). The JSON imports
+  back into Vision on any computer, Mac or Windows. **Send Chat to Guardian** keeps it with your account, masked
+  first like the prompts Guardian's notebook gets; an open chat's plan goes along as a checklist, and a Sensitive
+  chat stays Sensitive when it comes back.
+- **Search all chats.** The field above the chat list (⇧⌘F) finds every word of a search in titles, prompts,
+  answers and tool calls across every chat, made here or imported; narrow it to one source, and click a result to
+  open the chat at that row.
+
 ## What's new in 0.16.4 — MCP servers, undo a turn's file changes, and Sensitive chats
 
 - **MCP servers.** **Settings ▸ MCP Servers** connects Vision to Model Context Protocol servers — a program it

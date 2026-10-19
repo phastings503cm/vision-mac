@@ -526,7 +526,9 @@ read only what changed.
 **Export**: **File ▸ Export Chat ▸ Markdown… / JSON…** (or the chat's right-click menu), and **Send Chat to
 Guardian** to keep it with your account — masked first, like the prompts Guardian's notebook gets (the Credentials
 Vault's secrets always, what the sensitive-data shield finds when it is on). An open chat's plan goes along as a
-"Plan:" checklist. The JSON imports back into Vision on any computer.
+"Plan:" checklist. The JSON imports back into Vision on any computer. A Sensitive chat stays Sensitive: its JSON
+and its copy in Guardian say so, and it comes back Sensitive — as does any chat imported into a project (or
+among chats without one) set to start chats Sensitive.
 
 **Search all chats** — the field above the chat list (⇧⌘F) — finds every word of a search in titles, prompts,
 answers and tool calls across every chat, made here or imported; its menu narrows it to one source. Click a
@@ -865,7 +867,7 @@ VisionMacApp/              SwiftUI
 swift test
 ```
 
-1,842 tests (1,556 on the harness core, 286 on the app host): the engine loop (tool round-trips, denials, iteration budget, usage accounting,
+1,882 tests (1,585 on the harness core, 297 on the app host): the engine loop (tool round-trips, denials, iteration budget, usage accounting,
 cancellation), permission containment, the Qwen XML fallback, glob, markdown, plugin interpolation
 and quoting, prompt assembly, editor-buffer conflict resolution, 34 over the terminal emulator, and 8
 that spawn a real shell on a real pty and assert on what lands on the screen — plus the fleet (server
@@ -898,7 +900,10 @@ payload each kind of server gets, a 10,000-line paste sent in parts and queued w
 through AppKit's own paste path, the paged transcript (pages loading by scroll and by click, the reader's row
 kept in place, following the end, jumps) and Copy (a prompt exactly as sent, its pastes, goals and their rounds, ⇧⌘C),
 validation sending a goal back and the no-progress stop, screen control's planner and arbiter against a fake
-machine, OpenClaw import and export against made-up installs (and read-only against a real one), and the
+machine, OpenClaw import and export against made-up installs (and read-only against a real one), chat import
+from made-up Claude Code, Codex, OpenClaw, Claude.ai and ChatGPT files (a session found twice, a branch walk,
+attachments; read-only against the real histories on this Mac), export to Markdown, JSON and Guardian (masked,
+the plan and the Sensitive flag going along), the search across every chat, and the
 Guardian contract — browser sign-in with PKCE through the loopback, organizations, limits, refusals, the
 vault, projects and the masked notebook — against a scripted Guardian. Five live tests are skipped unless
 pointed at a real server or a real OpenClaw.
@@ -934,5 +939,6 @@ Verified on macOS 14+ / Apple Silicon:
   is told to.
 - **Reasoning is shown live but not kept** in the transcript once the answer arrives. Servers
   without a reasoning parser leave `<think>` text inline in the answer.
-- **Search across sessions is not implemented.** Transcripts are plain JSON under
-  `~/Library/Application Support/Vision/conversations/`, so `grep` works in the meantime.
+- **Chat import was run read-only against this Mac's real Claude Code, Codex and OpenClaw histories**;
+  Claude.ai and ChatGPT exports and your Guardian chats only against made-up files and a scripted Guardian.
+  A Guardian copy imported first doesn't hide the local session it came from (that one is the fuller copy).
