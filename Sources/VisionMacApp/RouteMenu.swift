@@ -26,6 +26,7 @@ struct RouteMenuSections: View {
         section("Subagents — take side tasks in parallel", helping, current: current)
         section("Backups — take over if the primary fails", standingBy, current: current)
         section("Other models", others, current: current)
+        guardianSection(config, current: current)
         if session != nil, let current, current != config.activeRoute, usable.contains(where: { $0.routeID == current }) {
             Button("Make This the Primary (for new projects and the fleet)") {
                 config.makeMain(current)
@@ -64,6 +65,42 @@ struct RouteMenuSections: View {
                                   : provider.isPrivateRoute ? "lock.fill" : "shield.lefthalf.filled")
                     }
                     .help(provider.isPrivateRoute ? "Private: may see sensitive data" : "Not private: sensitive details are masked before sending")
+                }
+            }
+        }
+    }
+
+    /// Guardian's models, while signed in to Guardian — there by themselves, no button to press. Signed out, a chat
+    /// on one of them shows it here with what to do.
+    @ViewBuilder
+    private func guardianSection(_ config: AppConfig, current: String?) -> some View {
+        let routes = config.guardianModelRoutes
+        if !routes.isEmpty {
+            Section("Guardian") {
+                ForEach(routes, id: \.routeID) { route in
+                    Button {
+                        guard route.routeID != current else { return }
+                        if let session {
+                            model.transport.setRoute(route.routeID, for: session)
+                        } else {
+                            // The primary is a configured route: keep this one, on the sign-in's token.
+                            config.store(route)
+                            config.setAPIKey(config.guardianToken ?? "", for: route)
+                            config.makeMain(route.routeID)
+                            model.transport.resetRouteCache()
+                        }
+                    } label: {
+                        Label(config.guardianMenuLabel(route.routeID),
+                              systemImage: route.routeID == current ? "checkmark" : ProviderProfile.Kind.guardian.icon)
+                    }
+                    .help("Guardian (\(route.model)): sensitive details are masked before sending")
+                }
+            }
+        } else if let current, config.isGuardianModel(current), config.guardianToken == nil {
+            Section("Guardian") {
+                Button("\(config.guardianMenuLabel(current)) — \(GuardianSignInNeeded.message)") {
+                    model.settingsTab = .guardian
+                    model.showSettings = true
                 }
             }
         }

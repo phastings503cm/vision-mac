@@ -195,22 +195,102 @@ final class GuardianServiceTests: XCTestCase {
         XCTAssertTrue(GuardianService.servesSameGuardian(route, address: "https://GUARDIAN.503cm.com"))
     }
 
-    /// Signed in from Settings with no Guardian model route: "Use Guardian's Models" adds one on this sign-in's token.
-    func testUseGuardiansModelsAddsTheRouteOnTheSignInsToken() async throws {
-        let existing = try XCTUnwrap(transport.config.activeProvider)
-        transport.config.removeProvider(existing)
-        XCTAssertTrue(service.modelRoutes.isEmpty)
-        wire.routes["GET /api/harness/v1/models"] = (200, #"{"models":[{"id":"guardian/sonnet"},{"id":"guardian/opus"}]}"#)
+    // MARK: Guardian's models in every chat's menu (mixing bowl #17)
+
+    private static let modelList = #"{"models":[{"id":"claude-opus-5-5","label":"Claude Opus 5.5","contextWindow":1000000},{"id":"guardian/fast","label":"Guardian fast","interactiveOnly":true}],"data":[{"id":"claude-opus-5-5","object":"model"},{"id":"guardian/fast","object":"model"}]}"#
+
+    /// Signed in, Guardian's models are in every chat's model menu by themselves — no button. A chat picks one like any
+    /// other and its requests carry the sign-in's token; signing out takes them out of the menus and a chat on one says
+    /// "Sign in to Guardian to use this model." (nothing is sent); signing in again renews the token.
+    func testGuardiansModelsAppearInEveryChatsMenuAndFollowTheSignIn() async throws {
+        OpenAIClient.protocolClassesForTesting = [GuardianProxyServer.self]
+        GuardianProxyServer.reset()
+        defer { OpenAIClient.protocolClassesForTesting = nil }
+        transport.retryPolicy = RetryPolicy(delay: { _ in 0.02 })
+        transport.config.computerToolsEnabled = false
+        let config = transport.config
+        wire.routes["GET /api/harness/v1/models"] = (200, Self.modelList)
+        XCTAssertTrue(config.guardianModelRoutes.isEmpty, "signed out: none")
+
         try await signIn()
+        try await waitUntil { config.guardianModels.count == 2 }
+        let routes = config.guardianModelRoutes
+        XCTAssertEqual(routes.map(\.routeID), ["Guardian|claude-opus-5-5", "Guardian|guardian/fast"])
+        XCTAssertEqual(routes[0].baseURL, "https://guardian.503cm.com/v1")
+        XCTAssertEqual(routes[0].contextWindow, 1_000_000)
+        XCTAssertEqual(routes[1].interactiveOnly, true)
+        XCTAssertNil(routes[0].apiKey, "the menus carry no token")
+        XCTAssertEqual(config.guardianMenuLabel("Guardian|claude-opus-5-5"), "Claude Opus 5.5 (claude-opus-5-5)")
+        XCTAssertFalse(config.providers.contains { $0.routeID.hasPrefix("Guardian|claude") }, "never saved with the routes")
+
+        // A chat picks one like any other model; the request carries the sign-in's token. Another chat keeps its own.
+        let vm = transport.newSession(cwd: dir.path)
+        let other = transport.newSession(cwd: dir.path)
+        transport.setRoute("Guardian|claude-opus-5-5", for: vm)
+        XCTAssertEqual(transport.chatRouteID(vm), "Guardian|claude-opus-5-5")
+        XCTAssertEqual(transport.chatRouteID(other), "Guardian|guardian/default")
+        XCTAssertEqual(transport.contextLimit(for: vm), 1_000_000)
+        transport.send("hello", sessionID: vm.id)
+        try await waitUntil(timeout: 20) { !vm.running && vm.entries.contains { $0.message?.role == .assistant } }
+        XCTAssertEqual(GuardianProxyServer.chatAuthorizations, ["Bearer sess-1"])
+
+        // Picking an organization reaches these routes too.
         service.setOrg("o2", refresh: false)
-        let said = await service.addModelRoute()
-        XCTAssertEqual(said, "Added Guardian's models (2) — pick one for a chat in the model menu under the message box.")
-        let route = try XCTUnwrap(service.modelRoutes.first)
-        XCTAssertEqual(route.baseURL, "https://guardian.503cm.com/v1")
-        XCTAssertEqual(route.model, "guardian/opus")
-        XCTAssertEqual(route.customHeaders?["x-guardian-org"], "o2")
-        XCTAssertEqual(transport.config.apiKey(for: route), "sess-1")
-        XCTAssertEqual(GuardianService.modelRouteURL(URL(string: "https://g.example.com/")!), "https://g.example.com/v1")
+        XCTAssertEqual(config.guardianModelRoutes.first?.customHeaders?["x-guardian-org"], "o2")
+        service.setOrg(nil, refresh: false)
+
+        // Signed out: out of the menus; the chat keeps its model and says what to do, without sending anything.
+        service.signOut()
+        XCTAssertTrue(config.guardianModelRoutes.isEmpty)
+        XCTAssertEqual(transport.chatRouteID(vm), "Guardian|claude-opus-5-5", "not moved onto another model")
+        transport.send("again", sessionID: vm.id)
+        try await waitUntil(timeout: 20) { !vm.running && vm.entries.contains { $0.message?.role == .error } }
+        XCTAssertTrue(vm.entries.contains { $0.message?.role == .error && $0.message?.text.contains(GuardianSignInNeeded.message) == true },
+                      vm.entries.compactMap { $0.message?.text }.joined(separator: " | "))
+        XCTAssertEqual(GuardianProxyServer.chatAuthorizations.count, 1, "nothing sent without a sign-in")
+        XCTAssertEqual(transport.chatRouteID(vm), "Guardian|claude-opus-5-5")
+
+        // Signing in again renews the token: the same chat carries on, on the new one.
+        wire.routes["POST /api/auth/login"] = (200, #"{"ok":true,"token":"sess-2","session":{"userId":"u1","email":"pat@503cm.com","name":"Pat"}}"#)
+        try await signIn()
+        try await waitUntil { config.guardianModels.count == 2 }
+        transport.send("third", sessionID: vm.id)
+        try await waitUntil(timeout: 20) { !vm.running && vm.entries.filter { $0.message?.role == .assistant }.count == 2 }
+        XCTAssertEqual(GuardianProxyServer.chatAuthorizations.last, "Bearer sess-2")
+    }
+
+    /// At launch the menus have the list this Mac last saw (no token in the file) before Guardian answers; a sign-out
+    /// forgets it.
+    func testTheLastListIsThereAtLaunchAndASignOutForgetsIt() async throws {
+        wire.routes["GET /api/harness/v1/models"] = (200, Self.modelList)
+        let secrets = MemorySecretStore()
+        let wire = self.wire!
+        func makeService() -> GuardianService {
+            GuardianService(appSupport: dir, secrets: secrets) { request in
+                wire.add(request)
+                let key = (request.httpMethod ?? "GET") + " " + (request.url?.path ?? "")
+                let (status, body) = wire.routes[key] ?? (404, #"{"error":"not found"}"#)
+                return GuardianHTTPResponse(data: Data(body.utf8), status: status, headers: [:])
+            }
+        }
+        let first = makeService()
+        first.transport = transport
+        let signedIn = await first.signIn(address: GuardianService.defaultURL, email: "pat@503cm.com", password: "pw")
+        XCTAssertTrue(signedIn)
+        try await waitUntil { first.models.count == 2 }
+        let file = try String(contentsOf: dir.appendingPathComponent("guardian-models.json"), encoding: .utf8)
+        XCTAssertFalse(file.contains("sess-1"), "no token in the cache")
+
+        wire.routes["GET /api/harness/v1/models"] = (503, #"{"error":"offline"}"#)
+        let relaunched = makeService()
+        XCTAssertEqual(relaunched.models.map(\.id), ["claude-opus-5-5", "guardian/fast"], "there before Guardian answers")
+        transport.config.guardianModels = []
+        relaunched.transport = transport
+        XCTAssertEqual(transport.config.guardianModels.count, 2)
+        XCTAssertEqual(transport.config.guardianToken, "sess-1")
+        relaunched.signOut()
+        XCTAssertNil(transport.config.guardianToken)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("guardian-models.json").path))
     }
 
     /// Download a Copy into the folder that holds the project's working tree: a new "ledger (2)", the tree untouched.
@@ -302,7 +382,7 @@ final class GuardianProxyServer: URLProtocol, @unchecked Sendable {
             return
         }
         let auth = request.value(forHTTPHeaderField: "Authorization") ?? ""
-        Self.lock.withLock { Self._auth.append(auth) }
+        if path.hasSuffix("/chat/completions") { Self.lock.withLock { Self._auth.append(auth) } }
         if auth == "Bearer tok-A" {
             respond(401, #"{"error":"unauthorized","message":"Your sign-in has expired."}"#, type: "application/json")
         } else {

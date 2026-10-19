@@ -69,6 +69,9 @@ public enum ProviderClients {
             client = BedrockClient(profile: profile, credentials: usesAPIKey ? nil : awsCredentials?(profile))
         case .anthropic:
             client = AnthropicClient(profile: profile, onNotice: events.notice)
+        case .guardian where (profile.apiKey ?? "").isEmpty:
+            // Signed out of Guardian: its models wait for the sign-in instead of sending a request without one.
+            return GuardianSignInNeeded(profile: profile)
         default:
             client = OpenAIClient(profile: profile, onNotice: events.notice)
         }
@@ -77,3 +80,20 @@ public enum ProviderClients {
     }
 }
 
+/// A Guardian model while signed out of Guardian: every call says how to get it back.
+public struct GuardianSignInNeeded: ProviderClient {
+    public let profile: ProviderProfile
+
+    /// What a chat on a Guardian model says while signed out (the same words on Windows).
+    public static let message = "Sign in to Guardian to use this model."
+
+    static var error: LLMError { .rejected(status: 401, message: message, body: "signed out of Guardian", permanent: true) }
+
+    public func stream(_ request: LLMRequest) -> AsyncThrowingStream<LLMStreamEvent, Error> {
+        AsyncThrowingStream { $0.finish(throwing: Self.error) }
+    }
+
+    public func listModels() async throws -> [String] { throw Self.error }
+
+    public func modelInfo(_ model: String?) async -> ModelInfo? { nil }
+}

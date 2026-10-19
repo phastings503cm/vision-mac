@@ -32,9 +32,21 @@ public final class GuardianService: ObservableObject {
             // theirs — every sign-in, the wizard's too, ends here).
             if let token = client?.session?.token, !token.isEmpty, let client {
                 routesFollow(token: token, address: client.baseURL.absoluteString)
+                // Guardian's models are in every chat's menu at once (the list this Mac last saw), then read again.
+                publishModels()
+                startModelRefresh()
             }
         }
     }
+
+    /// The models Guardian offers this account in this organization (what every chat's model menu lists under
+    /// "Guardian"); empty while signed out.
+    @Published public private(set) var models: [GuardianModel] = []
+    /// Reads the list again every `modelRefreshInterval` while signed in.
+    private var modelRefresh: Task<Void, Never>?
+    public static let modelRefreshInterval: TimeInterval = 15 * 60
+    /// The list as last read, so the menus have it at launch before Guardian answers (no token in it).
+    private let modelsFile: URL
 
     /// GET /api/harness/me: the account, its organizations, modules, permissions and limits.
     @Published public private(set) var account: GuardianAccount?
@@ -70,6 +82,7 @@ public final class GuardianService: ObservableObject {
         self.secrets = secrets
         self.transportOverride = transport
         pushedFile = appSupport.appendingPathComponent("guardian-pushed-prompts.json")
+        modelsFile = appSupport.appendingPathComponent("guardian-models.json")
         let address = secrets.read(service: AppIdentity.KeychainService.guardian, account: "address")
             ?? Self.defaultURL
         if let token = secrets.read(service: AppIdentity.KeychainService.guardian, account: "token"), !token.isEmpty {
@@ -83,6 +96,10 @@ public final class GuardianService: ObservableObject {
         if let data = try? Data(contentsOf: pushedFile),
            let ids = try? JSONDecoder().decode([String].self, from: data) {
             pushedPromptIDs = Set(ids)
+        }
+        if let client, let cached = Self.readModelsCache(modelsFile), cached.address == client.baseURL.absoluteString,
+           cached.org == orgID {
+            models = cached.models
         }
     }
 
@@ -153,6 +170,10 @@ public final class GuardianService: ObservableObject {
         // The model routes on this Guardian use the new token too: signing in again here (what a 401 asks for) renews
         // the models as well as prompts, limits and the vault.
         routesFollow(token: session.token, address: guardian.baseURL.absoluteString)
+        // Guardian's models: in every chat's model menu, on this sign-in's token.
+        publishModels()
+        Task { [weak self] in await self?.refreshModels() }
+        startModelRefresh()
         // The shared ETA cache: what the org's harnesses learned blends
         // into this Mac's cache, so its first estimates start smart.
         Task { [weak self] in
@@ -255,7 +276,80 @@ public final class GuardianService: ObservableObject {
         }
         remoteSecrets = []
         remoteProjects = []
-        if refresh { Task { [weak self] in await self?.refreshAccount() } }
+        // Guardian's models in the menus work in that organization too, and it may offer others.
+        publishModels()
+        if refresh {
+            Task { [weak self] in
+                await self?.refreshAccount()
+                await self?.refreshModels()
+            }
+        }
+    }
+
+    // MARK: Guardian's models in every chat's menu
+
+    /// Read the account's models (GET /api/harness/v1/models) and put them in every chat's model menu. A failure
+    /// keeps the list it had (the dialog for a refusal is left to the person's own actions).
+    public func refreshModels() async {
+        guard let client, let token = client.session?.token, !token.isEmpty else { return }
+        do {
+            let listed = try await GuardianProblems.$quiet.withValue(true) { try await client.models() }
+            // Signed out, or signed in elsewhere, while it was asked: that answer is stale.
+            guard self.client === client else { return }
+            models = listed
+            publishModels()
+            Self.writeModelsCache(modelsFile, ModelsCache(address: client.baseURL.absoluteString, org: orgID, models: listed))
+        } catch GuardianError.unauthorized {
+            lastError = GuardianError.unauthorized.errorDescription
+        } catch {
+            // Offline or busy: the list from before stays.
+        }
+    }
+
+    /// Hand the list, the proxy's address, the organization and the sign-in's token to the routes (all empty while
+    /// signed out). The routes read the token when a request is made, so a new sign-in renews every chat on them.
+    private func publishModels() {
+        guard let config = transport?.config else { return }
+        let raw = client?.session?.token
+        let token = (raw?.isEmpty ?? true) ? nil : raw
+        let base = client.map { Self.modelRouteURL($0.baseURL) }
+        let shown = client == nil ? [] : models
+        guard config.guardianToken != token || config.guardianModelBase != base || config.guardianOrgID != orgID
+                || config.guardianModels != shown else { return }
+        config.guardianToken = token
+        config.guardianModelBase = base
+        config.guardianOrgID = orgID
+        if config.guardianModels != shown { config.guardianModels = shown }
+        // Chats on these models build their client again with what changed (a new token, another organization).
+        transport?.resetRouteCache()
+    }
+
+    private func startModelRefresh() {
+        modelRefresh?.cancel()
+        modelRefresh = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(Self.modelRefreshInterval * 1_000_000_000))
+                // Cancelled (signed out), or the connection is gone: stop.
+                guard !Task.isCancelled, let service = self else { return }
+                await service.refreshModels()
+            }
+        }
+    }
+
+    struct ModelsCache: Codable {
+        var address: String
+        var org: String?
+        var models: [GuardianModel]
+    }
+
+    static func readModelsCache(_ file: URL) -> ModelsCache? {
+        guard let data = try? Data(contentsOf: file) else { return nil }
+        return try? JSONDecoder().decode(ModelsCache.self, from: data)
+    }
+
+    static func writeModelsCache(_ file: URL, _ cache: ModelsCache?) {
+        guard let cache else { try? FileManager.default.removeItem(at: file); return }
+        if let data = try? JSONEncoder().encode(cache) { try? data.write(to: file, options: .atomic) }
     }
 
     // MARK: The model routes follow the connection
@@ -289,31 +383,6 @@ public final class GuardianService: ObservableObject {
             }
         }
         if changed { transport.resetRouteCache() }
-    }
-
-    /// "Use Guardian's models" (Settings ▸ Guardian, signed in, no Guardian model route yet): add a route for the
-    /// account's models with the connection's token — the same route the setup wizard makes — without making it the
-    /// main model. Returns what to tell the person.
-    @discardableResult
-    public func addModelRoute() async -> String {
-        guard let client, let token = client.session?.token, !token.isEmpty, let config = transport?.config else {
-            return "Sign in to Guardian first."
-        }
-        do {
-            let models = try await client.models().map(\.id).sorted()
-            guard let first = models.first else { return "Guardian offers no models to this account in this organization." }
-            var route = ProviderProfile(kind: .guardian, name: "Guardian", baseURL: Self.modelRouteURL(client.baseURL),
-                                        model: first)
-            if let orgID { route.customHeaders = ["x-guardian-org": orgID] }
-            config.store(route)
-            config.setAPIKey(token, for: route)
-            if config.activeRoute == nil { config.activate(route) }
-            transport?.resetRouteCache()
-            return "Added Guardian's models (\(models.count)) — pick one for a chat in the model menu under the message box."
-        } catch {
-            report(error)
-            return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-        }
     }
 
     /// The model proxy's address for a Guardian deployment: its OpenAI-compatible `/v1`, as the setup wizard writes it.
@@ -420,9 +489,15 @@ public final class GuardianService: ObservableObject {
             ?? secrets.read(service: AppIdentity.KeychainService.guardian, account: "address") ?? Self.defaultURL
         secrets.write(nil, service: AppIdentity.KeychainService.guardian, account: "token")
         secrets.write(nil, service: AppIdentity.KeychainService.guardian, account: "email")
-        // Signed out means signed out: the Guardian model routes stop using the token too.
+        // Signed out means signed out: the Guardian model routes stop using the token too, and Guardian's models leave
+        // the menus (a chat on one says "Sign in to Guardian to use this model." until the next sign-in).
         routesFollow(token: nil, address: address)
+        modelRefresh?.cancel()
+        modelRefresh = nil
+        models = []
+        Self.writeModelsCache(modelsFile, nil)
         client = nil
+        publishModels()
         accountEmail = nil
         account = nil
         limits = []

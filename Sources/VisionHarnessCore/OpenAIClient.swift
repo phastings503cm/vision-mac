@@ -183,7 +183,9 @@ public struct OpenAIClient: LLMClient {
                 }
             }
         }
-        if limit == nil { limit = await sglangContextLength() }
+        // SGLang's own routes exist only on a server you run: a hosted API or Guardian's proxy would be asked four
+        // pointless questions before every turn.
+        if limit == nil, profile.isSelfHosted, profile.kind != .guardian { limit = await sglangContextLength() }
         return ModelInfo(id: resolved, contextWindow: limit, maxTokens: maxOut, servedModels: served)
     }
 

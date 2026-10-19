@@ -39,21 +39,78 @@ extension AppConfig {
         projectChoices[key] = choice
     }
 
-    /// A configured route that is switched on, with its API key from the Keychain (nil when it is gone or off).
+    /// A configured route that is switched on, with its API key from the Keychain — or one of Guardian's models while
+    /// signed in to Guardian (nil when it is gone, off, or a Guardian model while signed out).
     public func usableRoute(_ routeID: String?) -> ProviderProfile? {
-        guard let routeID, let stored = providers.first(where: { $0.routeID == routeID }), stored.isEnabled else { return nil }
+        guard let routeID else { return nil }
+        guard let stored = providers.first(where: { $0.routeID == routeID }) else {
+            return guardianModelRoute(routeID).flatMap { $0.apiKey == nil ? nil : $0 }
+        }
+        guard stored.isEnabled else { return nil }
         var resolved = stored
         let key = apiKey(for: stored)
         resolved.apiKey = key.isEmpty ? nil : key
         return resolved
     }
+
+    // MARK: Guardian's models
+
+    /// The name every Guardian model route goes by: its identity is "Guardian|<model id>".
+    public nonisolated static let guardianRouteName = "Guardian"
+
+    /// Whether a route identity names one of Guardian's models (and no configured route has that identity — a route
+    /// the setup wizard saved is an ordinary route).
+    public func isGuardianModel(_ routeID: String?) -> Bool {
+        guard let routeID, routeID.hasPrefix(Self.guardianRouteName + "|"),
+              routeID.count > Self.guardianRouteName.count + 1 else { return false }
+        return !providers.contains { $0.routeID == routeID }
+    }
+
+    /// One Guardian model as a route: the proxy's address, the organization header, the window and plan terms
+    /// Guardian reports, and the sign-in's token — none while signed out, when a chat on it says
+    /// "Sign in to Guardian to use this model." (`GuardianSignInNeeded`). Nil for any other identity.
+    public func guardianModelRoute(_ routeID: String?) -> ProviderProfile? {
+        guard isGuardianModel(routeID), let routeID else { return nil }
+        let id = String(routeID.dropFirst(Self.guardianRouteName.count + 1))
+        var route = Self.guardianRoute(guardianModels.first { $0.id == id } ?? GuardianModel(id: id),
+                                       base: guardianModelBase, org: guardianOrgID)
+        let token = guardianToken ?? ""
+        route.apiKey = token.isEmpty ? nil : token
+        return route
+    }
+
+    /// Guardian's models as routes, for the menus (no token on them).
+    public var guardianModelRoutes: [ProviderProfile] {
+        let stored = Set(providers.map(\.routeID))
+        return guardianModels.map { Self.guardianRoute($0, base: guardianModelBase, org: guardianOrgID) }
+            .filter { !stored.contains($0.routeID) }
+    }
+
+    /// The route for one of Guardian's models.
+    static func guardianRoute(_ model: GuardianModel, base: String?, org: String?) -> ProviderProfile {
+        var route = ProviderProfile(kind: .guardian, name: guardianRouteName,
+                                    baseURL: base ?? GuardianService.modelRouteURL(URL(string: GuardianService.defaultURL)!),
+                                    model: model.id)
+        if let window = model.contextWindow, window > 0 { route.contextWindow = window }
+        if model.interactiveOnly == true { route.interactiveOnly = true }
+        if let org, !org.isEmpty { route.customHeaders = ["x-guardian-org": org] }
+        return route
+    }
+
+    /// How a Guardian model is named in the menu: Guardian's label, with the id when they differ.
+    public func guardianMenuLabel(_ routeID: String) -> String {
+        let id = String(routeID.dropFirst(Self.guardianRouteName.count + 1))
+        guard let label = guardianModels.first(where: { $0.id == id })?.label, !label.isEmpty, label != id else { return id }
+        return "\(label) (\(id))"
+    }
 }
 
 extension AppTransport {
-    /// The route a chat talks to: its own while that is configured and on, else the primary.
+    /// The route a chat talks to: its own while that is configured and on — a Guardian model stays the chat's even
+    /// while signed out (it then asks for the sign-in) — else the primary.
     @MainActor
     func chatRoute(_ vm: SessionVM?) -> ProviderProfile? {
-        config.usableRoute(vm?.routeID) ?? config.activeProvider
+        config.usableRoute(vm?.routeID) ?? config.guardianModelRoute(vm?.routeID) ?? config.activeProvider
     }
 
     /// The configured route a chat shows in its model menu (its own, else the primary).
@@ -92,6 +149,8 @@ extension AppTransport {
     /// An older chat that never chose: it takes the primary of the moment it sends, and keeps it.
     @MainActor
     func pinRouteIfUnset(_ vm: SessionVM) {
+        // A chat on a Guardian model keeps it while signed out: sending says "Sign in to Guardian to use this model."
+        guard !config.isGuardianModel(vm.routeID) else { return }
         guard vm.routeID == nil || config.usableRoute(vm.routeID) == nil else { return }
         let previous = vm.routeID
         vm.routeID = config.activeRoute

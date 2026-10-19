@@ -72,6 +72,19 @@ public final class AppConfig {
     /// Called whenever the set of routes, the main model or the subagent
     /// settings change, so the fleet can be rebuilt. Not called while loading.
     @ObservationIgnored public var onRoutesChanged: (@MainActor () -> Void)?
+    // MARK: Guardian's models (memory only)
+
+    /// The models Guardian offers the signed-in account — every chat's model menu lists them under "Guardian", as
+    /// routes "Guardian|<model id>" (see `ChatRoutes.swift`). Never saved with the routes: `GuardianService` fills it
+    /// on sign-in, from its cache at launch and every 15 minutes, and empties it on sign-out.
+    public var guardianModels: [GuardianModel] = []
+    /// The Guardian sign-in's token those routes use (nil = signed out). Memory only: the Keychain copy belongs to
+    /// the connection, so signing in again renews every Guardian model at once.
+    @ObservationIgnored public var guardianToken: String?
+    /// The model proxy's address ("https://guardian.503cm.com/v1") and the organization it works in.
+    @ObservationIgnored public var guardianModelBase: String?
+    @ObservationIgnored public var guardianOrgID: String?
+
     /// Signed in to Guardian: send each prompt (masked) to the Guardian prompt notebook, with how it ended.
     public var guardianPromptSync: Bool = true {
         didSet { persist() }
