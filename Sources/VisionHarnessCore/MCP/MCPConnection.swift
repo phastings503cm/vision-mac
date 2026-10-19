@@ -128,6 +128,79 @@ final class PendingRequests: @unchecked Sendable {
 
 // MARK: - stdio
 
+/// How the login shell starts a program server. `${NAME}` and `${NAME:-default}` in its command, arguments and
+/// environment are filled in from Vision's environment; a name Vision's environment lacks (an app opened from the
+/// Finder doesn't get the variables a shell profile exports) is left to the login shell, which fills it in from its
+/// own. Nothing the server's settings say is ever put into the script itself: the script holds only variable names
+/// (checked to be plain names), and every piece of text goes in through a `VISION_MCP_L<n>` variable, removed again
+/// before the program starts.
+public struct MCPLaunch: Equatable, Sendable {
+    /// The script (`$SHELL -l -c <script> vision-mcp <arguments…>`).
+    public var script: String
+    /// The script's arguments (`$1…`).
+    public var arguments: [String]
+    /// What is set in the shell's environment on top of Vision's.
+    public var environment: [String: String]
+
+    static let plain = "exec \"$@\""
+
+    static func isName(_ text: String) -> Bool {
+        guard let first = text.unicodeScalars.first, first == "_" || (first.isASCII && CharacterSet.letters.contains(first)) else { return false }
+        return text.unicodeScalars.allSatisfy { $0 == "_" || ($0.isASCII && CharacterSet.alphanumerics.contains($0)) }
+    }
+
+    /// Whether `text` refers to a name `known` lacks (or has empty) that the shell can fill in.
+    static func defers(_ text: String, known: [String: String]) -> Bool {
+        MCPImport.placeholders(in: text).contains { isName($0.name) && (known[$0.name] ?? "").isEmpty }
+    }
+
+    public static func plan(command: String, args: [String], environment: [String: String],
+                            known: [String: String]) -> MCPLaunch {
+        func expand(_ text: String) -> String { MCPImport.expand(text, environment: known) }
+        let words = [command] + args
+        let deferredWords = words.contains { defers($0, known: known) }
+        let deferredEnv = environment.filter { isName($0.key) && defers($0.value, known: known) }
+        var env: [String: String] = [:]
+        for (key, value) in environment where deferredEnv[key] == nil { env[key] = expand(value) }
+        guard deferredWords || !deferredEnv.isEmpty else {
+            return MCPLaunch(script: plain, arguments: words.map(expand), environment: env)
+        }
+        var literals: [String] = []
+        func literal(_ text: String) -> String {
+            let name = "VISION_MCP_L\(literals.count)"
+            env[name] = text
+            literals.append(name)
+            return "${\(name)}"
+        }
+        // One double-quoted shell word: text through variables, the missing names left to the shell.
+        func word(_ text: String) -> String {
+            var out = ""
+            var rest = Substring(text)
+            while let open = rest.range(of: "${"), let close = rest[open.upperBound...].firstIndex(of: "}") {
+                if open.lowerBound > rest.startIndex { out += literal(String(rest[..<open.lowerBound])) }
+                let body = String(rest[open.upperBound..<close])
+                let parts = body.components(separatedBy: ":-")
+                let name = parts[0]
+                if isName(name), (known[name] ?? "").isEmpty {
+                    out += parts.count > 1 ? "${\(name):-\(literal(parts.dropFirst().joined(separator: ":-")))}" : "${\(name)}"
+                } else {
+                    out += literal(expand("${" + body + "}"))
+                }
+                rest = rest[rest.index(after: close)...]
+            }
+            if !rest.isEmpty { out += literal(String(rest)) }
+            return "\"" + out + "\""
+        }
+        var lines: [String] = []
+        for key in deferredEnv.keys.sorted() { lines.append("export \(key)=\(word(deferredEnv[key]!))") }
+        if deferredWords { lines.append("set -- " + words.map(word).joined(separator: " ")) }
+        if !literals.isEmpty { lines.append("unset " + literals.joined(separator: " ")) }
+        lines.append(plain)
+        return MCPLaunch(script: lines.joined(separator: "; "), arguments: deferredWords ? [] : words.map(expand),
+                         environment: env)
+    }
+}
+
 public final class MCPStdioConnection: MCPConnection, @unchecked Sendable {
     public let command: String
     public let args: [String]
@@ -135,6 +208,8 @@ public final class MCPStdioConnection: MCPConnection, @unchecked Sendable {
     public let workingDirectory: URL?
     /// Run through the login shell (so the user's PATH applies); tests start the program directly.
     let viaLoginShell: Bool
+    /// What the login shell runs (nil = `exec "$@"` with the command and its arguments as given).
+    let launch: MCPLaunch?
 
     private let process = Process()
     private let input = Pipe()
@@ -155,6 +230,17 @@ public final class MCPStdioConnection: MCPConnection, @unchecked Sendable {
         self.environment = environment
         self.workingDirectory = workingDirectory
         self.viaLoginShell = viaLoginShell
+        self.launch = nil
+    }
+
+    /// Through the login shell, as `launch` plans it (the `${NAME}`s Vision lacks filled in by the shell).
+    public init(launch: MCPLaunch, command: String, args: [String], workingDirectory: URL?) {
+        self.command = command
+        self.args = args
+        self.environment = launch.environment
+        self.workingDirectory = workingDirectory
+        self.viaLoginShell = true
+        self.launch = launch
     }
 
     public var onNotification: (@Sendable (String, JSONValue?) -> Void)? {
@@ -169,7 +255,11 @@ public final class MCPStdioConnection: MCPConnection, @unchecked Sendable {
         if viaLoginShell {
             process.executableURL = URL(fileURLWithPath: PTY.defaultShell)
             // `exec "$@"` runs the program with its arguments exactly as given — no quoting to get wrong.
-            process.arguments = ["-l", "-c", "exec \"$@\"", "vision-mcp", command] + args
+            if let launch {
+                process.arguments = ["-l", "-c", launch.script, "vision-mcp"] + launch.arguments
+            } else {
+                process.arguments = ["-l", "-c", "exec \"$@\"", "vision-mcp", command] + args
+            }
         } else {
             process.executableURL = URL(fileURLWithPath: command)
             process.arguments = args

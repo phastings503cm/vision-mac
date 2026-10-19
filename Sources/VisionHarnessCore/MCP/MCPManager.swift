@@ -270,18 +270,21 @@ public final class MCPManager: @unchecked Sendable {
     // MARK: The app's connector
 
     /// Starts programs through the login shell and opens URLs, with the server's secrets from `store` and `${VAR}`
-    /// filled in from the environment. `projectFolder` is where a program starts when the server names no folder.
+    /// filled in from the environment (for a program, the login shell's when Vision's lacks it). `projectFolder` is where a program starts when the server names no folder.
     public static func connector(store: MCPServerStore, projectFolder: @escaping @Sendable () -> URL?) -> Connector {
         { config in
             let environment = ProcessInfo.processInfo.environment
             func expand(_ text: String) -> String { MCPImport.expand(text, environment: environment) }
             switch config.transport {
             case .stdio:
-                guard let command = config.command.map(expand), !command.isEmpty else { return nil }
-                let env = store.environment(for: config).mapValues(expand)
+                guard let command = config.command, !expand(command).isEmpty || MCPLaunch.defers(command, known: environment)
+                else { return nil }
                 let folder = config.cwd.map { URL(fileURLWithPath: (expand($0) as NSString).expandingTildeInPath) }
                     ?? projectFolder() ?? FileManager.default.homeDirectoryForCurrentUser
-                return MCPStdioConnection(command: command, args: config.args.map(expand), environment: env,
+                // `${NAME}`s this app's environment lacks are filled in by the login shell (see `MCPLaunch`).
+                let launch = MCPLaunch.plan(command: command, args: config.args,
+                                            environment: store.environment(for: config), known: environment)
+                return MCPStdioConnection(launch: launch, command: expand(command), args: config.args.map(expand),
                                           workingDirectory: folder)
             case .http:
                 guard let raw = config.url.map(expand), let url = URL(string: raw) else { return nil }
@@ -318,9 +321,11 @@ public struct MCPTool: ToolExecutor {
     }
 
     /// Whether a call asks first: always, unless the chat has full access, the server is trusted, or the tool is
-    /// read-only on a server trusted with read-only tools.
+    /// read-only on a server trusted with read-only tools. In Plan mode (which promises nothing gets changed) only a
+    /// read-only tool on a server trusted with read-only tools (or all of them) runs without asking.
     public func needsApproval(_ context: ToolContext) -> Bool {
         if context.policy.preset == .fullAccess { return false }
+        if context.policy.preset == .plan { return !((info?.readOnly ?? true) && server.trust != .ask) }
         switch server.trust {
         case .always: return false
         case .readOnly: return !(info?.readOnly ?? true)

@@ -125,7 +125,8 @@ extension AppTransport {
         MCPImport.discover(home: skillLocations.home, project: projectContext?.root)
     }
 
-    /// Import the chosen servers: a name already in use gets a number; a project's server starts in that project.
+    /// Import the chosen servers: a name already in use gets a number; a project's server starts in that project; a
+    /// server from the project's own files (the repository chose what it runs) comes in switched off.
     @discardableResult
     public func importMCP(_ candidates: [MCPImportCandidate]) -> [MCPServerConfig] {
         var list = mcpHub.servers
@@ -138,6 +139,7 @@ extension AppTransport {
             if server.transport == .stdio, server.cwd == nil, (candidate.config.source ?? "").contains("this project") {
                 server.cwd = projectContext?.root.path
             }
+            if candidate.fromRepository { server.enabled = false }
             taken.insert(server.name)
             mcpHub.store.setSecrets(for: server, environment: candidate.environment, headers: candidate.headers)
             list.append(server)
@@ -145,6 +147,19 @@ extension AppTransport {
         }
         if !added.isEmpty { mcpHub.set(list) }
         return added
+    }
+
+    /// What the import sheet says once it has imported: which servers connect now, which wait switched off.
+    static func importSummary(_ added: [MCPServerConfig]) -> String {
+        guard !added.isEmpty else { return "Nothing new to import." }
+        let on = added.filter(\.enabled).map(\.name), off = added.filter { !$0.enabled }.map(\.name)
+        var parts: [String] = []
+        if !on.isEmpty { parts.append("Imported \(on.joined(separator: ", ")) — connecting now.") }
+        if !off.isEmpty {
+            parts.append("\(on.isEmpty ? "Imported " : "")\(off.joined(separator: ", ")) switched off — turn "
+                         + "\(off.count == 1 ? "it" : "them") on in the list once you've checked what \(off.count == 1 ? "it runs" : "they run").")
+        }
+        return parts.joined(separator: " ")
     }
 
     /// `/mcp`: the servers and their tools; `/mcp reload` reconnects them.

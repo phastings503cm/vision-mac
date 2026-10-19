@@ -107,6 +107,16 @@ public struct MCPServerConfig: Codable, Hashable, Sendable, Identifiable {
         }
     }
 
+    /// Exactly what runs, for reading before it does: the program and each argument, an argument with spaces (or
+    /// none at all) in quotes; for a URL server, its address.
+    public var commandLine: String {
+        guard transport == .stdio else { return url ?? "" }
+        return ([command ?? ""] + args).map { part in
+            part.isEmpty || part.contains(where: \.isWhitespace) || part.contains("\"")
+                ? "\"" + part.replacingOccurrences(of: "\"", with: "\\\"") + "\"" : part
+        }.joined(separator: " ")
+    }
+
     /// What is missing for it to start (nil = nothing).
     public var problem: String? {
         if MCPNames.sanitize(name).isEmpty { return "It needs a name." }
@@ -171,6 +181,8 @@ public struct MCPServerStore: Sendable {
         guard let data = try? encoder.encode(File(servers: servers)) else { return }
         try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? data.write(to: fileURL, options: .atomic)
+        // Only you can read it (a command line may still hold something private).
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
     }
 
     static func account(_ server: String, _ kind: String, _ name: String) -> String { "\(server)/\(kind)/\(name)" }

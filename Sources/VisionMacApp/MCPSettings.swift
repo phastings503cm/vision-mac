@@ -298,7 +298,7 @@ private struct MCPImportSheet: View {
             Text("Import MCP Servers").font(.title3.weight(.semibold))
             Text("The servers Claude Code (~/.claude.json and this project's .mcp.json), Claude Desktop and Cursor "
                  + "(~/.cursor/mcp.json) have configured. Nothing is started until you import; their keys go to your "
-                 + "Keychain.")
+                 + "Keychain. Servers from the project's own files aren't checked, and come in switched off.")
                 .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if candidates.isEmpty {
                 Text("None found — Claude Code, Claude Desktop and Cursor have no MCP servers set up on this Mac.")
@@ -348,12 +348,22 @@ private struct MCPImportSheet: View {
                     Text(candidate.config.name).font(.system(size: 12.5, weight: .medium))
                     Text(candidate.config.transport == .stdio ? "program" : "URL").font(.caption2).foregroundStyle(.secondary)
                     if known { Text("already in Vision").font(.caption2).foregroundStyle(.secondary) }
-                    let secrets = candidate.environment.count + candidate.headers.count
+                    if candidate.fromRepository { Text("project's files").font(.caption2).foregroundStyle(Theme.noticeTint) }
+                    // Only real values go to the Keychain: a `${NAME}` is filled in when the server starts.
+                    let secrets = (Array(candidate.environment.values) + Array(candidate.headers.values))
+                        .filter { !$0.contains("${") }.count
                     if secrets > 0 { Text("\(secrets) value\(secrets == 1 ? "" : "s") → Keychain").font(.caption2).foregroundStyle(.secondary) }
                 }
-                Text(candidate.config.summary).font(Theme.mono(10.5)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                if let caveat = candidate.caveat {
-                    Text(caveat).font(.caption).foregroundStyle(Theme.noticeTint).fixedSize(horizontal: false, vertical: true)
+                // The whole command line (what will run), wrapped — never cut short.
+                Text(candidate.config.commandLine)
+                    .font(Theme.mono(10.5)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                if let cwd = candidate.config.cwd {
+                    Text("in \(cwd)").font(Theme.mono(10)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
+                }
+                ForEach(candidate.warnings, id: \.self) { warning in
+                    Text(warning).font(.caption).foregroundStyle(Theme.noticeTint).fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
@@ -363,10 +373,11 @@ private struct MCPImportSheet: View {
 
     private func reload() {
         candidates = model.transport.discoverMCPImports()
-        // Preselect each server once (the same one in two apps is offered twice) and none Vision already has.
+        // Preselect each server once (the same one in two apps is offered twice), none Vision already has, and none
+        // from the project's own files unless you approved it in Claude Code.
         var seen = Set<String>()
         chosen = []
-        for candidate in candidates where !MCPImport.isKnown(candidate, among: model.transport.mcpServers) {
+        for candidate in candidates where candidate.preselected && !MCPImport.isKnown(candidate, among: model.transport.mcpServers) {
             if seen.insert(candidate.fingerprint).inserted { chosen.insert(candidate.id) }
         }
     }
@@ -374,7 +385,7 @@ private struct MCPImportSheet: View {
     private func importChosen() {
         let picked = candidates.filter { chosen.contains($0.id) }
         let added = model.transport.importMCP(picked)
-        done = added.isEmpty ? "Nothing new to import." : "Imported \(added.map(\.name).joined(separator: ", ")) — connecting now."
+        done = AppTransport.importSummary(added)
         chosen = []
     }
 }
