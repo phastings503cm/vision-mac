@@ -39,6 +39,7 @@ struct ChatView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            SensitivityHeader(session: session)
             transcript
             Divider()
             gates
@@ -107,7 +108,7 @@ struct ChatView: View {
         }
         .sheet(item: $previewing) { item in
             AttachmentPreviewSheet(
-                item: item, route: transport.attachmentRoute(for: transport.chatRoute(session)),
+                item: item, route: transport.attachmentRoute(for: transport.chatRoute(session), chat: session),
                 onSave: item.isPasted ? { text in replacePasted(item.id, with: text) } : nil,
                 onRemove: { staged.removeAll { $0.id == item.id }; refreshParts() })
         }
@@ -178,10 +179,15 @@ struct ChatView: View {
             PromptsLink(session: session)
                 .padding(.leading, Theme.gutter)
         }
+        // What this turn changed, with diffs and "Rewind this turn…" (the chat-wide chips when there is no record).
+        if let record = session.checkpoint, !record.changedFiles.isEmpty {
+            TurnChangesCard(record: record, session: session)
+                .padding(.leading, Theme.gutter)
+        }
         if session.running, session.entries.last?.tool?.isFinished ?? true {
             ThinkingRow(session: session)
         }
-        if !session.changedFiles.isEmpty {
+        if !session.changedFiles.isEmpty, session.checkpoint?.changedFiles.isEmpty ?? true {
             ProducedFilesRow(session: session)
         }
     }
@@ -245,7 +251,7 @@ struct ChatView: View {
             }
 
             if !staged.isEmpty {
-                AttachmentChips(items: $staged, route: transport.attachmentRoute(for: transport.chatRoute(session))) { previewing = $0 }
+                AttachmentChips(items: $staged, route: transport.attachmentRoute(for: transport.chatRoute(session), chat: session)) { previewing = $0 }
                     .onChange(of: staged.count) { _, _ in refreshParts() }
             }
 
@@ -312,6 +318,7 @@ struct ChatView: View {
                             .foregroundStyle(session.preset == .fullAccess ? Theme.errorTint : .secondary)
                         ModelMenu(session: session)
                         ThinkingMenu(session: session)
+                        SensitiveMenu(session: session)
                         SkillsButton(session: session)
                         if let name = session.projectName {
                             Label(name, systemImage: "folder")
@@ -378,10 +385,22 @@ struct ChatView: View {
             session.note(why, role: .error)
             return
         }
+        // A Sensitive chat on a model it may not use: say why and keep the draft (commands other than /goal still run).
+        if let why = transport.sensitivityRefusal(for: session), Self.goesToModel(text) {
+            session.note(why, role: .error)
+            return
+        }
         let payload = staged.map(\.attachment)
         draft = ""
         staged = []
         model.send(text, in: session, attachments: payload)
+    }
+
+    /// Whether sending `text` asks the model (a prompt, a skill, a /goal) rather than running a command.
+    static func goesToModel(_ text: String) -> Bool {
+        guard let command = SlashCommand.parse(text) else { return true }
+        if case .goal = command { return true }
+        return false
     }
 
     /// Queue the draft as this chat's next task (⌘↩, or ↩ while the agent works): it runs after what is running and

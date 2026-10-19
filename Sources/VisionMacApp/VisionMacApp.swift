@@ -119,8 +119,24 @@ struct AppCommands: Commands {
                 .keyboardShortcut("m", modifiers: [.command, .shift])
             Button("Credentials Vault…") { model.showVault = true }
                 .keyboardShortcut("k", modifiers: [.command, .shift])
+            Button("MCP Servers…") {
+                model.settingsTab = .mcp
+                model.showSettings = true
+            }
             Button("Reload Project Context") { model.transport.refreshProjectContext() }
                 .disabled(model.project == nil)
+            Divider()
+            Button("Rewind…") {
+                if let session = model.selectedSession {
+                    model.transport.rewindRequest = RewindRequest(chatID: session.id, turnID: nil)
+                }
+            }
+            .disabled(model.selectedSession == nil)
+            // Sensitive: only private models, or others through the shield (see SensitivityPolicy).
+            Toggle("Sensitive Chat", isOn: Binding(
+                get: { model.selectedSession?.sensitive ?? false },
+                set: { on in if let session = model.selectedSession { model.transport.setSensitive(on, for: session) } }))
+                .disabled(model.selectedSession == nil)
         }
 
         CommandGroup(after: .toolbar) {
@@ -219,6 +235,9 @@ struct RootView: View {
         }
         .sheet(isPresented: $model.showAllPrompts) {
             AllPromptsView().environment(model)
+        }
+        .sheet(item: Binding(get: { model.transport.rewindRequest }, set: { model.transport.rewindRequest = $0 })) { request in
+            RewindSheet(request: request).environment(model)
         }
         .sheet(item: $model.resultsRecord) { record in
             PromptResultsView(record: record).environment(model)

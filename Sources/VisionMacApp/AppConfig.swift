@@ -122,6 +122,15 @@ public final class AppConfig {
     /// Per project folder ("" = chats without a project): the model and thinking level its chats last chose — what
     /// a new chat there starts with (see `ChatRoutes.swift`).
     public var projectChoices: [String: ChatChoice] = [:] { didSet { persist() } }
+    /// Per project folder ("" = chats without a project): its new chats start Sensitive (see
+    /// `AppTransport+Sensitivity.swift`). Only the projects set to Sensitive are stored.
+    public var projectSensitive: [String: Bool] = [:] {
+        didSet {
+            guard !loading else { return }
+            defaults.set(try? JSONEncoder().encode(projectSensitive.filter(\.value)), forKey: Self.projectSensitiveKey)
+        }
+    }
+    static let projectSensitiveKey = "sensitivity.byProject.v1"
 
     // The plan panel.
     /// Whether the plan panel is showing (it follows whichever chat is selected).
@@ -479,6 +488,10 @@ public final class AppConfig {
         if let data = defaults.data(forKey: Keys.projectChoices),
            let decoded = try? JSONDecoder().decode([String: ChatChoice].self, from: data) {
             projectChoices = decoded
+        }
+        if let data = defaults.data(forKey: Self.projectSensitiveKey),
+           let decoded = try? JSONDecoder().decode([String: Bool].self, from: data) {
+            projectSensitive = decoded
         }
     }
 
