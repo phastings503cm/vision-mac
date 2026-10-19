@@ -95,6 +95,52 @@ final class ChatTasksTests: XCTestCase {
         XCTAssertEqual(decoded.nextTask?.id, "x")
     }
 
+    /// A chat task's attachments: in the file as `"attachments":[{"kind","name","file"}]` (left out when none), the
+    /// bytes in the chat's `queued/<batch>/` folder, read back as they were attached, never outside that folder.
+    func testQueuedAttachmentsRoundTripAndStayInTheirChatsFolder() throws {
+        var q = TaskQueue()
+        let kept = [QueuedAttachment(kind: "pasted", name: "pasted-text.txt", file: "queued/0123456789ab/1-aaaaaaaaaaaa.bin")]
+        let task = q.addChatTask("", chatID: "A", attachments: kept)
+        XCTAssertEqual(task.title, "📎 Pasted text")
+        XCTAssertEqual(task.promptText, "", "the message is the attachments alone")
+        let plain = q.addChatTask("no chips", chatID: "A")
+        let data = try JSONEncoder().encode(q)
+        let text = String(decoding: data, as: UTF8.self)
+        XCTAssertTrue(text.contains(#""attachments":[{"#), text)
+        XCTAssertEqual(text.components(separatedBy: #""attachments""#).count - 1, 1, "left out when there are none")
+        let back = try JSONDecoder().decode(TaskQueue.self, from: data)
+        XCTAssertEqual(back.task(task.id)?.attachments, kept)
+        XCTAssertNil(back.task(plain.id)?.attachments)
+        XCTAssertEqual(ChatTaskRules.title(for: "", attachmentNames: ["Pasted text", "report.pdf"]), "📎 Pasted text, report.pdf")
+        XCTAssertEqual(ChatTaskRules.carriesNotice(1), "Its attachment goes with it.")
+        XCTAssertEqual(ChatTaskRules.carriesNotice(3), "Its 3 attachments go with it.")
+
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("vision-queued-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = AttachmentStore.forChat("A", root: dir)
+        let saved = try store.saveQueued([
+            AttachmentReader.pasted("one\ntwo\n"),
+            MessageAttachment(kind: .image, name: "shot.png", data: Data([0x89, 0x50, 0x4E, 0x47])),
+            MessageAttachment(kind: .file, name: "notes.md", data: Data("# N".utf8)),
+        ])
+        XCTAssertEqual(saved.map(\.kind), ["pasted", "image", "file"])
+        XCTAssertTrue(saved.allSatisfy { $0.file.range(of: #"^queued/[0-9a-f]{12}/\d-[0-9a-f]{12}\.bin$"#, options: .regularExpression) != nil },
+                      "\(saved.map(\.file))")
+        let loaded = try store.loadQueued(saved).get()
+        XCTAssertEqual(loaded[0].digest?.format, .pasted)
+        XCTAssertEqual(loaded[0].digest?.text, "one\ntwo\n")
+        XCTAssertEqual(loaded[1].kind, .image)
+        XCTAssertEqual(loaded[2].data, Data("# N".utf8))
+        // A path that tries to leave the chat's queued folder is never read or deleted.
+        let escape = QueuedAttachment(kind: "file", name: "x", file: "queued/../../../etc/hosts")
+        XCTAssertNil(store.queuedURL(escape))
+        XCTAssertEqual(store.loadQueued([escape]), .failure(QueuedAttachmentMissing(name: "x")))
+        store.removeQueued(saved)
+        XCTAssertEqual(store.loadQueued(saved), .failure(QueuedAttachmentMissing(name: "pasted-text.txt")))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.directory.appendingPathComponent("queued").path),
+                      "only the batch folder goes")
+    }
+
     func testALongFirstLineMakesAShortTitle() {
         var q = TaskQueue()
         let long = String(repeating: "word ", count: 40)

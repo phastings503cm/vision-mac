@@ -6,6 +6,11 @@ import CryptoKit
 /// The full text of a chat's long attachments, one folder per chat (`<Vision data>/attachments/<chat id>/`): one
 /// `.txt` per file and an `index.json` naming them. `read_attachment` reads parts back out of it, split exactly as
 /// the message that listed them was (the part size is kept with each file).
+/// A queued prompt's attachment whose bytes are gone (`name` is the one missing).
+public struct QueuedAttachmentMissing: Error, Equatable, Sendable {
+    public var name: String
+}
+
 public final class AttachmentStore: @unchecked Sendable {
     public struct Entry: Codable, Sendable, Equatable {
         /// The name the model knows the file by (unique in the chat).
@@ -98,6 +103,75 @@ public final class AttachmentStore: @unchecked Sendable {
     /// Remove everything saved for the chat (the chat was deleted).
     public func removeAll() {
         lock.withLock { _ = try? FileManager.default.removeItem(at: directory) }
+    }
+
+    // MARK: Attachments of queued prompts
+
+    /// Where the bytes of queued prompts' attachments are kept, inside the chat's folder (so deleting the chat deletes
+    /// them too).
+    public static let queuedFolder = "queued"
+
+    /// Keep the attachments of a prompt put on the chat's tasks ("Add to tasks"): each one's bytes under
+    /// `queued/<batch>/<n>-<sha12>.bin`, so the task can send them when its turn comes — after a relaunch too.
+    public func saveQueued(_ attachments: [MessageAttachment]) throws -> [QueuedAttachment] {
+        guard !attachments.isEmpty else { return [] }
+        let batch = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(12))
+        let folder = directory.appendingPathComponent(Self.queuedFolder, isDirectory: true)
+            .appendingPathComponent(batch, isDirectory: true)
+        return try lock.withLock {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            var out: [QueuedAttachment] = []
+            for (index, attachment) in attachments.enumerated() {
+                let pasted = attachment.digest?.format == .pasted
+                let bytes = pasted ? Data(attachment.digest!.text.utf8) : attachment.data
+                let hash = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined().prefix(12)
+                let file = "\(index + 1)-\(hash).bin"
+                try bytes.write(to: folder.appendingPathComponent(file), options: .atomic)
+                let kind = pasted ? QueuedAttachment.pastedKind
+                    : attachment.kind == .image ? QueuedAttachment.imageKind : QueuedAttachment.fileKind
+                out.append(QueuedAttachment(kind: kind, name: attachment.name, file: "\(Self.queuedFolder)/\(batch)/\(file)"))
+            }
+            return out
+        }
+    }
+
+    /// A queued prompt's attachments, ready to send (read again as when they were attached), or the first name whose
+    /// bytes are gone from the disk.
+    public func loadQueued(_ queued: [QueuedAttachment]) -> Result<[MessageAttachment], QueuedAttachmentMissing> {
+        var out: [MessageAttachment] = []
+        for item in queued {
+            guard let url = queuedURL(item), let bytes = try? Data(contentsOf: url) else {
+                return .failure(QueuedAttachmentMissing(name: item.name))
+            }
+            switch item.kind {
+            case QueuedAttachment.pastedKind:
+                out.append(AttachmentReader.pasted(String(decoding: bytes, as: UTF8.self), name: item.name))
+            case QueuedAttachment.imageKind:
+                out.append(MessageAttachment(kind: .image, name: item.name, data: bytes))
+            default:
+                out.append(MessageAttachment(kind: .file, name: item.name, data: bytes))
+            }
+        }
+        return .success(out)
+    }
+
+    /// Delete what a queued prompt kept (its task was deleted): its batch folders, never the queued folder itself.
+    public func removeQueued(_ queued: [QueuedAttachment]) {
+        let root = directory.appendingPathComponent(Self.queuedFolder, isDirectory: true).standardizedFileURL.path
+        let folders = Set(queued.compactMap { queuedURL($0)?.deletingLastPathComponent().standardizedFileURL.path })
+        lock.withLock {
+            for folder in folders where folder != root {
+                try? FileManager.default.removeItem(atPath: folder)
+            }
+        }
+    }
+
+    /// The file a queued attachment's bytes are in; only ever inside this chat's queued folder (nil otherwise).
+    func queuedURL(_ item: QueuedAttachment) -> URL? {
+        let root = directory.appendingPathComponent(Self.queuedFolder, isDirectory: true).standardizedFileURL.path
+        let url = directory.appendingPathComponent(item.file).standardizedFileURL
+        guard url.path.hasPrefix(root + "/") else { return nil }
+        return url
     }
 
     /// "report.pdf" taken → "report (2).pdf", then "report (3).pdf", …

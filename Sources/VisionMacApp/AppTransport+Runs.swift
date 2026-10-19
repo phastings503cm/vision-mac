@@ -191,11 +191,26 @@ extension AppTransport {
     /// Queue `text` as this chat's next task: it runs here, as the chat's next prompt, once everything before it is
     /// done — right away when the chat is free and its list isn't paused.
     @discardableResult
-    public func addChatTask(_ text: String, sessionID: String, atFront: Bool = false) -> QueueTask? {
+    /// `attachments`: the composer's chips (files, pictures, a large paste) — kept with the task in the chat's
+    /// attachments folder and sent with the prompt when its turn comes, read and split exactly as a fresh send.
+    public func addChatTask(_ text: String, sessionID: String, atFront: Bool = false,
+                            attachments: [MessageAttachment] = []) -> QueueTask? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let vm = sessions.first(where: { $0.id == sessionID }) else { return nil }
+        guard !trimmed.isEmpty || !attachments.isEmpty, let vm = sessions.first(where: { $0.id == sessionID }) else { return nil }
+        let kept: [QueuedAttachment]
+        do {
+            kept = try attachmentStore(for: sessionID).saveQueued(attachments)
+        } catch {
+            vm.note("Couldn't keep the attachments for the task list: \(error.localizedDescription)", role: .error)
+            return nil
+        }
         let folder = vm.isPlain ? scratchFolder(for: vm).path : nil
-        let task = queue.addChatTask(trimmed, chatID: sessionID, atFront: atFront, cwd: vm.cwd, workFolder: folder)
+        let task = queue.addChatTask(trimmed, chatID: sessionID, atFront: atFront, cwd: vm.cwd, workFolder: folder,
+                                     attachments: kept)
+        if !kept.isEmpty {
+            vm.note("📋 Added to this chat's tasks — it starts by itself when the work before it is done. "
+                    + ChatTaskRules.carriesNotice(kept.count))
+        }
         schedulePump(vm)
         return queue.task(task.id) ?? task
     }
@@ -206,6 +221,10 @@ extension AppTransport {
         guard let task = queue.task(id), let chatID = task.chatID else { return }
         let running = task.status == .running
         queue.remove(id: id)
+        // What a deleted task kept goes with it (a running one stays as a skipped record, and keeps them until then).
+        if queue.task(id) == nil, let kept = task.attachments, !kept.isEmpty {
+            attachmentStore(for: chatID).removeQueued(kept)
+        }
         if running { stopSession(chatID, pauseTasks: false) }
     }
 
@@ -308,11 +327,27 @@ extension AppTransport {
     /// skill or a plain prompt), with its own row in the Prompts timeline.
     func pumpChatTasks(_ vm: SessionVM) {
         guard chatIsFreeForTask(vm), let next = queue.nextChatTask(vm.id) else { return }
+        // What it was queued with goes with it, read again as when it was attached.
+        var attachments: [MessageAttachment] = []
+        if let kept = next.attachments, !kept.isEmpty {
+            switch attachmentStore(for: vm.id).loadQueued(kept) {
+            case .success(let loaded):
+                attachments = loaded
+            case .failure(let missing):
+                queue.start(next.id, sessionID: vm.id)
+                queue.finish(next.id, status: .failed, reason: ChatTaskRules.missingAttachmentReason(missing.name), sessionID: vm.id)
+                if queue.queuedChatTaskCount(vm.id) > 0, chatTasksPaused[vm.id] == nil {
+                    chatTasksPaused[vm.id] = ChatTaskRules.pauseReason(for: .failed)
+                }
+                vm.note("The task “\(next.title)” can't run: \(ChatTaskRules.missingAttachmentReason(missing.name)).", role: .error)
+                return
+            }
+        }
         queue.start(next.id, sessionID: vm.id)
         chatTaskInFlight[vm.id] = next.id
         pendingPromptSource[vm.id] = (.task, next.id)
         autoContinuations[vm.id] = 0
-        dispatch(next.promptText, vm: vm)
+        dispatch(next.promptText, vm: vm, attachments: attachments)
         let started = runTasks[vm.id]
         let taskID = next.id
         Task { @MainActor [weak self] in

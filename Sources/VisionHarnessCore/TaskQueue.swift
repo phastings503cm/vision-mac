@@ -62,6 +62,25 @@ public struct QueueLogLine: Identifiable, Codable, Hashable, Sendable {
     }
 }
 
+/// An attachment kept with a queued prompt: what it is ("file", "image" or "pasted"), the name the model will know it
+/// by, and where its bytes are saved (relative to the chat's attachments folder). The same JSON as Windows.
+public struct QueuedAttachment: Codable, Hashable, Sendable {
+    public static let fileKind = "file"
+    public static let imageKind = "image"
+    /// A large paste the composer turned into a chip (it goes as "Pasted text", not as a file).
+    public static let pastedKind = "pasted"
+
+    public var kind: String
+    public var name: String
+    public var file: String
+
+    public init(kind: String, name: String, file: String) {
+        self.kind = kind
+        self.name = name
+        self.file = file
+    }
+}
+
 public struct QueueTask: Identifiable, Codable, Hashable, Sendable {
     public var id: String
     /// Short human title ("Fix the login crash").
@@ -94,6 +113,10 @@ public struct QueueTask: Identifiable, Codable, Hashable, Sendable {
     /// free — interactively, in order, after whatever the chat is doing. Nil = a task of the unattended queue, which
     /// the queue runner works as a goal. The queue runner never takes a chat task.
     public var chatID: String?
+    /// The files, pictures and pasted text that go with a chat task ("Add to tasks" with chips in the composer): their
+    /// bytes are kept in the chat's attachments folder until the task is deleted, and the task sends them with its
+    /// prompt. Stored as `"attachments": [{"kind", "name", "file"}]`, left out when there are none (as on Windows).
+    public var attachments: [QueuedAttachment]?
     public var log: [QueueLogLine]
 
     public init(id: String = UUID().uuidString,
@@ -135,7 +158,9 @@ public struct QueueTask: Identifiable, Codable, Hashable, Sendable {
     /// What a chat task sends when its turn comes: the prompt exactly as it was written (kept in `details`; the
     /// title is its first line).
     public var promptText: String {
-        details.isEmpty ? title : details
+        if !details.isEmpty { return details }
+        // Queued with only attachments: the title just names them; the message is the attachments alone.
+        return (attachments?.isEmpty == false) ? "" : title
     }
 
     /// A chat task (see `chatID`).
@@ -147,7 +172,7 @@ public struct QueueTask: Identifiable, Codable, Hashable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case id, title, details, status, enteredAt, startedAt, finishedAt, rounds
-        case promptTokens, completionTokens, sessionID, cwd, workFolder, routeID, thinking, chatID, log
+        case promptTokens, completionTokens, sessionID, cwd, workFolder, routeID, thinking, chatID, attachments, log
     }
 
     /// Tolerant decoding: a missing field (a file from an older or newer
@@ -171,6 +196,7 @@ public struct QueueTask: Identifiable, Codable, Hashable, Sendable {
         routeID = try? c.decodeIfPresent(String.self, forKey: .routeID)
         thinking = try? c.decodeIfPresent(String.self, forKey: .thinking)
         chatID = try? c.decodeIfPresent(String.self, forKey: .chatID)
+        attachments = (try? c.decodeIfPresent([QueuedAttachment].self, forKey: .attachments)).flatMap { $0?.isEmpty == false ? $0 : nil }
         log = (try? c.decodeIfPresent([QueueLogLine].self, forKey: .log)) ?? []
     }
 }
@@ -323,13 +349,14 @@ public extension TaskQueue {
     /// done (at the front: before the chat's other waiting tasks). The title is the prompt's first line.
     @discardableResult
     mutating func addChatTask(_ prompt: String, chatID: String, atFront: Bool = false,
-                              cwd: String? = nil, workFolder: String? = nil) -> QueueTask {
+                              cwd: String? = nil, workFolder: String? = nil,
+                              attachments: [QueuedAttachment] = []) -> QueueTask {
         let text = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        let first = text.split(separator: "\n", omittingEmptySubsequences: true).first.map(String.init) ?? text
-        var title = first.trimmingCharacters(in: .whitespaces)
-        if title.count > 80 { title = String(title.prefix(79)) + "…" }
-        if title.isEmpty { title = "Untitled task" }
+        let title = ChatTaskRules.title(for: text, attachmentNames: attachments.map {
+            $0.kind == QueuedAttachment.pastedKind ? "Pasted text" : $0.name
+        })
         var task = QueueTask(title: title, details: text, cwd: (cwd?.isEmpty ?? true) ? nil : cwd)
+        task.attachments = attachments.isEmpty ? nil : attachments
         if task.cwd == nil, let workFolder, !workFolder.isEmpty { task.workFolder = workFolder }
         task.chatID = chatID
         task.sessionID = chatID

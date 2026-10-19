@@ -39,6 +39,29 @@ public enum ChatTaskRules {
         }
     }
 
+    /// A task's title from its prompt: the first non-empty line, at most 80 characters; for one queued with only
+    /// attachments (a large paste, a PDF), from what it carries: "📎 Pasted text, report.pdf". As on Windows.
+    public static func title(for prompt: String, attachmentNames: [String] = []) -> String {
+        let text = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.isEmpty, !attachmentNames.isEmpty {
+            return title(for: "📎 " + attachmentNames.joined(separator: ", "))
+        }
+        let first = text.split(separator: "\n", omittingEmptySubsequences: true).first.map(String.init) ?? text
+        var title = first.trimmingCharacters(in: .whitespaces)
+        if title.count > 80 { title = String(title.prefix(79)) + "…" }
+        return title.isEmpty ? "Untitled task" : title
+    }
+
+    /// What the chat says when a prompt with attachments goes on its list.
+    public static func carriesNotice(_ count: Int) -> String {
+        count == 1 ? "Its attachment goes with it." : "Its \(count) attachments go with it."
+    }
+
+    /// A queued task whose kept attachment is gone from the disk fails with this reason.
+    public static func missingAttachmentReason(_ name: String) -> String {
+        "its attachment “\(name)” is no longer on this Mac"
+    }
+
     /// The banner after a relaunch: waiting tasks never start on their own when Vision opens.
     public static let pausedAtLaunch = "Paused — Vision was restarted. Resume to carry on."
 }

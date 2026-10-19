@@ -188,6 +188,55 @@ final class AttachmentTurnTests: XCTestCase {
         XCTAssertEqual(vm.entries.last { $0.message?.role == .user }?.message?.attachments.first?.label, "Image · sent as text (OCR)")
     }
 
+    /// "Paste 10,000 lines while it works and press Enter": the paste goes onto the chat's tasks with the prompt (bytes
+    /// kept on disk, listed in task-queue.json), and when its turn comes it is sent exactly as a fresh send — in parts,
+    /// with read_attachment. Deleting the task deletes the bytes. (Windows does the same, review finding 3.)
+    func testAQueuedPromptCarriesItsPasteAndSendsItWhenItsTurnComes() async throws {
+        let vm = transport.newSession(cwd: dir.path)
+        let paste = PastedText.attachment(HostFixtures.lines(10_000, width: 40))
+        let task = try XCTUnwrap(transport.addChatTask("", sessionID: vm.id, attachments: [paste]))
+        XCTAssertEqual(task.title, "📎 Pasted text")
+        let kept = try XCTUnwrap(task.attachments)
+        XCTAssertEqual(kept.map(\.kind), ["pasted"])
+        XCTAssertTrue(kept[0].file.hasPrefix("queued/"), kept[0].file)
+        XCTAssertTrue(vm.entries.contains { $0.message?.text.hasSuffix("Its attachment goes with it.") == true })
+        let file = try String(contentsOf: dir.appendingPathComponent("task-queue.json"), encoding: .utf8)
+        XCTAssertTrue(file.contains(#""attachments""#) && file.contains(#""kind" : "pasted""#) || file.contains(#""kind":"pasted""#), file)
+
+        try await waitForIdle(vm)
+        let deadline = Date().addingTimeInterval(10)
+        while transport.queue.task(task.id)?.status != .complete, Date() < deadline { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(transport.queue.task(task.id)?.status, .complete)
+        let user = Self.userContent(try XCTUnwrap(RawModelServer.bodies.first))
+        XCTAssertTrue(user.hasPrefix("[Attached file: pasted-text.txt — Pasted text · 10,000 lines · "), user)
+        XCTAssertTrue(user.contains("This file is too long to send whole"), user)
+        let badge = try XCTUnwrap(vm.entries.first { $0.message?.role == .user }?.message?.attachments.first?.label)
+        XCTAssertTrue(badge.hasPrefix("Pasted text · 10,000 lines · ") && badge.contains("· sent as text in "), badge)
+
+        let bytes = try XCTUnwrap(transport.attachmentStore(for: vm.id).queuedURL(kept[0]))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: bytes.path))
+        transport.removeChatTask(task.id)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: bytes.path), "deleting the task deletes what it kept")
+    }
+
+    /// A kept attachment that vanished: the task fails with the reason, and the list pauses.
+    func testAQueuedPromptWhoseAttachmentIsGoneFailsAndPausesTheList() async throws {
+        let vm = transport.newSession(cwd: dir.path)
+        transport.chatTasksPaused[vm.id] = "Paused — nothing new starts until you resume."
+        let first = try XCTUnwrap(transport.addChatTask("see the notes", sessionID: vm.id,
+                                                        attachments: [MessageAttachment(kind: .file, name: "notes.md", data: Data("# N".utf8))]))
+        _ = try XCTUnwrap(transport.addChatTask("then this", sessionID: vm.id))
+        let folder = try XCTUnwrap(transport.attachmentStore(for: vm.id).queuedURL(try XCTUnwrap(first.attachments?.first)))
+            .deletingLastPathComponent()
+        try FileManager.default.removeItem(at: folder)
+        transport.chatTasksPaused[vm.id] = nil
+        transport.pumpChatTasks(vm)
+        XCTAssertEqual(transport.queue.task(first.id)?.status, .failed)
+        XCTAssertEqual(transport.chatTasksPaused[vm.id], "Paused — the last task failed.")
+        XCTAssertTrue(transport.queue.task(first.id)?.log.contains { $0.text.contains("its attachment “notes.md” is no longer on this Mac") } == true)
+        XCTAssertTrue(RawModelServer.bodies.isEmpty, "nothing was sent")
+    }
+
     func testDeletingAChatDeletesItsSavedAttachments() async throws {
         let vm = transport.newSession(cwd: dir.path)
         transport.send("keep", sessionID: vm.id,

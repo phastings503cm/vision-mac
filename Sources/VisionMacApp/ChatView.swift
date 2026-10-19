@@ -263,8 +263,9 @@ struct ChatView: View {
                 }
                 .menuStyle(.borderlessButton)
                 .frame(width: 28)
-                .help("Attach an image or file")
-                .disabled(session.running)
+                // Open while the agent works too: what is attached then goes with the prompt onto the chat's tasks.
+                .help(session.running ? "Attach an image or file — it goes with the prompt onto this chat's tasks"
+                                      : "Attach an image or file")
 
                 ComposerField(text: $draft, height: $composerHeight,
                               isEnabled: true, onSubmit: send, onAddToTasks: addToTasks,
@@ -282,8 +283,9 @@ struct ChatView: View {
                             .frame(width: 22, height: 22)
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .help("Add to this chat's tasks (↩) — it starts by itself when the current work finishes")
+                    .disabled((draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && staged.isEmpty)
+                              || staged.contains(where: \.reading))
+                    .help("Add to this chat's tasks (↩), with its attachments — it starts by itself when the current work finishes")
                     Button {
                         transport.stopSession(session.id)
                     } label: {
@@ -347,7 +349,6 @@ struct ChatView: View {
         .frame(maxWidth: .infinity)
         // Files dropped on the composer are attached like ones picked with +.
         .dropDestination(for: URL.self) { urls, _ in
-            guard !session.running else { return false }
             let files = urls.filter(\.isFileURL)
             for url in files { stage(url, kind: .file) }
             return !files.isEmpty
@@ -386,12 +387,10 @@ struct ChatView: View {
     /// what is already queued, by itself.
     private func addToTasks() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        guard staged.isEmpty else {
-            transport.broadcast("A queued task can't carry attachments — send it when the agent is free, or remove the attachments.")
-            return
-        }
-        guard transport.addChatTask(text, sessionID: session.id) != nil else { return }
+        guard !text.isEmpty || !staged.isEmpty, !staged.contains(where: \.reading) else { return }
+        // The files, pictures and large pastes in the box go with it (kept until the task is deleted).
+        guard transport.addChatTask(text, sessionID: session.id, attachments: staged.map(\.attachment)) != nil else { return }
+        staged = []
         draft = ""
         composerHeight = ComposerField.minHeight
     }
