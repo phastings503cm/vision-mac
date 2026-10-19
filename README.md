@@ -7,8 +7,9 @@
 <p align="center">
   A native SwiftUI coding agent that <em>is</em> the harness. It runs the tool loop itself and talks
   straight to an OpenAI-compatible model server — a DGX Spark or Strix Halo on your LAN, a local
-  Ollama or LM Studio, a GLM, Kimi, Qwen or OpenAI plan — or Amazon Bedrock, and it can put several
-  of them to work at once. No Node, no sidecar process, no web view.
+  Ollama or LM Studio, a GLM, Kimi, DeepSeek, Anthropic, Qwen or OpenAI plan, your Guardian account's
+  models — or Amazon Bedrock, and it can put several of them to work at once. No Node, no sidecar
+  process, no web view.
 </p>
 
 <p align="center">
@@ -157,10 +158,10 @@ Page**, **Rename…** and **Remove**. A Swapper older than 2.0 (no Connect tab) 
 **Connect with an address and login instead** (the guide has the same link); its password goes to the
 Keychain. A Spark set up in Settings ▸ Spark before 0.14 is carried over as the first box.
 
-### Subscription plans: GLM, Kimi, Qwen, OpenAI
+### Subscription plans: GLM, Kimi, DeepSeek, Anthropic, Qwen, OpenAI
 
-Choose **A subscription or API plan — GLM, Kimi, Qwen, OpenAI** in the wizard, or **Add ▸ Subscription
-plan…** in **Settings ▸ AI Models**. The guide knows these plans, each with its International and China
+Choose **A subscription or API plan — Kimi, Qwen, OpenAI, GLM, DeepSeek, Anthropic** in the wizard, or **Add ▸
+Subscription plan…** in **Settings ▸ AI Models**. The guide knows these plans, each with its International and China
 addresses where it has both:
 
 | Plan | Models |
@@ -168,6 +169,8 @@ addresses where it has both:
 | Z.ai (GLM) — Coding Plan or API key | `glm-5.3` (1M context), `glm-5.3-flash`, … |
 | Kimi Code (subscription) | `kimi-for-coding` (K2.8, up to 1M), `k3`, `k3-256k`, `kimi-for-coding-highspeed` |
 | Moonshot (Kimi) — pay-as-you-go API | what `/models` lists |
+| DeepSeek API | `deepseek-v4-pro` (1M, text), `deepseek-flash` (V4.1 Flash, 1M, reads images) |
+| Anthropic API (Claude, with an API key) | `claude-opus-5-5`, `claude-fable-5-1`, `claude-sonnet-5-5`, `claude-haiku-5-5` — what `/v1/models` lists |
 | OpenAI API | what `/models` lists, the newest `gpt-*` chat model recommended |
 | Qwen — Alibaba Cloud Coding Plan | `qwen3.7-plus`, `qwen3-coder-plus`, `qwen3-coder-next`, … |
 | Qwen — Model Studio pay-as-you-go | what `/models` lists |
@@ -184,6 +187,17 @@ pick the model, asks how Vision should use it, and says hello through it.
   Coding Plan key — switch the endpoint to Coding Plan* — with a **Switch to …** button. Z.ai's business codes
   (no balance, plan expired, usage limit used up until …) are explained in plain words and not retried.
 - **GLM-5.3 always thinks.** Vision never asks it not to; the thinking menu maps to its `low` / `high` / `max`.
+- **DeepSeek has its own card** in the wizard and **Add ▸ DeepSeek…**. The thinking menu maps to DeepSeek's
+  `reasoning_effort` (`none` turns thinking off, then `low` / `high` / `max`); with tools, every earlier answer's
+  reasoning goes back with the conversation, as DeepSeek requires; a key it refuses, an empty balance (402) and
+  its rate limit are said in plain words, and only the last is retried. DeepSeek's servers are in China — the
+  route starts out not private, so the shield masks before sending.
+- **Anthropic API (key)** — its own card and **Add ▸ Anthropic API (key)…** — talks to Claude on the Messages
+  API directly: streaming, tools, images, PDFs, extended thinking (adaptive with summaries; Opus 5.5's *Off* is
+  its lowest effort, Sonnet 5.5's is `between_tools`), prompt caching (after the system prompt, the tools and the
+  conversation) and Anthropic's server-side fallback (a declined request moves to the model Anthropic
+  recommends, with a line saying so). A Claude Pro or Max subscription isn't an API key — the guide says so if
+  you paste a subscription token; a subscription goes through Claude Code instead.
 - **Kimi Code checks which app is calling.** Vision tells it honestly that it is Vision
   (`User-Agent: Vision/<version> (macOS)`) and never imitates another tool. If Kimi turns it away, Vision
   says so and suggests the Moonshot API, which works with any app.
@@ -644,6 +658,8 @@ A running agent is reachable without opening its chat: the running bar at the to
 Guardian (guardian.503cm.com) is the account side of the family — models, prompts, skills, chats and code, shared across your harnesses.
 
 **Connect**: the wizard's *My Guardian account* choice, or Settings ▸ Guardian. **Sign In with Guardian in the Browser** opens Guardian's consent page (Entra SSO, passwordless — PKCE with a loopback redirect, nothing typed into Vision); email, password and the authenticator code are still there under a disclosure. The session token goes to the Keychain. Pick the **organization** Vision works in (sent with every call, the Guardian model route included), and see your **limits** — spend, tokens, requests per day/week/month — with bars and when each resets. The route behaves like any OpenAI-compatible server — primary, subagent, backup, thinking levels — with Guardian doing the proxying.
+
+**Guardian's models in every chat**: once signed in, the models Guardian offers you appear by themselves in every chat's model menu under **Guardian** — no button to press. Any chat can pick one like any other model (Guardian's context window and plan terms come with it). The list is read again on every sign-in, on an organization switch and every 15 minutes, and kept for the next launch (without the token). Signing out takes them out of the menus; a chat that was on one keeps it and says *Sign in to Guardian to use this model.* — signing in again renews the token for every chat on them.
 
 **When Guardian says no**, Vision says why in a dialog, never a bare HTTP code: what is missing and who can grant it (*Missing: the “vision” module is turned off for you. An admin of your Guardian organization can turn it on for you (Guardian ▸ Settings ▸ Members).*), or which limit was reached and when it resets (*Spend today: $4.80 of $5.00 — resets in 3 hours (Mon 4:00 PM).*). A spent budget or a missing permission is not retried.
 
