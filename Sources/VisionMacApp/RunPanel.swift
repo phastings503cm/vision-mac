@@ -747,8 +747,10 @@ struct PromptRow: View {
     let expanded: Bool
     var onJump: (() -> Void)?
     let toggle: () -> Void
+    @State private var hovering = false
 
     var body: some View {
+        let copyID = MessageCopy.promptFeedbackID(record.id)
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 Text(record.at, style: .time)
@@ -763,9 +765,16 @@ struct PromptRow: View {
                     Text(chatTitle).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer(minLength: 4)
+                CopiedBadge(id: copyID)
+                if hovering || expanded {
+                    CopyButton(id: copyID, help: "Copy this prompt, exactly as sent") {
+                        MessageCopy.text(for: record, transport: model.transport)
+                    }
+                }
                 OutcomeChip(record: record)
             }
-            Text(record.text)
+            // A prompt of thousands of lines is laid out only as far as it shows (Copy still gives all of it).
+            Text(LongText.isLong(record.text) ? LongText.head(record.text, lines: 14) : record.text)
                 .font(.callout)
                 .lineLimit(expanded ? 14 : 2)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -800,6 +809,7 @@ struct PromptRow: View {
         .padding(8)
         .background(expanded ? Theme.surface : Color.clear, in: RoundedRectangle(cornerRadius: 6))
         .contentShape(Rectangle())
+        .onHover { hovering = $0 }
         .onTapGesture(count: 2) { jump() }
         .onTapGesture(perform: toggle)
         .contextMenu {

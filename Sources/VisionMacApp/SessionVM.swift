@@ -202,8 +202,6 @@ public final class SessionVM: Identifiable {
     public var promptHistoryLoaded = false
     /// The record of the prompt the chat is working on now.
     public var currentPromptID: String?
-    /// The transcript row "Jump" just scrolled to: drawn highlighted for a moment.
-    public var flashEntryID: String?
     /// Tokens the current (or last) prompt has used, across its rounds.
     public var turnPromptTokens = 0
     public var turnCompletionTokens = 0
@@ -266,6 +264,8 @@ public final class SessionVM: Identifiable {
     }
     /// Id of the assistant entry currently receiving streamed deltas.
     public var streamingID: String?
+    /// Which rows of the transcript are drawn, and where the person is in it (`TranscriptPaging`).
+    let pager = TranscriptPager()
 
     public init(id: String, title: String, cwd: String?, preset: PermissionPreset = .workspaceWrite) {
         self.id = id

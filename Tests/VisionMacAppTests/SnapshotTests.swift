@@ -23,6 +23,10 @@ final class SnapshotTests: XCTestCase {
         XCTAssertEqual(plain.scenes, Snapshot.Scene.standard)
         XCTAssertEqual(Snapshot.options(arguments: ["Vision", "--snapshot", "/tmp/s", "--snapshot-scenes", "chat-attachments,attachment-preview"],
                                         environment: [:])?.scenes, [.attachments, .attachmentPreview])
+        XCTAssertEqual(Snapshot.options(arguments: ["Vision", "--snapshot", "/tmp/s", "--snapshot-scenes", "long-chat"],
+                                        environment: [:])?.scenes, [.longChat])
+        XCTAssertEqual(Snapshot.options(arguments: ["Vision", "--snapshot", "/tmp/s", "--snapshot-scenes", "chat-long"],
+                                        environment: [:])?.scenes, [.tallAnswer], "the tall-answer chat keeps its name")
         XCTAssertNil(plain.live)
 
         let some = try XCTUnwrap(Snapshot.options(

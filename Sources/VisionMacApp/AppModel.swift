@@ -244,10 +244,10 @@ final class AppModel {
         pendingComposerText = PromptTimeline.quote(record)
     }
 
-    /// Copy a prompt's text.
+    /// Copy a prompt exactly as it was sent (the pastes that went with it included), with "Copied" on its row.
     func copyPrompt(_ record: PromptRecord) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(record.text, forType: .string)
+        MessageCopy.copy(MessageCopy.text(for: record, transport: transport),
+                         feedbackID: MessageCopy.promptFeedbackID(record.id))
     }
 
     /// Open the Amazon Bedrock guide — from the start, or on one page for an existing route

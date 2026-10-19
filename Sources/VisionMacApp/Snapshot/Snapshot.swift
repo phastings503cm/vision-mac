@@ -21,7 +21,10 @@ import VisionHarnessCore
 //   --snapshot-scenes a,b       only these scenes (by default the README's: chat, code, setup, settings-models,
 //                               prompts, tasks, activity, all-prompts, code-focus, code-chat; and, only when named,
 //                               zai-guide, chat-kimi, settings-zai-route, chat-attachments, attachment-preview,
-//                               settings-computer, settings-import, settings-guardian-signin, settings-guardian, glow)
+//                               settings-computer, settings-import, settings-guardian-signin, settings-guardian, glow,
+//                               chat-long; and long-chat, long-chat-top, -earlier, -jump, -huge, -huge-open, -copy,
+//                               -stream — a 2,000-row chat opened, paged, jumped in, copied from, streamed into;
+//                               measured into long-chat-measurements.txt)
 //   --snapshot-live <profile>   run the chat for real first, on Amazon Bedrock with this AWS profile, and save what
 //                               happened as chat-transcript.json (the seeded chat is made from such a run)
 //   --snapshot-region <region>  the live run's Region (default us-west-2)
@@ -63,13 +66,30 @@ enum Snapshot {
         case guardian = "settings-guardian"
         /// The machine-in-use glow's border and pill, with two chats sharing the Mac.
         case glow
-        /// A long chat (over the eager-stack limit: the lazy transcript) whose last answer is very tall, opened at the
-        /// end — it must not draw blank.
-        case longChat = "chat-long"
+        /// A chat of more than a page whose tall answer sits above the end, opened at the end — it must not draw blank.
+        case tallAnswer = "chat-long"
+
+        /// A 2,000-row chat with a 10,000-line prompt, opened and measured (`SnapshotLongChat`).
+        case longChat = "long-chat"
+        /// The long chat scrolled from the bottom to its first row, a screenful at a time, measured.
+        case longChatTop = "long-chat-top"
+        /// "Load earlier messages" clicked; the row at the top stays where it was.
+        case longChatEarlier = "long-chat-earlier"
+        /// Jumped to an early prompt: the page around it, flashing.
+        case longChatJump = "long-chat-jump"
+        /// The 10,000-line prompt collapsed, and opened with Show more.
+        case longChatHuge = "long-chat-huge"
+        case longChatHugeOpen = "long-chat-huge-open"
+        /// The prompt clicked and copied with ⌘C (into a private pasteboard).
+        case longChatCopy = "long-chat-copy"
+        /// A turn streaming in: followed, then not once the person scrolls up.
+        case longChatStream = "long-chat-stream"
 
         /// What a plain `--snapshot` run takes (the README's pictures).
         static let standard: [Scene] = [.chat, .code, .setup, .models, .prompts, .tasks, .activity, .allPrompts,
                                         .codeFocus, .codeChat]
+        /// The long chat's scenes, each run only when named.
+        var isLongChat: Bool { rawValue.hasPrefix("long-chat") }
     }
 
     struct Live: Equatable, Sendable {
@@ -203,6 +223,7 @@ enum Snapshot {
         unsetenv("HISTFILE")
 
         SnapshotSeed.install(home: home, live: options.live)
+        if options.scenes.contains(where: \.isLongChat) { SnapshotLongChat.install() }
     }
 
     /// The run is over (or the app is quitting early): the throwaway folder goes, and so does anything AppKit added
@@ -398,7 +419,7 @@ enum Snapshot {
             model.mode = .code
             setSidebarCollapsed(true, in: window)
             if !model.code.isChatFocus { model.code.toggleChatFocus() }
-        case .longChat:
+        case .tallAnswer:
             model.mode = .chat
             model.config.planPanelOpen = false
             model.select(SnapshotSeed.longChatID)
@@ -435,6 +456,9 @@ enum Snapshot {
             model.settingsTab = .importExport
             model.showSettings = true
             await pause(2.0)
+        case .longChat, .longChatTop, .longChatEarlier, .longChatJump, .longChatHuge, .longChatHugeOpen, .longChatCopy,
+             .longChatStream:
+            await SnapshotLongChat.stage(scene, model, window: window, output: options?.output ?? FileManager.default.temporaryDirectory)
         }
     }
 
@@ -491,7 +515,8 @@ enum Snapshot {
         case .code:
             model.mode = .chat
             setSidebarCollapsed(false, in: window)
-        case .chat, .attachments, .longChat: break
+        case .chat, .attachments, .tallAnswer, .longChat, .longChatTop, .longChatEarlier, .longChatJump, .longChatHuge,
+             .longChatHugeOpen, .longChatCopy, .longChatStream: break
         case .attachmentPreview:
             // A name no chip has closes the preview (the sheet is SwiftUI's, so ending the window's sheet isn't
             // enough), and the next scene starts without it.

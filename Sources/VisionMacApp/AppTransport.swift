@@ -1583,7 +1583,7 @@ public final class AppTransport {
             // The latest goal already finished: nothing to resume.
             if body.role == .notice, body.text.hasPrefix("✅ Goal complete") { return nil }
             guard body.role == .user else { continue }
-            for prefix in ["🎯 /goal (resuming) ", "🎯 /goal "] where body.text.hasPrefix(prefix) {
+            for prefix in GoalTranscript.goalMarkers where body.text.hasPrefix(prefix) {
                 let goal = String(body.text.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
                 return goal.isEmpty ? nil : goal
             }
@@ -2050,11 +2050,10 @@ public final class AppTransport {
             if !kickedOff {
                 if auto {
                     modelText = resuming ? GoalProtocol.resumeAuto(goal) : GoalProtocol.kickoffAuto(goal)
-                    displayText = resuming ? "🚀 queue (resuming): \(goal)" : "🚀 queue: \(goal)"
                 } else {
                     modelText = resuming ? GoalProtocol.resume(goal) : GoalProtocol.kickoff(goal)
-                    displayText = resuming ? "🎯 /goal (resuming) \(goal)" : "🎯 /goal \(goal)"
                 }
+                displayText = GoalTranscript.kickoff(goal, queued: auto, resuming: resuming)
             } else if let failure = validationFailure {
                 let attempt = (vm.turnPhase?.loopbacks ?? 0) + 1
                 modelText = TurnValidation.loopBackMessage(failure, attempt: attempt)
@@ -2065,7 +2064,7 @@ public final class AppTransport {
                                                     markerMisplaced: markerMisplaced)
                     : GoalProtocol.continuation(goal, round: round, hitIterationLimit: hitLimit, error: lastError,
                                                 markerMisplaced: markerMisplaced)
-                displayText = lastError == nil ? "↻ round \(round): keep going" : "↻ round \(round): recover and keep going"
+                displayText = GoalTranscript.round(round, recovering: lastError != nil)
             }
             validationFailure = nil
 

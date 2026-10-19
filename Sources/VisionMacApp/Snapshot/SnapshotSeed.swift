@@ -126,7 +126,7 @@ enum SnapshotSeed {
     static let longChatID = "3D8F1A27-5B9C-4E6D-8A10-2C4B6E8F0A55"
 
     /// 140 short rows, a question and an answer far taller than the rest (a 150-line code listing), then 30 more short
-    /// rows: past the eager-stack limit, so the transcript is the lazy one, with the tall row above the end.
+    /// rows: more than a page, so the transcript opens on its newest page, with the tall row above the end.
     private static func installLongChat(now: Date) {
         let updated = now.addingTimeInterval(-40 * 60)
         func batches(_ range: ClosedRange<Int>) -> [(MessageBody.Role, String)] {

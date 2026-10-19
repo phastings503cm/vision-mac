@@ -115,83 +115,82 @@ struct ChatView: View {
 
     // MARK: - Transcript
 
+    /// The transcript draws a window of rows (`TranscriptPager`): the newest page, with earlier pages loaded as
+    /// the person scrolls up. The window bounds the rows, so the stack is eager — every drawn row is measured and
+    /// scrolling to one lands exactly.
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                TranscriptStack(eager: session.entries.count < TranscriptStackLimit.eagerRows, spacing: Theme.rowSpacing) {
+                VStack(alignment: .leading, spacing: Theme.rowSpacing) {
+                    TranscriptTopMarker()
                     if session.entries.isEmpty {
                         ChatStarterView(session: session) { text in
                             model.send(text, in: session)
                         }
                         .padding(.top, 40)
                     }
-                    ForEach(session.entries) { entry in
+                    let pager = session.pager
+                    let rows = pager.rows(of: session.entries)
+                    if rows.hiddenBefore > 0 {
+                        EarlierMessagesBar(hidden: rows.hiddenBefore, pageSize: pager.window.pageSize) {
+                            pager.loadEarlier(session.entries)
+                        }
+                    }
+                    ForEach(rows.entries) { entry in
                         EntryRow(entry: entry, session: session)
-                            .padding(session.flashEntryID == entry.id ? 4 : 0)
-                            .background(session.flashEntryID == entry.id ? Color.accentColor.opacity(0.16) : Color.clear,
-                                        in: RoundedRectangle(cornerRadius: Theme.corner))
-                            .overlay(RoundedRectangle(cornerRadius: Theme.corner)
-                                .strokeBorder(session.flashEntryID == entry.id ? Color.accentColor.opacity(0.7) : Color.clear,
-                                              lineWidth: 1.5))
-                            .id(entry.id)
+                            .modifier(TranscriptRowFrame(id: entry.id, watched: pager.isWatched(entry.id, in: rows),
+                                                         highlighted: pager.highlightID == entry.id))
                     }
-                    // The live turn-phase card sits under the newest entry
-                    // while a turn runs; the finished one stays until the
-                    // next turn replaces it.
-                    if let phase = session.turnPhase {
-                        PhaseCard(state: phase)
-                            .padding(.leading, Theme.gutter)
-                            .id("phase-\(phase.turnID)")
+                    if rows.hiddenAfter > 0 {
+                        NewerMessagesBar(hidden: rows.hiddenAfter, pageSize: pager.window.pageSize,
+                                         action: { pager.loadLater(session.entries) },
+                                         latest: { pager.showLatest() })
+                    } else {
+                        transcriptEnd
                     }
-                    if !session.running, session.promptHistory.count > 1 {
-                        PromptsLink(session: session)
-                            .padding(.leading, Theme.gutter)
-                    }
-                    if session.running, session.entries.last?.tool?.isFinished ?? true {
-                        ThinkingRow(session: session)
-                    }
-                    if !session.changedFiles.isEmpty {
-                        ProducedFilesRow(session: session)
-                    }
-                    Color.clear.frame(height: 1).id(bottomAnchor)
+                    TranscriptBottomMarker(id: bottomAnchor)
                 }
                 .padding(.horizontal, Theme.contentPadding)
                 .padding(.vertical, 20)
                 .frame(maxWidth: Theme.maxTranscriptWidth, alignment: .leading)
                 .frame(maxWidth: .infinity)
             }
-            .onChange(of: session.entries.count) { _, _ in
-                if session.flashEntryID == nil { scroll(proxy) }
-            }
-            .onChange(of: lastEntryLength) { _, _ in
-                if session.flashEntryID == nil { scroll(proxy) }
-            }
-            .onChange(of: session.id) { _, _ in
-                proxy.scrollTo(bottomAnchor, anchor: .bottom)
-            }
-            .onChange(of: model.promptJump) { _, jump in
-                handleJump(jump, proxy: proxy)
-            }
-            .onAppear {
-                proxy.scrollTo(bottomAnchor, anchor: .bottom)
-                // The first pass runs before the transcript has laid out, so
-                // repeat once the run loop has caught up.
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 120_000_000)
-                    if model.promptJump?.sessionID == session.id {
-                        handleJump(model.promptJump, proxy: proxy)
-                    } else {
-                        proxy.scrollTo(bottomAnchor, anchor: .bottom)
-                    }
-                }
-            }
+            .transcriptPaging(session: session, proxy: proxy, bottomAnchor: bottomAnchor)
+            // "Jump" from the Prompts timeline, here or from another chat (which opens this one first).
+            .onChange(of: model.promptJump) { _, jump in handleJump(jump) }
+            .onChange(of: session.id) { _, _ in handleJump(model.promptJump) }
+            .onAppear { handleJump(model.promptJump) }
+        }
+    }
+
+    /// What follows the newest row: the turn's phase card, the way to Prompts, the thinking line, changed files.
+    @ViewBuilder
+    private var transcriptEnd: some View {
+        // The live turn-phase card sits under the newest entry
+        // while a turn runs; the finished one stays until the
+        // next turn replaces it.
+        if let phase = session.turnPhase {
+            PhaseCard(state: phase)
+                .padding(.leading, Theme.gutter)
+                .id("phase-\(phase.turnID)")
+        }
+        if !session.running, session.promptHistory.count > 1 {
+            PromptsLink(session: session)
+                .padding(.leading, Theme.gutter)
+        }
+        if session.running, session.entries.last?.tool?.isFinished ?? true {
+            ThinkingRow(session: session)
+        }
+        if !session.changedFiles.isEmpty {
+            ProducedFilesRow(session: session)
         }
     }
 
     private let bottomAnchor = "transcript-bottom"
 
-    /// "Jump" from the Prompts timeline: scroll to the prompt's row and flash it.
-    private func handleJump(_ jump: PromptJump?, proxy: ScrollViewProxy) {
+    /// "Jump" from the Prompts timeline: the transcript draws the page around the prompt's row, scrolls to it and
+    /// flashes it (`TranscriptPager.jump(to:)`).
+    private func handleJump(_ jump: PromptJump?) {
         guard let jump, jump.sessionID == session.id else { return }
         model.promptJump = nil
         guard let record = session.promptHistory.first(where: { $0.id == jump.recordID }) else { return }
@@ -199,26 +198,7 @@ struct ChatView: View {
             transport.broadcast("That prompt is no longer in the transcript — the conversation was compacted since. Its text and results are still in Prompts.")
             return
         }
-        session.flashEntryID = entryID
-        withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(entryID, anchor: .center) }
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 2_600_000_000)
-            if session.flashEntryID == entryID {
-                withAnimation(.easeOut(duration: 0.4)) { session.flashEntryID = nil }
-            }
-        }
-    }
-
-    /// Streaming text changes the last entry without changing the count. (UTF-8 length: constant time, where
-    /// `count` walks every character of a long message on every redraw.)
-    private var lastEntryLength: Int {
-        session.entries.last?.message?.text.utf8.count ?? 0
-    }
-
-    private func scroll(_ proxy: ScrollViewProxy) {
-        withAnimation(.easeOut(duration: 0.15)) {
-            proxy.scrollTo(bottomAnchor, anchor: .bottom)
-        }
+        session.pager.jump(to: entryID)
     }
 
     // MARK: - Gates
@@ -521,33 +501,6 @@ struct ChatView: View {
     }
 }
 
-// MARK: - Transcript stack
-
-enum TranscriptStackLimit {
-    /// Up to this many rows the transcript stack is eager (see `TranscriptStack`).
-    static let eagerRows = 120
-}
-
-/// The transcript's rows: an eager `VStack` for a chat of ordinary length, a `LazyVStack` for a very long one.
-///
-/// A lazy stack estimates the height of rows it hasn't drawn; opening a chat scrolls to the bottom through those
-/// estimates, and when one row is far taller than the rest (a long pasted message) the scroll lands where no row is —
-/// the transcript shows blank and stays that way (seen in snapshot mode: a chat with one 40-line message rendered
-/// empty until the stack was made eager). An eager stack measures every row, so the scroll is exact.
-struct TranscriptStack<Content: View>: View {
-    let eager: Bool
-    let spacing: CGFloat
-    @ViewBuilder let content: () -> Content
-
-    var body: some View {
-        if eager {
-            VStack(alignment: .leading, spacing: spacing, content: content)
-        } else {
-            LazyVStack(alignment: .leading, spacing: spacing, content: content)
-        }
-    }
-}
-
 // MARK: - Composer field
 
 /// Multi-line field where Return sends and Shift-Return inserts a newline.
@@ -668,7 +621,14 @@ private struct EntryRow: View {
     var body: some View {
         switch entry.kind {
         case .message(let body):
-            MessageRow(body: body, at: entry.at, masked: session.masked[entry.id])
+            MessageRow(body: body, at: entry.at, masked: session.masked[entry.id],
+                       streaming: session.streamingID == entry.id,
+                       expanded: Binding(get: { session.pager.expanded.contains(entry.id) },
+                                         set: { open in
+                                             if open { session.pager.expanded.insert(entry.id) } else { session.pager.expanded.remove(entry.id) }
+                                         }))
+                .modifier(MessageCopyActions(entry: entry, pager: session.pager,
+                                             copyText: { MessageCopy.text(for: entry, in: session, transport: model.transport) }))
         case .tool(let activity):
             if activity.name == UseSkillTool.name {
                 SkillCard(activity: activity)
@@ -693,11 +653,18 @@ private struct MessageRow: View {
     let at: Date
     /// What the shield masked before this answer's request went out.
     let masked: ShieldReport?
+    /// Still streaming in (a very long one shows its newest lines).
+    var streaming = false
+    /// A very long message the person opened ("Show more").
+    @Binding var expanded: Bool
 
-    init(body: MessageBody, at: Date, masked: ShieldReport? = nil) {
+    init(body: MessageBody, at: Date, masked: ShieldReport? = nil, streaming: Bool = false,
+         expanded: Binding<Bool> = .constant(false)) {
         self.body_ = body
         self.at = at
         self.masked = masked
+        self.streaming = streaming
+        self._expanded = expanded
     }
 
     var body: some View {
@@ -705,19 +672,15 @@ private struct MessageRow: View {
             marker
             VStack(alignment: .leading, spacing: 4) {
                 if body_.role == .user {
-                    if let long = PastedText.collapsed(body_.text) {
-                        CollapsedUserText(text: body_.text, preview: long.preview, lines: long.lines)
-                    } else if !body_.text.isEmpty || body_.attachments.isEmpty {
-                        Text(body_.text)
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                    // One collapse for every long message (`TranscriptText`): its first lines and "Show more".
+                    if !body_.text.isEmpty || body_.attachments.isEmpty {
+                        TranscriptText(text: body_.text, markdown: false, streaming: streaming, expanded: $expanded)
                     }
                     if !body_.attachments.isEmpty {
                         AttachmentBadges(badges: body_.attachments)
                     }
                 } else {
-                    MarkdownView(source: body_.text)
+                    TranscriptText(text: body_.text, markdown: true, streaming: streaming, expanded: $expanded)
                 }
                 if let masked, let summary = masked.summary {
                     MaskedChip(summary: summary, categories: masked.categories)
@@ -830,14 +793,20 @@ private struct ToolCard: View {
 
             if expanded, let output = activity.output, !output.isEmpty {
                 Divider().padding(.vertical, 6)
-                ScrollView(.horizontal, showsIndicators: false) {
-                    Text(output)
-                        .font(Theme.mono(11))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                if LongText.isLong(output) {
+                    // Thousands of lines: a text view that lays out only what is on screen.
+                    LongTextView(text: output, monospaced: true)
+                        .frame(height: 260)
+                } else {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        Text(output)
+                            .font(Theme.mono(11))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 260)
+                    .padding(.bottom, 2)
                 }
-                .frame(maxHeight: 260)
-                .padding(.bottom, 2)
             }
         }
         .padding(8)
