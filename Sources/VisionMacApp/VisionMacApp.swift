@@ -232,6 +232,9 @@ struct RootView: View {
         .sheet(item: $model.planGuide) { request in
             PlanGuideView(request: request, appModel: model).environment(model)
         }
+        .sheet(item: $model.claudeCodeGuide) { _ in
+            ClaudeCodeGuideView(appModel: model).environment(model)
+        }
         .overlay(alignment: .top) {
             VStack(spacing: 0) {
                 renameNotice

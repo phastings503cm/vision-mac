@@ -34,7 +34,7 @@ struct RouteMenuSections: View {
         }
         if usable.count > 1 {
             Menu("Use for Subagents") {
-                ForEach(usable.filter { $0.routeID != config.activeRoute }, id: \.routeID) { provider in
+                ForEach(usable.filter { $0.routeID != config.activeRoute && $0.runsVisionEngine }, id: \.routeID) { provider in
                     Toggle(isOn: Binding(get: { provider.isSubagentWorker },
                                          set: { config.setSubagentWorker(provider.routeID, $0) })) {
                         Text(provider.displayName)
@@ -43,6 +43,7 @@ struct RouteMenuSections: View {
             }
         }
         bedrockSection(config)
+        claudeCodeSection(config)
     }
 
     @ViewBuilder
@@ -50,6 +51,8 @@ struct RouteMenuSections: View {
         if !routes.isEmpty {
             Section(title) {
                 ForEach(routes, id: \.routeID) { provider in
+                    // A Sensitive chat can't move onto an engine that reads files itself.
+                    let refused = provider.readsFilesDirectly && session.map { model.transport.isSensitiveChat($0) } == true
                     Button {
                         guard provider.routeID != current else { return }
                         if let session {
@@ -61,11 +64,24 @@ struct RouteMenuSections: View {
                     } label: {
                         Label(provider.displayName,
                               systemImage: provider.routeID == current ? "checkmark"
+                                  : provider.readsFilesDirectly ? "terminal"
                                   : provider.isPrivateRoute ? "lock.fill" : "shield.lefthalf.filled")
                     }
-                    .help(provider.isPrivateRoute ? "Private: may see sensitive data" : "Not private: sensitive details are masked before sending")
+                    .disabled(refused)
+                    .help(refused ? ClaudeCodeTurn.sensitiveRefusal
+                          : provider.readsFilesDirectly ? ClaudeCodeGuideView.notPrivateHelp
+                          : provider.isPrivateRoute ? "Private: may see sensitive data" : "Not private: sensitive details are masked before sending")
                 }
             }
+        }
+    }
+
+    /// Claude Code: add it (the card), or open the card for the routes there are.
+    @ViewBuilder
+    private func claudeCodeSection(_ config: AppConfig) -> some View {
+        let routes = config.providers.filter { $0.kind == .claudeCode }
+        Section("Claude Code") {
+            Button(routes.isEmpty ? "Add Claude Code (your Claude plan)…" : "Claude Code Card…") { model.showClaudeCodeGuide() }
         }
     }
 

@@ -175,6 +175,10 @@ struct SetupWizard: View {
                         detail: "GLM-5.3 and the other GLM models. Pick the endpoint your key is for (Coding Plan, General API, or China); the check tells you if another one fits.") {
                 model.showPlanGuide(closing: true, plan: "zai")
             }
+            guideChoice(icon: "terminal", title: "Claude Code — your Claude Pro or Max plan",
+                        detail: "Runs the claude command on this Mac, signed in with your own Claude plan. Vision shows its work, tools and cost, and never touches your sign-in.") {
+                model.showClaudeCodeGuide(closing: true)
+            }
             guideChoice(icon: "creditcard", title: "A subscription or API plan — Kimi, Qwen, OpenAI, GLM",
                         detail: "Use your Kimi, Alibaba Cloud, OpenAI or Z.ai plan. A guide shows where to get the key.") {
                 model.showPlanGuide(closing: true)

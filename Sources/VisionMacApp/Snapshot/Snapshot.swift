@@ -68,6 +68,10 @@ enum Snapshot {
         case glow
         /// A chat of more than a page whose tall answer sits above the end, opened at the end — it must not draw blank.
         case tallAnswer = "chat-long"
+        /// The Claude Code card with the claude command found and signed in: the models to add (scripted, no CLI run).
+        case claudeCode = "claude-code"
+        /// The Claude Code card when the claude command is installed but not signed in: the sign-in steps.
+        case claudeCodeSignIn = "claude-code-signin"
 
         /// A 2,000-row chat with a 10,000-line prompt, opened and measured (`SnapshotLongChat`).
         case longChat = "long-chat"
@@ -349,6 +353,15 @@ enum Snapshot {
             model.mode = .chat
             model.settingsTab = .models
             model.showSettings = true
+        case .claudeCode, .claudeCodeSignIn:
+            model.mode = .chat
+            model.config.planPanelOpen = false
+            let install = ClaudeCodeInstall(path: NSHomeDirectory() + "/.local/bin/claude", version: "2.1.299")
+            model.transport.claudeCode.stage(scene == .claudeCode
+                ? .ready(install, ClaudeCodeAuth(loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty",
+                                                 email: "pat@example.com", subscriptionType: "max"))
+                : .signedOut(install))
+            model.showClaudeCodeGuide()
         case .zaiGuide:
             model.mode = .chat
             model.config.planPanelOpen = false
@@ -497,6 +510,9 @@ enum Snapshot {
         switch scene {
         case .setup: model.showWizard = false
         case .models, .zaiRoute: model.showSettings = false
+        case .claudeCode, .claudeCodeSignIn:
+            model.claudeCodeGuide = nil
+            await pause(0.8)
         case .zaiGuide:
             model.planGuide = nil
             await pause(0.8)

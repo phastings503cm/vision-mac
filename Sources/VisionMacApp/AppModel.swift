@@ -64,6 +64,8 @@ final class AppModel {
     var swapperGuide: SwapperGuideRequest?
     /// The "Connect a subscription plan" guide, when it is open.
     var planGuide: PlanGuideRequest?
+    /// The Claude Code card, when it is open.
+    var claudeCodeGuide: ClaudeCodeGuideRequest?
     /// Which Settings tab is showing; set before `showSettings` to deep-link.
     var settingsTab: SettingsTab = .general
     /// A skills action a caller wants the Skills tab to start with.
@@ -265,6 +267,11 @@ final class AppModel {
     /// (the Z.ai (GLM) entries open it on "zai").
     func showPlanGuide(closing sheet: Bool = false, plan: String? = nil) {
         openGuide(closing: sheet) { $0.planGuide = PlanGuideRequest(planID: plan) }
+    }
+
+    /// Open the Claude Code card: is the claude command here and signed in, and which Claude Code models to add.
+    func showClaudeCodeGuide(closing sheet: Bool = false) {
+        openGuide(closing: sheet) { $0.claudeCodeGuide = ClaudeCodeGuideRequest() }
     }
 
     /// Open a guide's sheet. From another sheet (the wizard, Settings), that one closes first so this one can open.

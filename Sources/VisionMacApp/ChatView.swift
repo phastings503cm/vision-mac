@@ -326,9 +326,14 @@ struct ChatView: View {
                     HStack(spacing: 10) {
                         ContextGaugeView(session: session, draft: draft)
                         if let usage = session.lastUsage {
-                            Text("\(usage.promptTokens.formatted()) in · \(usage.completionTokens.formatted()) out")
+                            // A Claude Code chat also shows Claude Code's estimate of the last turn at API prices.
+                            let cost = model.transport.chatRoute(session)?.kind == .claudeCode
+                                ? session.lastCostUSD.map { " · " + ClaudeCodeTurn.formatCost($0) } ?? "" : ""
+                            Text("\(usage.promptTokens.formatted()) in · \(usage.completionTokens.formatted()) out" + cost)
                                 .foregroundStyle(.secondary)
                                 .monospacedDigit()
+                                .help(cost.isEmpty ? "The last turn's tokens"
+                                      : "The last turn's tokens, and Claude Code's own estimate of its cost at API prices — your Claude plan covers it.")
                         }
                     }
                     .fixedSize()

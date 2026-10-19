@@ -43,7 +43,11 @@ struct ProviderSettings: View {
         }
         .sheet(item: Binding(get: { editing.map(EditableProvider.init) },
                              set: { editing = $0?.profile })) { wrapper in
-            ProviderEditor(profile: wrapper.profile)
+            if wrapper.profile.kind == .claudeCode {
+                ClaudeCodeRouteEditor(profile: wrapper.profile)
+            } else {
+                ProviderEditor(profile: wrapper.profile)
+            }
         }
         .confirmationDialog("Remove \(removing?.displayName ?? "this route")?",
                             isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
@@ -65,6 +69,7 @@ struct ProviderSettings: View {
             Menu {
                 Button("Spark Swapper (connection code)…") { model.showSwapperGuide() }
                 Button("Z.ai (GLM)…") { model.showPlanGuide(plan: "zai") }
+                Button("Claude Code (your Claude plan)…") { model.showClaudeCodeGuide() }
                 Button("Subscription plan…") { model.showPlanGuide() }
                 Button("Amazon Bedrock…") { model.showBedrockGuide() }
                 Button("Other OpenAI-compatible server…") {
@@ -144,6 +149,11 @@ struct ProviderSettings: View {
 
     /// Does the route answer, and what does it serve?
     private static func check(_ provider: ProviderProfile) async -> StatusLine {
+        // Claude Code: is the claude command here and signed in (a local check — no model call).
+        if provider.kind == .claudeCode {
+            let status = await ClaudeCodeDetector.check(explicitPath: AppConfig.shared.claudeCodePath.isEmpty ? nil : AppConfig.shared.claudeCodePath)
+            return StatusLine(text: (status.isUsable ? "✔ " : "") + status.summary, tone: status.isUsable ? .success : .failure)
+        }
         // Z.ai: only a real reply proves the key fits the endpoint — and a failure says which endpoint it fits.
         if let result = await ZAIDiagnosis.test(provider) {
             return StatusLine(text: result.message, tone: result.ok ? .success : .failure)
@@ -353,16 +363,18 @@ struct RouteRow: View {
                 Toggle("Subagent", isOn: Binding(get: { provider.isSubagentWorker },
                                                  set: { config.setSubagentWorker(provider.routeID, $0) }))
                     .toggleStyle(.checkbox).labelsHidden()
-                    .disabled(isMain)
+                    .disabled(isMain || !provider.runsVisionEngine)
                     .frame(width: RosterColumn.role)
-                    .help(isMain ? "Takes effect when another model is the primary." : "Take side tasks from the primary, in parallel.")
+                    .help(!provider.runsVisionEngine ? Self.ownAgentHelp
+                          : isMain ? "Takes effect when another model is the primary." : "Take side tasks from the primary, in parallel.")
 
                 Toggle("Backup", isOn: Binding(get: { provider.isBackup },
                                                set: { config.setBackup(provider.routeID, $0); model.transport.resetRouteCache() }))
                     .toggleStyle(.checkbox).labelsHidden()
-                    .disabled(isMain)
+                    .disabled(isMain || !provider.runsVisionEngine)
                     .frame(width: RosterColumn.role)
-                    .help(isMain ? "Takes effect when another model is the primary." : "Use if the primary fails: a turn the primary can't answer runs here.")
+                    .help(!provider.runsVisionEngine ? Self.ownAgentHelp
+                          : isMain ? "Takes effect when another model is the primary." : "Use if the primary fails: a turn the primary can't answer runs here.")
 
                 HStack(spacing: 4) {
                     Image(systemName: provider.isPrivateRoute ? "lock.fill" : "lock.open")
@@ -371,9 +383,11 @@ struct RouteRow: View {
                     Toggle("Private", isOn: Binding(get: { provider.isPrivateRoute },
                                                     set: { config.setPrivate(provider.routeID, $0); model.transport.resetRouteCache() }))
                         .toggleStyle(.switch).controlSize(.mini).labelsHidden()
+                        .disabled(provider.readsFilesDirectly)
                 }
                 .frame(width: RosterColumn.privacy)
-                .help(provider.isPrivateRoute ? "Private: may see sensitive data (your own hardware)." : "Not private: sensitive details are masked before they're sent.")
+                .help(provider.readsFilesDirectly ? ClaudeCodeGuideView.notPrivateHelp
+                      : provider.isPrivateRoute ? "Private: may see sensitive data (your own hardware)." : "Not private: sensitive details are masked before they're sent.")
 
                 Circle().fill(statusColor).frame(width: 8, height: 8)
                     .frame(width: RosterColumn.status)
@@ -415,6 +429,9 @@ struct RouteRow: View {
 
     /// What the route points at, one fact per line so a long model id never hides the rest.
     private var detailLines: [String] {
+        if provider.kind == .claudeCode {
+            return [ClaudeCodeModels.name(provider.model), "Claude Code · your Claude plan · the claude command on this Mac"]
+        }
         if provider.kind == .bedrock {
             let auth = provider.awsProfile.map { "AWS profile \($0)" } ?? "Bedrock API key"
             return [provider.model, "Amazon Bedrock · \(provider.awsRegion ?? "no Region") · \(auth)"]
@@ -428,8 +445,12 @@ struct RouteRow: View {
     /// Bedrock's model and sign-in.
     @ViewBuilder
     private var extras: some View {
-        let showsWorker = provider.isSubagentWorker && !isMain && provider.isEnabled
-        if showsWorker || provider.kind == .bedrock {
+        let showsWorker = provider.isSubagentWorker && !isMain && provider.isEnabled && provider.runsVisionEngine
+        if provider.kind == .claudeCode {
+            Button("Claude Code Card…") { model.showClaudeCodeGuide(closing: true) }
+                .controlSize(.small)
+                .help("Is the claude command installed and signed in; add more Claude Code models.")
+        } else if showsWorker || provider.kind == .bedrock {
             HStack(spacing: 8) {
                 if showsWorker {
                     Text("Subagents at a time:").font(.caption).foregroundStyle(.secondary)
@@ -460,6 +481,9 @@ struct RouteRow: View {
             }
         }
     }
+
+    /// Why a Claude Code route takes no subagent or backup role.
+    static let ownAgentHelp = "Claude Code runs its own agent (with its own subagents), so it is only ever a chat's model — not a subagent server or a backup."
 
     private var statusColor: Color {
         switch result?.tone {
