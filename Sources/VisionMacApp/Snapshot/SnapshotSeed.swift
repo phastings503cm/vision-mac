@@ -110,6 +110,7 @@ enum SnapshotSeed {
         let timelines = PromptTimelineStore(directory: AppPaths.support.appendingPathComponent("prompt-timeline", isDirectory: true))
         for (chatID, records) in otherTimelines(now: now) { timelines.save(chatID, records) }
         installAttachmentsChat(project: project, now: now)
+        installLongChat(now: now)
 
         guard live == nil, let transcript = transcript else { return }
         let start = now.addingTimeInterval(-transcript.duration - 120)
@@ -118,6 +119,33 @@ enum SnapshotSeed {
                              preset: PermissionPreset.workspaceWrite.rawValue,
                              updatedAt: start.addingTimeInterval(transcript.duration)),
                   items: AppTransport.logRows(for: entries, sessionID: mainChatID))
+    }
+
+    // MARK: The long-chat scene
+
+    static let longChatID = "3D8F1A27-5B9C-4E6D-8A10-2C4B6E8F0A55"
+
+    /// 140 short rows, a question and an answer far taller than the rest (a 150-line code listing), then 30 more short
+    /// rows: past the eager-stack limit, so the transcript is the lazy one, with the tall row above the end.
+    private static func installLongChat(now: Date) {
+        let updated = now.addingTimeInterval(-40 * 60)
+        func batches(_ range: ClosedRange<Int>) -> [(MessageBody.Role, String)] {
+            range.flatMap { n -> [(MessageBody.Role, String)] in
+                [(.user, "Step \(n): check the import of batch \(n)."),
+                 (.assistant, "Batch \(n) imported: \(n * 37 % 500 + 100) rows, no errors.")]
+            }
+        }
+        var rows = batches(1...70)
+        let listing = (1...150).map { "    total += row.amount  # line \($0)" }.joined(separator: "\n")
+        rows.append((.user, "Show me the whole importer as it is now."))
+        rows.append((.assistant, "Here is `ledger/importer.py` in full:\n\n```python\n\(listing)\n```\n\nThe end of the listing is the end of the file."))
+        rows += batches(71...85)
+        let entries = rows.enumerated().map { index, row in
+            ChatEntry(at: updated.addingTimeInterval(Double(index - rows.count) * 20), kind: .message(.init(role: row.0, text: row.1)))
+        }
+        ConversationLog.shared.store(LogSession(id: longChatID, title: "Import every batch", cwd: nil,
+                                                preset: PermissionPreset.workspaceWrite.rawValue, updatedAt: updated),
+                                     items: AppTransport.logRows(for: entries, sessionID: longChatID))
     }
 
     // MARK: The attachments scenes

@@ -63,6 +63,9 @@ enum Snapshot {
         case guardian = "settings-guardian"
         /// The machine-in-use glow's border and pill, with two chats sharing the Mac.
         case glow
+        /// A long chat (over the eager-stack limit: the lazy transcript) whose last answer is very tall, opened at the
+        /// end — it must not draw blank.
+        case longChat = "chat-long"
 
         /// What a plain `--snapshot` run takes (the README's pictures).
         static let standard: [Scene] = [.chat, .code, .setup, .models, .prompts, .tasks, .activity, .allPrompts,
@@ -395,6 +398,11 @@ enum Snapshot {
             model.mode = .code
             setSidebarCollapsed(true, in: window)
             if !model.code.isChatFocus { model.code.toggleChatFocus() }
+        case .longChat:
+            model.mode = .chat
+            model.config.planPanelOpen = false
+            model.select(SnapshotSeed.longChatID)
+            await pause(1.0)
         case .attachments, .attachmentPreview:
             model.mode = .chat
             model.config.planPanelOpen = false
@@ -483,7 +491,7 @@ enum Snapshot {
         case .code:
             model.mode = .chat
             setSidebarCollapsed(false, in: window)
-        case .chat, .attachments: break
+        case .chat, .attachments, .longChat: break
         case .attachmentPreview:
             // A name no chip has closes the preview (the sheet is SwiftUI's, so ending the window's sheet isn't
             // enough), and the next scene starts without it.
