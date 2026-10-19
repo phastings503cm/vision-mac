@@ -564,10 +564,14 @@ struct MessagesReply {
         return .done(calls: calls, finish: finish, usage: usage, providerState: state(from: from))
     }
 
-    /// The reply's content blocks from `from` on, in order, when they hold signed (or redacted) thinking
-    /// that must go back with it; nil otherwise.
+    /// The reply's content blocks, in order, when they hold signed (or redacted) thinking that must go back with
+    /// it; nil otherwise. Before the last hand-over (`from`) only the text stays — the declined model's thinking and
+    /// tool calls are left out, as Anthropic's rules for echoing a fallback turn say; text echoes normally.
     private func state(from: Int) -> String? {
-        let kept = blocks.keys.sorted().filter { $0 >= from }.compactMap { blocks[$0] }
+        let kept = blocks.keys.sorted().compactMap { index -> Block? in
+            guard let block = blocks[index] else { return nil }
+            return index >= from || block.kind == .text ? block : nil
+        }
         guard kept.contains(where: { ($0.kind == .thinking && $0.signature != nil) || $0.kind == .redacted }) else {
             return nil
         }

@@ -338,28 +338,49 @@ final class AnthropicClientTests: XCTestCase {
         }
     }
 
-    /// Server-side fallback mid-reply: the declined model's tool call before the hand-over never ran and is dropped;
-    /// the chat gets one line saying who carried on.
+    /// Server-side fallback mid-reply: the declined model's thinking and tool call before the hand-over never ran and
+    /// are dropped, its text stays (Anthropic: text blocks before the last fallback block echo normally), and the
+    /// chat gets one line saying who carried on.
     func testAFallbackHandOverDropsTheDeclinedModelsCallsAndSaysWhoCarriedOn() async throws {
         _ = serve([.init(status: 200, body: Self.events([
             ["type": "message_start", "message": ["model": "claude-opus-5", "usage": ["input_tokens": 5, "output_tokens": 0]]],
-            ["type": "content_block_start", "index": 0, "content_block": ["type": "tool_use", "id": "toolu_a", "name": "read_file", "input": ["path": "x"]]],
+            ["type": "content_block_start", "index": 0, "content_block": ["type": "thinking", "thinking": "", "signature": ""]],
+            ["type": "content_block_delta", "index": 0, "delta": ["type": "thinking_delta", "thinking": "Declined thought."]],
+            ["type": "content_block_delta", "index": 0, "delta": ["type": "signature_delta", "signature": "sig-declined"]],
             ["type": "content_block_stop", "index": 0],
-            ["type": "content_block_start", "index": 1, "content_block": ["type": "fallback", "from": ["model": "claude-opus-5-5"], "to": ["model": "claude-opus-5"]]],
+            ["type": "content_block_start", "index": 1, "content_block": ["type": "text", "text": ""]],
+            ["type": "content_block_delta", "index": 1, "delta": ["type": "text_delta", "text": "Let me look. "]],
             ["type": "content_block_stop", "index": 1],
-            ["type": "content_block_start", "index": 2, "content_block": ["type": "text", "text": ""]],
-            ["type": "content_block_delta", "index": 2, "delta": ["type": "text_delta", "text": "Here you go."]],
+            ["type": "content_block_start", "index": 2, "content_block": ["type": "tool_use", "id": "toolu_a", "name": "read_file", "input": ["path": "x"]]],
             ["type": "content_block_stop", "index": 2],
+            ["type": "content_block_start", "index": 3, "content_block": ["type": "fallback", "from": ["model": "claude-opus-5-5"], "to": ["model": "claude-opus-5"]]],
+            ["type": "content_block_stop", "index": 3],
+            ["type": "content_block_start", "index": 4, "content_block": ["type": "thinking", "thinking": "", "signature": ""]],
+            ["type": "content_block_delta", "index": 4, "delta": ["type": "thinking_delta", "thinking": "Carrying on."]],
+            ["type": "content_block_delta", "index": 4, "delta": ["type": "signature_delta", "signature": "sig-fallback"]],
+            ["type": "content_block_stop", "index": 4],
+            ["type": "content_block_start", "index": 5, "content_block": ["type": "text", "text": ""]],
+            ["type": "content_block_delta", "index": 5, "delta": ["type": "text_delta", "text": "Here you go."]],
+            ["type": "content_block_stop", "index": 5],
             ["type": "message_delta", "delta": ["stop_reason": "end_turn"], "usage": ["output_tokens": 4]],
             ["type": "message_stop"],
         ]))])
         let notices = Notices()
         let result = try await run(route("claude-opus-5-5"), notices: notices)
-        guard case .done(let calls, let finish, _, _)? = result.done else { return XCTFail("no done") }
+        guard case .done(let calls, let finish, _, let state)? = result.done else { return XCTFail("no done") }
         XCTAssertTrue(calls.isEmpty)
         XCTAssertEqual(finish, "stop")
-        XCTAssertEqual(result.text, "Here you go.")
+        XCTAssertEqual(result.text, "Let me look. Here you go.")
         XCTAssertEqual(notices.all, ["claude-opus-5-5 declined this request — claude-opus-5 carried on (Anthropic's server-side fallback)."])
+        // What goes back next turn: the text from before the hand-over, then the fallback model's turn as it was.
+        let blocks = JSONValue(parsing: String(state?.dropFirst(AnthropicMessages.statePrefix.count) ?? ""))?.array ?? []
+        XCTAssertEqual(blocks.map { $0["type"]?.string ?? "" }, ["text", "thinking", "text"])
+        guard blocks.count == 3 else { return }
+        XCTAssertEqual(blocks[0]["text"]?.string, "Let me look. ")
+        XCTAssertEqual(blocks[1]["signature"]?.string, "sig-fallback")
+        XCTAssertEqual(blocks[2]["text"]?.string, "Here you go.")
+        XCTAssertFalse(state?.contains("toolu_a") ?? true, "the declined call never ran")
+        XCTAssertFalse(state?.contains("sig-declined") ?? true, "the declined model's thinking is left out")
     }
 
     /// An `error` event mid-stream (overloaded) is waited out like a 529.
