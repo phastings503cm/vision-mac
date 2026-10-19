@@ -222,11 +222,30 @@ public final class GuardianLoopback: @unchecked Sendable {
                 continue
             }
             let ok = query["code"] != nil && query["error"] == nil
+            // The page repeats what the query said, so it is escaped: anything that can reach this loopback address
+            // could otherwise put markup or a script into it.
             respond(client, status: "200 OK", body: ok
                 ? "Signed in to \(AppIdentity.name). You can close this tab and go back to the app."
-                : "The sign-in didn't finish (\(query["error"] ?? "no code")). You can close this tab and try again from \(AppIdentity.name).")
+                : "The sign-in didn't finish (\(Self.escapeHTML(query["error"] ?? "no code"))). You can close this tab and try again from \(AppIdentity.name).")
             return query
         }
+    }
+
+    /// Text made safe to put in the page: the five characters HTML gives meaning to, as entities.
+    static func escapeHTML(_ text: String) -> String {
+        var out = ""
+        out.reserveCapacity(text.count)
+        for character in text {
+            switch character {
+            case "&": out += "&amp;"
+            case "<": out += "&lt;"
+            case ">": out += "&gt;"
+            case "\"": out += "&quot;"
+            case "'": out += "&#39;"
+            default: out.append(character)
+            }
+        }
+        return out
     }
 
     /// The query of a `GET /callback?…` request line, or nil for anything else.

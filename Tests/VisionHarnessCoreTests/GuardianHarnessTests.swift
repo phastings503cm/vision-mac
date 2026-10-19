@@ -139,6 +139,24 @@ final class GuardianHarnessTests: XCTestCase {
         XCTAssertEqual(GuardianLoopback.callbackQuery("GET /callback?code=1&state=2 HTTP/1.1\r\nHost: x\r\n")?["state"], "2")
     }
 
+    /// The callback page repeats the `error` it was given, escaped (review: it was a reflected HTML injection).
+    func testTheCallbackPageEscapesWhatItRepeats() async throws {
+        let loopback = try GuardianLoopback()
+        defer { loopback.stop() }
+        let port = loopback.port
+        let page = Task.detached { () -> String in
+            let url = URL(string: "http://127.0.0.1:\(port)/callback?error=%3Cscript%3Ealert(1)%3C/script%3E")!
+            let (data, _) = try await URLSession.shared.data(from: url)
+            return String(decoding: data, as: UTF8.self)
+        }
+        let query = try await loopback.waitForCallback(timeout: 10)
+        XCTAssertEqual(query["error"], "<script>alert(1)</script>")
+        let html = try await page.value
+        XCTAssertFalse(html.contains("<script>"), html)
+        XCTAssertTrue(html.contains("(&lt;script&gt;alert(1)&lt;/script&gt;)"), html)
+        XCTAssertEqual(GuardianLoopback.escapeHTML(#"a&b "c" 'd'"#), "a&amp;b &quot;c&quot; &#39;d&#39;")
+    }
+
     func testAnExpiredConnectCodeSaysSo() async throws {
         let c = try client(["POST /api/harness/connect/token": ok(#"{"error":"unauthorized","message":"code expired"}"#, 401)], session: nil)
         do {
