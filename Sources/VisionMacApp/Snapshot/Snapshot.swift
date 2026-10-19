@@ -465,7 +465,9 @@ enum Snapshot {
         switch scene {
         case .setup: model.showWizard = false
         case .models, .zaiRoute: model.showSettings = false
-        case .zaiGuide: model.planGuide = nil
+        case .zaiGuide:
+            model.planGuide = nil
+            await pause(0.8)
         case .chatKimi:
             if let vm = model.transport.sessions.first(where: { $0.id == (liveChatID ?? SnapshotSeed.mainChatID) }),
                let main = model.config.activeRoute {
@@ -483,7 +485,11 @@ enum Snapshot {
             setSidebarCollapsed(false, in: window)
         case .chat, .attachments: break
         case .attachmentPreview:
+            // A name no chip has closes the preview (the sheet is SwiftUI's, so ending the window's sheet isn't
+            // enough), and the next scene starts without it.
+            model.pendingAttachmentPreview = ""
             window.attachedSheet.map { window.endSheet($0) }
+            await pause(0.8)
         case .prompts:
             model.expandedPromptID = nil
         case .tasks, .activity:
