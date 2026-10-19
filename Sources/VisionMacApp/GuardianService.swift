@@ -24,9 +24,17 @@ public final class GuardianService: ObservableObject {
     @Published public private(set) var pendingTwoFactorChallenge: String?
     /// The email of the sign-in waiting on its 2FA code.
     @Published public private(set) var pendingTwoFactorEmail: String?
-    /// The transport whose ETA cache Guardian's shared samples blend into.
-    /// Set by AppModel after both are constructed.
-    public weak var transport: AppTransport?
+    /// The transport whose ETA cache Guardian's shared samples blend into, and whose Guardian model routes use this
+    /// connection's token. Set by AppModel after both are constructed.
+    public weak var transport: AppTransport? {
+        didSet {
+            // A connection signed in from an earlier run: its model routes carry its token (it is never older than
+            // theirs — every sign-in, the wizard's too, ends here).
+            if let token = client?.session?.token, !token.isEmpty, let client {
+                routesFollow(token: token, address: client.baseURL.absoluteString)
+            }
+        }
+    }
 
     /// GET /api/harness/me: the account, its organizations, modules, permissions and limits.
     @Published public private(set) var account: GuardianAccount?
@@ -82,7 +90,9 @@ public final class GuardianService: ObservableObject {
 
     /// Sign in with the Guardian login and remember the session.
     public func signIn(address: String, email: String, password: String,
-                       secrets: any SecretStore = AppSecrets.keychain) async -> Bool {
+                       secrets: (any SecretStore)? = nil) async -> Bool {
+        // The service's own store (the Keychain in the app, memory in tests): never the real Keychain behind a test.
+        let secrets = secrets ?? self.secrets
         lastError = nil
         pendingTwoFactorChallenge = nil
         pendingTwoFactorEmail = nil
@@ -111,7 +121,8 @@ public final class GuardianService: ObservableObject {
     /// is stored exactly like a password-only sign-in.
     @discardableResult
     public func verifyTwoFactor(code: String,
-                                secrets: any SecretStore = AppSecrets.keychain) async -> Bool {
+                                secrets: (any SecretStore)? = nil) async -> Bool {
+        let secrets = secrets ?? self.secrets
         lastError = nil
         guard let challenge = pendingTwoFactorChallenge, let guardian = client else {
             lastError = "No 2FA sign-in is waiting for a code — sign in again."
@@ -139,6 +150,9 @@ public final class GuardianService: ObservableObject {
         client = guardian
         accountEmail = session.email.isEmpty ? nil : session.email
         guardian.orgID = orgID
+        // The model routes on this Guardian use the new token too: signing in again here (what a 401 asks for) renews
+        // the models as well as prompts, limits and the vault.
+        routesFollow(token: session.token, address: guardian.baseURL.absoluteString)
         // The shared ETA cache: what the org's harnesses learned blends
         // into this Mac's cache, so its first estimates start smart.
         Task { [weak self] in
@@ -244,6 +258,73 @@ public final class GuardianService: ObservableObject {
         if refresh { Task { [weak self] in await self?.refreshAccount() } }
     }
 
+    // MARK: The model routes follow the connection
+
+    /// Whether `route` is a Guardian model route on the Guardian at `address` (same host and port).
+    static func servesSameGuardian(_ route: ProviderProfile, address: String) -> Bool {
+        guard route.kind == .guardian,
+              let a = URL(string: route.baseURL), let b = URL(string: address.isEmpty ? defaultURL : address),
+              let hostA = a.host?.lowercased(), let hostB = b.host?.lowercased() else { return false }
+        return hostA == hostB && a.port == b.port
+    }
+
+    /// The Guardian model routes on this connection's Guardian.
+    public var modelRoutes: [ProviderProfile] {
+        guard let config = transport?.config else { return [] }
+        let address = client?.baseURL.absoluteString ?? Self.defaultURL
+        return config.providers.filter { Self.servesSameGuardian($0, address: address) }
+    }
+
+    /// Give every Guardian model route on `address` the connection's token (nil: take it away), so the models never
+    /// keep a token the connection has replaced or dropped.
+    private func routesFollow(token: String?, address: String) {
+        guard let transport else { return }
+        let config = transport.config
+        var changed = false
+        for route in config.providers where Self.servesSameGuardian(route, address: address) {
+            let next = token ?? ""
+            if config.apiKey(for: route) != next {
+                config.setAPIKey(next, for: route)
+                changed = true
+            }
+        }
+        if changed { transport.resetRouteCache() }
+    }
+
+    /// "Use Guardian's models" (Settings ▸ Guardian, signed in, no Guardian model route yet): add a route for the
+    /// account's models with the connection's token — the same route the setup wizard makes — without making it the
+    /// main model. Returns what to tell the person.
+    @discardableResult
+    public func addModelRoute() async -> String {
+        guard let client, let token = client.session?.token, !token.isEmpty, let config = transport?.config else {
+            return "Sign in to Guardian first."
+        }
+        do {
+            let models = try await client.models().map(\.id).sorted()
+            guard let first = models.first else { return "Guardian offers no models to this account in this organization." }
+            var route = ProviderProfile(kind: .guardian, name: "Guardian", baseURL: Self.modelRouteURL(client.baseURL),
+                                        model: first)
+            if let orgID { route.customHeaders = ["x-guardian-org": orgID] }
+            config.store(route)
+            config.setAPIKey(token, for: route)
+            if config.activeRoute == nil { config.activate(route) }
+            transport?.resetRouteCache()
+            return "Added Guardian's models (\(models.count)) — pick one for a chat in the model menu under the message box."
+        } catch {
+            report(error)
+            return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    /// The model proxy's address for a Guardian deployment: its OpenAI-compatible `/v1`, as the setup wizard writes it.
+    static func modelRouteURL(_ base: URL) -> String {
+        var parts = URLComponents(url: base, resolvingAgainstBaseURL: false)
+        let path = parts?.path ?? ""
+        parts?.path = path.isEmpty || path == "/" ? "/v1" : path
+        parts?.query = nil
+        return parts?.string ?? base.absoluteString
+    }
+
     /// Show a structured refusal as a dialog (the same one twice within half a minute shows once).
     public func show(_ problem: GuardianProblem) {
         if let lastShown, lastShown.id == problem.id, Date().timeIntervalSince(lastShown.at) < 30 { return }
@@ -332,9 +413,14 @@ public final class GuardianService: ObservableObject {
         lastError = nil
     }
 
-    public func signOut(secrets: any SecretStore = AppSecrets.keychain) {
+    public func signOut(secrets: (any SecretStore)? = nil) {
+        let secrets = secrets ?? self.secrets
+        let address = client?.baseURL.absoluteString
+            ?? secrets.read(service: AppIdentity.KeychainService.guardian, account: "address") ?? Self.defaultURL
         secrets.write(nil, service: AppIdentity.KeychainService.guardian, account: "token")
         secrets.write(nil, service: AppIdentity.KeychainService.guardian, account: "email")
+        // Signed out means signed out: the Guardian model routes stop using the token too.
+        routesFollow(token: nil, address: address)
         client = nil
         accountEmail = nil
         account = nil

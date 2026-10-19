@@ -125,6 +125,12 @@ struct GuardianSettingsForm: View {
 
     // MARK: Account
 
+    /// Signed in, and no model route uses this Guardian.
+    private var hasNoModelRoute: Bool {
+        _ = model.config.providers.count
+        return guardian.modelRoutes.isEmpty
+    }
+
     @ViewBuilder
     private var accountSection: some View {
         Section("Account") {
@@ -154,6 +160,16 @@ struct GuardianSettingsForm: View {
                          + (account.modules.isEmpty ? "" : "Modules you have: \(account.modules.joined(separator: ", "))."))
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+                // Signed in here (the browser path, or after the wizard's route was deleted) with no Guardian model
+                // route: one click adds it, on this sign-in's token.
+                if hasNoModelRoute {
+                    HStack {
+                        Text("Guardian's models aren't in your model list yet.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Use Guardian's Models") { Task { status = await guardian.addModelRoute() } }
+                    }
                 }
                 if let error = guardian.lastError {
                     Text(error).font(.caption).foregroundStyle(.orange)

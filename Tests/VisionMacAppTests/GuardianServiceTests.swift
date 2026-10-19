@@ -157,6 +157,62 @@ final class GuardianServiceTests: XCTestCase {
         XCTAssertNil(defaults.object(forKey: "guardian.promptSync.v1"))
     }
 
+    // MARK: The model routes follow the sign-in (review: signing in again in Settings left the route's old token)
+
+    /// A Guardian route set up with token A gets a 401; signing in again in Settings ▸ Guardian (what the 401 dialog
+    /// asks for) gives the connection token B — and the next chat request carries `Bearer B`. Signing out takes it away.
+    func testSigningInAgainRenewsTheModelRoutesTokenAndSigningOutTakesItAway() async throws {
+        OpenAIClient.protocolClassesForTesting = [GuardianProxyServer.self]
+        GuardianProxyServer.reset()
+        defer { OpenAIClient.protocolClassesForTesting = nil }
+        transport.retryPolicy = RetryPolicy(delay: { _ in 0.02 })
+        transport.config.computerToolsEnabled = false
+        let route = try XCTUnwrap(transport.config.activeProvider)
+        transport.config.setAPIKey("tok-A", for: route)
+
+        let vm = transport.newSession(cwd: dir.path)
+        transport.send("hello", sessionID: vm.id)
+        try await waitUntil(timeout: 20) { !vm.running && vm.entries.contains { $0.message?.role == .error } }
+        XCTAssertEqual(Set(GuardianProxyServer.chatAuthorizations), ["Bearer tok-A"], "the stale token, refused")
+        let before = GuardianProxyServer.chatAuthorizations.count
+
+        try await signIn()   // the login answers with token "sess-1"
+        XCTAssertEqual(transport.config.apiKey(for: route), "sess-1")
+        transport.send("hello again", sessionID: vm.id)
+        try await waitUntil(timeout: 20) { !vm.running && vm.entries.contains { $0.message?.role == .assistant } }
+        XCTAssertEqual(Set(GuardianProxyServer.chatAuthorizations.dropFirst(before)), ["Bearer sess-1"])
+
+        // The wizard's path (adopt) and a sign-out reach the route the same way.
+        service.adopt(GuardianSession(userID: "u1", email: "pat@503cm.com", name: nil, token: "sess-2"),
+                      address: GuardianService.defaultURL)
+        XCTAssertEqual(transport.config.apiKey(for: route), "sess-2")
+        service.signOut()
+        XCTAssertEqual(transport.config.apiKey(for: route), "", "signed out: the models stop using the token too")
+
+        // A route on another Guardian is left alone.
+        let other = ProviderProfile(kind: .guardian, name: "Staging", baseURL: "https://staging.guardian.test/v1", model: "m")
+        XCTAssertFalse(GuardianService.servesSameGuardian(other, address: GuardianService.defaultURL))
+        XCTAssertTrue(GuardianService.servesSameGuardian(route, address: "https://GUARDIAN.503cm.com"))
+    }
+
+    /// Signed in from Settings with no Guardian model route: "Use Guardian's Models" adds one on this sign-in's token.
+    func testUseGuardiansModelsAddsTheRouteOnTheSignInsToken() async throws {
+        let existing = try XCTUnwrap(transport.config.activeProvider)
+        transport.config.removeProvider(existing)
+        XCTAssertTrue(service.modelRoutes.isEmpty)
+        wire.routes["GET /api/harness/v1/models"] = (200, #"{"models":[{"id":"guardian/sonnet"},{"id":"guardian/opus"}]}"#)
+        try await signIn()
+        service.setOrg("o2", refresh: false)
+        let said = await service.addModelRoute()
+        XCTAssertEqual(said, "Added Guardian's models (2) — pick one for a chat in the model menu under the message box.")
+        let route = try XCTUnwrap(service.modelRoutes.first)
+        XCTAssertEqual(route.baseURL, "https://guardian.503cm.com/v1")
+        XCTAssertEqual(route.model, "guardian/opus")
+        XCTAssertEqual(route.customHeaders?["x-guardian-org"], "o2")
+        XCTAssertEqual(transport.config.apiKey(for: route), "sess-1")
+        XCTAssertEqual(GuardianService.modelRouteURL(URL(string: "https://g.example.com/")!), "https://g.example.com/v1")
+    }
+
     func testAnExpiredSignInIsDroppedWithAPlainMessage() async throws {
         try await signIn()
         wire.routes["GET /api/harness/me"] = (401, #"{"error":"unauthorized","message":"revoked"}"#)
@@ -183,5 +239,42 @@ final class GuardianServiceTests: XCTestCase {
             try await Task.sleep(nanoseconds: 20_000_000)
         }
         XCTFail("condition never became true", file: file, line: line)
+    }
+}
+
+/// Guardian's model proxy for the route tests: remembers each chat request's Authorization, refuses token A with a
+/// 401, answers anything else.
+final class GuardianProxyServer: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var _auth: [String] = []
+    static var chatAuthorizations: [String] { lock.withLock { _auth } }
+    static func reset() { lock.withLock { _auth = [] } }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func stopLoading() {}
+
+    override func startLoading() {
+        let path = request.url?.path ?? ""
+        if path.hasSuffix("/models") {
+            respond(200, #"{"data":[{"id":"guardian/default"}]}"#, type: "application/json")
+            return
+        }
+        let auth = request.value(forHTTPHeaderField: "Authorization") ?? ""
+        Self.lock.withLock { Self._auth.append(auth) }
+        if auth == "Bearer tok-A" {
+            respond(401, #"{"error":"unauthorized","message":"Your sign-in has expired."}"#, type: "application/json")
+        } else {
+            respond(200, #"data: {"choices":[{"delta":{"content":"Hi."}}]}"# + "\n\n"
+                    + #"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"# + "\n\ndata: [DONE]\n\n")
+        }
+    }
+
+    private func respond(_ status: Int, _ body: String, type: String = "text/event-stream") {
+        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1",
+                                       headerFields: ["Content-Type": type])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
     }
 }
