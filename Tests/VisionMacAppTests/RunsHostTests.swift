@@ -208,6 +208,33 @@ final class RunsHostTests: XCTestCase {
         XCTAssertEqual(vm.promptHistory.last?.source, .task)
     }
 
+    /// A waiting task waits on the box behind its chat's own model (not the primary's), and starts by itself when that
+    /// box finishes switching — never marked done early (Windows review finding 2, the Mac's shape of it).
+    func testATaskWaitsWhileItsChatsOwnServerSwitchesAndStartsAfter() async throws {
+        let other = ProviderProfile(kind: .openAICompat, name: "spark-2", baseURL: "http://spark2.test/v1", model: "qwen-b")
+        transport.config.providers.append(other)
+        final class Box: @unchecked Sendable { var switching = true }
+        let box = Box()
+        transport.isServerSwitching = { false }   // the primary's box is free
+        transport.isRouteSwitching = { route in route.routeID == other.routeID && box.switching }
+        let vm = transport.newSession(cwd: project.path)
+        transport.setRoute(other.routeID, for: vm)
+        let task = try XCTUnwrap(transport.addChatTask("after the swap", sessionID: vm.id))
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(transport.queue.task(task.id)?.status, .queued, "waits while its own box switches")
+        XCTAssertTrue(userTexts.isEmpty, "nothing was sent to a box mid-swap")
+        // Another chat on the primary is not held up by spark-2 (a new chat in the project starts on spark-2, its
+        // project's last choice, so it is moved back).
+        let free = transport.newSession(cwd: project.path)
+        transport.setRoute(try XCTUnwrap(transport.config.activeRoute), for: free)
+        let quick = try XCTUnwrap(transport.addChatTask("on the primary", sessionID: free.id))
+        try await waitUntil("the primary's chat ran") { transport.queue.task(quick.id)?.status == .complete && idle(free) }
+        box.switching = false
+        transport.serverSwitchFinished()
+        try await waitUntil("ran after the swap") { transport.queue.task(task.id)?.status == .complete && idle(vm) }
+        XCTAssertTrue(userTexts.contains { $0.contains("after the swap") })
+    }
+
     func testStopPausesTheListAndResumeCarriesOn() async throws {
         FakeModelServer.reset { seen, _ in seen.lastUser.contains("long") ? .slow(5, "late") : .text("ok") }
         let vm = transport.newSession(cwd: project.path)

@@ -286,7 +286,22 @@ extension AppTransport {
         sessions.contains(where: { $0 === vm }) && !vm.running && runTasks[vm.id] == nil
             && queueSessions[vm.id] == nil && chatTaskInFlight[vm.id] == nil && chatTasksPaused[vm.id] == nil
             && vm.runningBackgroundJobs.isEmpty && vm.pendingGates.isEmpty
-            && isServerSwitching?() != true && config.isConfigured
+            && !chatServerSwitching(vm) && config.isConfigured
+    }
+
+    /// What a send says while the chat's model server switches models.
+    static let switchingNote = "This chat's model server is switching models right now — send again once it says it's ready."
+
+    /// Whether the box behind this chat's own model is switching models (each chat has its own model, so another
+    /// chat's box switching doesn't hold this one up).
+    func chatServerSwitching(_ vm: SessionVM) -> Bool {
+        if let route = chatRoute(vm), let isRouteSwitching { return isRouteSwitching(route) }
+        return isServerSwitching?() == true
+    }
+
+    /// A model server finished switching: chats with tasks waiting start the next one (each waits on its own box).
+    func serverSwitchFinished() {
+        for vm in sessions where queue.queuedChatTaskCount(vm.id) > 0 { schedulePump(vm) }
     }
 
     /// Start the chat's next waiting task, if it is free: sent exactly as if the person sent it now (a `/goal`, a

@@ -218,6 +218,8 @@ public final class AppTransport {
     @ObservationIgnored public var onFilesChanged: (([FileChange]) -> Void)?
     /// True while the model server is switching models (Spark swapper).
     @ObservationIgnored var isServerSwitching: (() -> Bool)?
+    /// Whether the box behind a route is switching models (nil: only the primary's box is known, `isServerSwitching`).
+    @ObservationIgnored var isRouteSwitching: ((ProviderProfile) -> Bool)?
     /// Handles `/swap [model]`.
     @ObservationIgnored var onSwapCommand: ((String?, SessionVM) -> Void)?
 
@@ -1160,7 +1162,7 @@ public final class AppTransport {
         guard !vm.running, runTasks[vm.id] == nil, queueSessions[vm.id] == nil,
               vm.runningBackgroundJobs.isEmpty,
               let pool = backgroundPools[vm.id], pool.all.contains(where: { $0.status == .done || $0.status == .failed }),
-              isServerSwitching?() != true else { return }
+              !chatServerSwitching(vm) else { return }
         // Carrying on by itself is unattended work, which an interactive-only plan doesn't allow.
         if chatRoute(vm)?.isInteractiveOnly == true {
             vm.note("Background agents finished — reply to continue.")
@@ -1359,16 +1361,16 @@ public final class AppTransport {
         // "/deploy staging": a skill or command invoked by name.
         if attachments.isEmpty, let (skill, args) = matchSkillCommand(text, vm: vm),
            let expanded = invocationText(skill, arguments: args) {
-            if isServerSwitching?() == true {
-                vm.note("The main model's server is switching models right now — send again once it says it's ready.")
+            if chatServerSwitching(vm) {
+                vm.note(Self.switchingNote)
                 return
             }
             let display = "/\(skill.slug)" + (args.isEmpty ? "" : " \(args)")
             runTasks[sessionID] = Task { await runTurn(vm, text: display, modelText: expanded) }
             return
         }
-        if isServerSwitching?() == true {
-            vm.note("The main model's server is switching models right now — send again once it says it's ready (usually a few minutes).")
+        if chatServerSwitching(vm) {
+            vm.note(Self.switchingNote + " (usually a few minutes)")
             return
         }
         runTasks[sessionID] = Task { await runTurn(vm, text: text, attachments: attachments) }
@@ -1457,8 +1459,8 @@ public final class AppTransport {
                 vm.note(Self.interactiveOnlyGoalMessage(route), role: .error)
                 return
             }
-            if isServerSwitching?() == true {
-                vm.note("The main model's server is switching models right now — send again once it says it's ready.")
+            if chatServerSwitching(vm) {
+                vm.note(Self.switchingNote)
                 return
             }
             // A bare `/goal` picks the chat's unfinished goal back up (after a

@@ -163,6 +163,7 @@ final class AppModel {
             transport.resetRouteCache()
         }
         transport.isServerSwitching = { spark.isSwitchingMainModel }
+        transport.isRouteSwitching = { spark.box(serving: $0)?.isSwitching ?? false }
         transport.onSwapCommand = { arg, vm in
             Task { @MainActor in await spark.handleCommand(arg, in: vm) }
         }

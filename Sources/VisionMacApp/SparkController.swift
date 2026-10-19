@@ -232,6 +232,7 @@ final class SparkController {
         do {
             let s = try await client(box).status()
             let wasRunning = box.status?.job?.isRunning ?? false
+            let wasSwitching = box.status?.isSwitching ?? false
             box.status = s
             box.lastError = nil
             box.untrustedFingerprint = nil
@@ -245,6 +246,8 @@ final class SparkController {
                 finished(job, on: box, status: s)
             }
             if s.isSwitching { startMonitoring() }
+            // Chats whose tasks waited on this box start them now (any box: each chat has its own model).
+            if wasSwitching, !s.isSwitching { transport?.serverSwitchFinished() }
         } catch let e as SwapperError {
             if case .untrustedCertificate(let fp) = e { box.untrustedFingerprint = fp }
             box.lastError = e.errorDescription
