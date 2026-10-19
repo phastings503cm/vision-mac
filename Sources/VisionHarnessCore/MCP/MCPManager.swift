@@ -107,7 +107,7 @@ public final class MCPManager: @unchecked Sendable {
     }
 
     /// A change that needs the server started again (how it runs, not how it is used).
-    static func needsRestart(_ old: MCPServerConfig, _ new: MCPServerConfig) -> Bool {
+    public static func needsRestart(_ old: MCPServerConfig, _ new: MCPServerConfig) -> Bool {
         old.transport != new.transport || old.command != new.command || old.args != new.args || old.cwd != new.cwd
             || old.url != new.url || old.envNames != new.envNames || old.headerNames != new.headerNames
     }

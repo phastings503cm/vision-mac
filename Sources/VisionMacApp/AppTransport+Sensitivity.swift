@@ -96,8 +96,10 @@ extension AppTransport {
     func sensitiveCommand(_ arg: String?, vm: SessionVM) {
         switch arg?.lowercased() {
         case "on", "yes", "true":
+            if vm.sensitive { vm.note("This chat is already Sensitive. " + (sensitivityHeader(for: vm) ?? "")) }
             setSensitive(true, for: vm)
         case "off", "no", "false":
+            if !vm.sensitive { vm.note("This chat isn't Sensitive.") }
             setSensitive(false, for: vm)
         case nil:
             if vm.sensitive {

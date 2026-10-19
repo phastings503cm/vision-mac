@@ -81,8 +81,10 @@ extension AppTransport {
         mcpHub.store.setSecrets(for: server, environment: environment, headers: headers, previous: previous)
         if let index = list.firstIndex(where: { $0.id == server.id }) { list[index] = server } else { list.append(server) }
         mcpHub.set(list)
-        // The same command with new secrets still needs a fresh start.
-        if previous != nil, previous?.enabled == true, server.enabled { mcpHub.manager.reconnect(server.id) }
+        // The same command (which `set` doesn't restart) may have new secrets: start it again with them.
+        if let previous, previous.enabled, server.enabled, !MCPManager.needsRestart(previous, server) {
+            mcpHub.manager.reconnect(server.id)
+        }
     }
 
     public func removeMCPServer(_ id: String) {
