@@ -26,16 +26,8 @@ struct GuardianSettingsForm: View {
     @State private var status: String?
     @State private var isSyncingSkills = false
     @State private var isExporting = false
-    @State private var isImporting = false
-    @State private var chatPicker: [ChatChoice]?
+    @State private var showChatImport = false
     @State private var showPassword = false
-
-    struct ChatChoice: Identifiable, Hashable {
-        var id: String
-        var title: String
-        var updatedAt: Date
-        var picked: Bool
-    }
 
     var body: some View {
         Form {
@@ -76,13 +68,10 @@ struct GuardianSettingsForm: View {
                         if isExporting { ProgressView().controlSize(.small) } else { Text("Export all chats to Guardian") }
                     }
                     .disabled(!guardian.isSignedIn || isExporting)
-                    Button("Import chats from Guardian…") {
-                        isImporting = true
-                        Task { await loadChatChoices() }
-                    }
-                    .disabled(!guardian.isSignedIn || isImporting)
+                    Button("Import chats from Guardian…") { showChatImport = true }
+                        .disabled(!guardian.isSignedIn)
                 }
-                Text("Exported chats appear in Guardian under your account; pick the ones to bring back into this app's chat list.")
+                Text("Exported chats appear in Guardian under your account. Import brings back those and your Guardian chats, as chats you can carry on here with any model.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
@@ -93,18 +82,13 @@ struct GuardianSettingsForm: View {
             }
         }
         .formStyle(.grouped)
-        .sheet(item: Binding(get: { chatPicker.map { ChatPickerItem(choices: $0) } }, set: { chatPicker = $0?.choices })) { item in
-            chatPickerSheet(item.choices)
+        .sheet(isPresented: $showChatImport) {
+            ChatImportSheet(model: ChatImportModel(transport: model.transport, guardian: guardian), focus: .guardian)
         }
         .guardianProblemAlert(guardian)
         .task {
             if guardian.isSignedIn, guardian.account == nil { await guardian.refreshAccount() }
         }
-    }
-
-    struct ChatPickerItem: Identifiable {
-        var choices: [ChatChoice]
-        var id: String { "chats" }
     }
 
     // MARK: Prompt notebook
@@ -360,83 +344,6 @@ struct GuardianSettingsForm: View {
         }
     }
 
-    // MARK: The chat picker
-
-    private func loadChatChoices() async {
-        defer { isImporting = false }
-        guard let client = guardian.client else { return }
-        do {
-            let remote = try await client.chats()
-            let local = Set(model.transport.sessions.map(\.id))
-            if remote.isEmpty {
-                status = "Guardian holds no exported chats yet."
-                return
-            }
-            chatPicker = remote.sorted { $0.updatedAt > $1.updatedAt }.map {
-                ChatChoice(id: $0.id, title: $0.title, updatedAt: $0.updatedAt, picked: false)
-            }.filter { !local.contains($0.id) }
-            if chatPicker?.isEmpty == true {
-                chatPicker = nil
-                status = "Every chat Guardian holds is already in this app."
-            }
-        } catch {
-            status = (error as? GuardianError)?.errorDescription ?? error.localizedDescription
-        }
-    }
-
-    private func chatPickerSheet(_ choices: [ChatChoice]) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("Import chats from Guardian").font(.headline).padding(14)
-            Divider()
-            List {
-                ForEach(choices) { choice in
-                    Toggle(isOn: Binding(
-                        get: { chatPicker?.first { $0.id == choice.id }?.picked ?? false },
-                        set: { on in
-                            if let index = chatPicker?.firstIndex(where: { $0.id == choice.id }) { chatPicker?[index].picked = on }
-                        })) {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(choice.title.isEmpty ? "Untitled chat" : choice.title)
-                            Text(choice.updatedAt.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            }
-            .frame(minHeight: 260)
-            Divider()
-            HStack {
-                Button("Tick All") { chatPicker = chatPicker?.map { var c = $0; c.picked = true; return c } }
-                Spacer()
-                Button("Cancel") { chatPicker = nil }
-                Button("Import \(chatPicker?.filter(\.picked).count ?? 0) Chats") {
-                    let picked = chatPicker?.filter(\.picked) ?? []
-                    chatPicker = nil
-                    Task { await importChats(picked) }
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled((chatPicker?.filter(\.picked).isEmpty) ?? true)
-            }
-            .padding(14)
-        }
-        .frame(width: 520, height: 420)
-    }
-
-    private func importChats(_ picked: [ChatChoice]) async {
-        guard let client = guardian.client else { return }
-        var imported = 0
-        do {
-            for chat in picked {
-                let payload = try await client.chat(id: chat.id)
-                Self.restoreChat(id: chat.id, title: chat.title, updatedAt: chat.updatedAt, payload: payload, transport: model.transport)
-                imported += 1
-            }
-            model.transport.reload()
-            status = "Imported \(imported) chat\(imported == 1 ? "" : "s") from Guardian."
-        } catch {
-            status = (error as? GuardianError)?.errorDescription ?? error.localizedDescription
-        }
-    }
-
     // MARK: Actions
 
     /// The second half of a 2FA sign-in: verify the authenticator code.
@@ -510,23 +417,7 @@ struct GuardianSettingsForm: View {
     }
 
     private func exportChats() async {
-        guard let client = guardian.client else { return }
-        let log = model.transport.log
-        let sessions = model.transport.sessions
-        var exported = 0
-        for vm in sessions where vm.loaded {
-            let payload = Self.chatJSON(vm)
-            do {
-                try await client.putChat(id: vm.id, title: vm.title, updatedAt: vm.updatedAt, payload: payload)
-                exported += 1
-            } catch {
-                status = (error as? GuardianError)?.errorDescription ?? error.localizedDescription
-                isExporting = false
-                return
-            }
-        }
-        _ = log   // loaded timelines only; unloaded chats export on their next open
-        status = "Exported \(exported) chat\(exported == 1 ? "" : "s") to Guardian."
+        status = await guardian.sendAllChats(from: model.transport)
         isExporting = false
     }
 
@@ -546,93 +437,6 @@ struct GuardianSettingsForm: View {
             status = (error as? GuardianError)?.errorDescription ?? error.localizedDescription
         }
     }
-
-    // MARK: Chat (de)serialization — the harness's own transcript rows
-
-    /// One chat as Guardian stores it: the log rows plus the chat's title.
-    static func chatJSON(_ vm: SessionVM) -> Data {
-        struct Chat: Codable {
-            var id: String
-            var title: String
-            var cwd: String?
-            var rows: [Row]
-            struct Row: Codable {
-                var kind: String
-                var text: String?
-                var toolName: String?
-                var argSummary: String?
-                var output: String?
-                var isError: Bool
-                var at: Date
-            }
-        }
-        let rows = vm.entries.map { entry -> Chat.Row in
-            switch entry.kind {
-            case .message(let body):
-                return .init(kind: body.role.rawValue, text: body.text, toolName: nil, argSummary: nil,
-                             output: nil, isError: false, at: entry.at)
-            case .tool(let tool):
-                return .init(kind: "tool", text: tool.summary, toolName: tool.name, argSummary: tool.preview,
-                             output: tool.output, isError: tool.isOk == false, at: entry.at)
-            case .todos(let items):
-                return .init(kind: "todos", text: items.map(\.content).joined(separator: "\n"), toolName: nil,
-                             argSummary: nil, output: nil, isError: false, at: entry.at)
-            case .compaction(let note):
-                return .init(kind: "compaction", text: note.summary, toolName: nil, argSummary: "\(note.removed)",
-                             output: nil, isError: false, at: entry.at)
-            }
-        }
-        let chat = Chat(id: vm.id, title: vm.title, cwd: vm.cwd, rows: rows)
-        return (try? JSONEncoder().encode(chat)) ?? Data()
-    }
-
-    /// Restore an exported chat into the app's list.
-    static func restoreChat(id: String, title: String, updatedAt: Date, payload: Data, transport: AppTransport) {
-        struct Chat: Codable {
-            var id: String
-            var title: String
-            var cwd: String?
-            var rows: [Row]
-            struct Row: Codable {
-                var kind: String
-                var text: String?
-                var toolName: String?
-                var argSummary: String?
-                var output: String?
-                var isError: Bool
-                var at: Date
-            }
-        }
-        guard let chat = try? JSONDecoder().decode(Chat.self, from: payload) else { return }
-        let log = transport.log
-        var entries: [ChatEntry] = []
-        for row in chat.rows {
-            let at = row.at
-            switch row.kind {
-            case "user": entries.append(ChatEntry(at: at, kind: .message(.init(role: .user, text: row.text ?? ""))))
-            case "assistant": entries.append(ChatEntry(at: at, kind: .message(.init(role: .assistant, text: row.text ?? ""))))
-            case "notice": entries.append(ChatEntry(at: at, kind: .message(.init(role: .notice, text: row.text ?? ""))))
-            case "error": entries.append(ChatEntry(at: at, kind: .message(.init(role: .error, text: row.text ?? ""))))
-            case "tool":
-                entries.append(ChatEntry(at: at, kind: .tool(.init(name: row.toolName ?? "tool", preview: row.argSummary ?? "",
-                                                                   summary: row.text, output: row.output,
-                                                                   isOk: !row.isError))))
-            case "todos":
-                entries.append(ChatEntry(at: at, kind: .todos(row.text?.split(separator: "\n").map {
-                    TodoItem(id: UUID().uuidString, content: String($0))
-                } ?? [])))
-            case "compaction":
-                entries.append(ChatEntry(at: at, kind: .compaction(
-                    .init(removed: Int(row.argSummary ?? "") ?? 0, summary: row.text ?? "", at: at))))
-            default: break
-            }
-        }
-        if transport.sessions.contains(where: { $0.id == chat.id }) { return }
-        log.store(LogSession(id: chat.id, title: title, cwd: chat.cwd,
-                             preset: PermissionPreset.workspaceWrite.rawValue, updatedAt: updatedAt),
-                  items: AppTransport.logRows(for: entries, sessionID: chat.id))
-    }
-
 }
 
 // MARK: - The dialog for Guardian's refusals

@@ -146,6 +146,8 @@ public final class SessionVM: Identifiable {
     /// The route (`ProviderProfile.routeID`) this chat talks to — its own, stored with the conversation (see
     /// `ChatRoutes.swift`). Nil = not chosen yet: it takes the primary when it next sends.
     public var routeID: String?
+    /// Where an imported chat came from (nil: made here). Shown in the chat list; the search can filter by it.
+    public var importSource: ChatSource?
     /// The model's live reasoning for the current step (not persisted).
     public var reasoning: String = ""
     public var reasoningStarted: Date?

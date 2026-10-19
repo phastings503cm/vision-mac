@@ -49,6 +49,16 @@ public struct LogSession: Identifiable, Hashable, Codable, Sendable {
     /// primary when it next sends).
     public var route: String?
     public var thinking: String?
+    /// An imported chat: where it came from (`ChatSource` raw value), the source's own id for it, and when it was
+    /// brought in. A second import skips a chat whose (source, sourceID) is already here. Nil for chats made here.
+    public var source: String?
+    public var sourceID: String?
+    public var importedAt: Date?
+
+    public var importKey: String? {
+        guard let source, let sourceID else { return nil }
+        return ChatImportKey.make(source, sourceID)
+    }
 }
 
 private struct StoredItem: Codable {
@@ -196,6 +206,29 @@ public final class ConversationLog {
     public func resync(_ id: String, rows newRows: [LogItemRow]) {
         items[id] = newRows
         persist(id)
+    }
+
+    /// The (source, id) keys of the imported chats here.
+    public func importedKeys() -> Set<String> {
+        Set(rows.values.compactMap(\.importKey))
+    }
+
+    public func session(_ id: String) -> LogSession? { rows[id] }
+
+    /// A session's rows read straight from its file, off the main thread (the search index). Nil when unreadable.
+    nonisolated static func readRows(at url: URL, sessionID: String) -> [LogItemRow]? {
+        guard let data = try? Data(contentsOf: url),
+              let file = try? JSONDecoder().decode(SessionFile.self, from: data) else { return nil }
+        return file.items.map {
+            LogItemRow(sessionID: sessionID, seq: $0.seq, kind: $0.kind, text: $0.text, toolName: $0.toolName,
+                       argSummary: $0.argSummary, output: $0.output, isError: $0.isError, at: $0.at,
+                       attachments: $0.attachments)
+        }
+    }
+
+    /// Where a session's file is, and its rows when they are in memory (the search index reads the rest from disk).
+    func searchSource(_ id: String) -> (file: URL, loaded: [LogItemRow]?) {
+        (fileURL(id), items[id])
     }
 
     /// Store a whole chat at once, with the dates it carries, and write it now (the screenshot mode's chats).

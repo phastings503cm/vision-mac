@@ -32,11 +32,13 @@ struct ImportExportSettings: View {
     @State private var exportConflict: OpenClawConflict = .skip
     @State private var confirmVault = false
     @State private var exportResult: OpenClawExportResult?
+    @State private var showChatImport = false
 
     private var home: URL { model.transport.skillLocations.home }
 
     var body: some View {
         Form {
+            chatsSection
             sourceSection
             if let bundle {
                 previewSections(bundle)
@@ -44,6 +46,9 @@ struct ImportExportSettings: View {
             exportSection
         }
         .formStyle(.grouped)
+        .sheet(isPresented: $showChatImport) {
+            ChatImportSheet(model: ChatImportModel(transport: model.transport, guardian: model.guardian))
+        }
         .onAppear {
             if installs.isEmpty { look() }
             if Self.previewOnAppear, bundle == nil, chosen != nil {
@@ -57,6 +62,33 @@ struct ImportExportSettings: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("They are written in plain text to \(envPath), readable by your user account — OpenClaw and every skill it runs can read them. \(AppIdentity.name) never shows or logs the values.")
+        }
+    }
+
+    // MARK: Chats
+
+    private var chatsSection: some View {
+        Section {
+            HStack {
+                Button("Import Chats…") { showChatImport = true }
+                Spacer()
+                Menu("Export This Chat") {
+                    Button("Markdown…") { ChatExportActions.save(.markdown, sessionID: model.transport.selectedID, transport: model.transport) }
+                    Button("JSON…") { ChatExportActions.save(.json, sessionID: model.transport.selectedID, transport: model.transport) }
+                }
+                .fixedSize()
+                .disabled(model.transport.selectedID == nil)
+                Button("Send to Guardian") {
+                    ChatExportActions.sendToGuardian(sessionID: model.transport.selectedID, transport: model.transport,
+                                                     guardian: model.guardian)
+                }
+                .disabled(model.transport.selectedID == nil || !model.guardian.isSignedIn)
+            }
+        } header: {
+            Text("Chats")
+        } footer: {
+            Text("Import brings Claude Code, Codex and OpenClaw sessions on this Mac, Claude.ai and ChatGPT data exports, Vision chat files and your Guardian chats in as chats you can carry on with any model. Export works on the chat that is open: Markdown to read anywhere, JSON to import into Vision on another computer, or Guardian to keep it with your account.")
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
 

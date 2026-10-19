@@ -14,13 +14,18 @@ struct SidebarView: View {
     var body: some View {
         VStack(spacing: 0) {
             if model.anythingRunning { runningBar }
+            ChatSearchField(search: model.chatSearch)
 
             List(selection: Binding(
                 get: { transport.selectedID },
                 set: { model.select($0) }
             )) {
-                projectSection
-                chatSection
+                if model.chatSearch.isActive {
+                    searchResults
+                } else {
+                    projectSection
+                    chatSection
+                }
             }
             .listStyle(.sidebar)
         }
@@ -50,6 +55,29 @@ struct SidebarView: View {
         }
         .buttonStyle(.plain)
         .background(Color.accentColor.opacity(0.12))
+    }
+
+    // MARK: Search
+
+    @ViewBuilder
+    private var searchResults: some View {
+        let search = model.chatSearch
+        Section(search.searching && search.hits.isEmpty ? "Searching…"
+                : "\(search.hits.count) chat\(search.hits.count == 1 ? "" : "s")") {
+            if !search.searching, search.hits.isEmpty {
+                Text("No chat holds every word.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(search.hits) { hit in
+                Button {
+                    model.open(hit)
+                } label: {
+                    SearchHitRow(hit: hit)
+                }
+                .buttonStyle(.plain)
+            }
+        }
     }
 
     // MARK: Projects
@@ -158,6 +186,13 @@ struct SidebarView: View {
                             }
                         }
                         Divider()
+                        Button("Export as Markdown…") { ChatExportActions.save(.markdown, sessionID: session.id, transport: transport) }
+                        Button("Export as JSON…") { ChatExportActions.save(.json, sessionID: session.id, transport: transport) }
+                        Button("Send to Guardian") {
+                            ChatExportActions.sendToGuardian(sessionID: session.id, transport: transport, guardian: model.guardian)
+                        }
+                        .disabled(!model.guardian.isSignedIn)
+                        Divider()
                         Button("Delete", role: .destructive) { transport.deleteSession(session.id) }
                     }
             }
@@ -252,6 +287,12 @@ private struct SessionRow: View {
                         .truncationMode(.tail)
                 }
                 HStack(spacing: 4) {
+                    if let source = session.importSource, source != .vision {
+                        Image(systemName: source.icon)
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                            .help("Imported from \(source.label)")
+                    }
                     if let project = session.projectName, project != model.project?.lastPathComponent {
                         Text(project)
                             .font(.system(size: 10))
@@ -278,5 +319,90 @@ private struct SessionRow: View {
             }
         }
         .padding(.vertical, 2)
+    }
+}
+
+// MARK: - Searching every chat
+
+/// The chat list's search field: every chat's title and what was said, with a menu to look in one source only.
+struct ChatSearchField: View {
+    @Bindable var search: ChatSearchModel
+    @FocusState private var focused: Bool
+
+    private static let scopes: [(String, ChatSearchScope)] = [("All chats", .all), ("Made in Vision", .madeHere)]
+        + [ChatSource.claudeCode, .codex, .openClaw, .claudeAI, .chatGPT, .guardian, .vision].map { ("From \($0.label)", .source($0)) }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            TextField("Search all chats", text: $search.query)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .focused($focused)
+                .onExitCommand { search.clear() }
+            if search.isActive {
+                Button {
+                    search.clear()
+                } label: {
+                    Image(systemName: "xmark.circle.fill").font(.system(size: 11))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Clear the search")
+            }
+            Menu {
+                Picker("Look in", selection: $search.scope) {
+                    ForEach(Self.scopes, id: \.0) { scope in
+                        Text(scope.0).tag(scope.1)
+                    }
+                }
+                .pickerStyle(.inline)
+            } label: {
+                Image(systemName: search.scope == .all ? "line.3.horizontal.decrease.circle"
+                      : "line.3.horizontal.decrease.circle.fill")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Look in every chat, or only those from one place")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(Color.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .onChange(of: search.focusRequest) { _, _ in focused = true }
+    }
+}
+
+private struct SearchHitRow: View {
+    let hit: ChatSearchHit
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 5) {
+                if let source = hit.source {
+                    Image(systemName: source.icon).font(.system(size: 9)).foregroundStyle(.tertiary)
+                }
+                Text(hit.title)
+                    .font(.system(size: 12, weight: hit.titleMatch ? .semibold : .regular))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Text(hit.updatedAt.relativeLabel)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
+            if !hit.snippet.isEmpty {
+                Text(hit.snippet)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        }
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
+        .help(hit.matches > 1 ? "\(hit.matches) places in this chat match" : hit.title)
     }
 }
