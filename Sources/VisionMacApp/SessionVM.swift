@@ -146,6 +146,14 @@ public final class SessionVM: Identifiable {
     /// The route (`ProviderProfile.routeID`) this chat talks to — its own, stored with the conversation (see
     /// `ChatRoutes.swift`). Nil = not chosen yet: it takes the primary when it next sends.
     public var routeID: String?
+    /// What the current (or last) turn changed, file by file, with what each held before — the "Files changed (N)"
+    /// card under the turn, and its Rewind (see `CheckpointStore`). Nil until a turn changes a file.
+    public var checkpoint: TurnCheckpointRecord?
+    /// Words for the model that go in front of the next message (after a rewind: which files went back).
+    public var pendingModelNotes: [String] = []
+    /// The chat is Sensitive: only private models, or others through the shield (see `SensitivityPolicy`). Stored
+    /// with the conversation; a new chat starts with its project's default.
+    public var sensitive = false
     /// The model's live reasoning for the current step (not persisted).
     public var reasoning: String = ""
     public var reasoningStarted: Date?

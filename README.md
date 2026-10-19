@@ -304,6 +304,25 @@ When there are subagent servers, the primary is told which are private and to de
 others in general terms. A task marked `sensitive` runs only on a private server; if none can take it, the
 model is told to do it itself.
 
+### Sensitive chats
+
+Mark a chat **Sensitive** — the **Sensitive** menu under the composer, **Session ▸ Sensitive Chat**, or
+`/sensitive on` — and it uses only:
+
+- **private models**: your own hardware (a Spark, a Strix Halo box, Ollama, LM Studio — the route's
+  **Private** switch), **Guardian**, or **Amazon Bedrock in your own AWS account**;
+- **or other models only through the shield**, which masks what it detects before sending and puts it back
+  in the answer — so while the shield is switched off, they're refused;
+- and **never an engine that reads your files itself** (Claude Code): the shield can't see what it sends.
+
+The strip at the top of the chat says what that means for its model now ("Sensitive — Kimi Code isn't
+private: what the shield detects is masked before sending"). Sending to a model the chat can't use is
+refused with the reason, and your message stays in the box; the model menu greys those models out; a
+`/goal` or task pauses. A Sensitive chat falls over only to backups it may use, its subagents stay on
+private servers while the shield is off, and a model that only gets it masked gets no pictures (screenshots
+or attached) and PDFs only as their text — the shield can check text, not a picture. **New Chats in <project> Start Sensitive** in the same menu makes it
+the project's default.
+
 ### Using Amazon Bedrock
 
 On the wizard's backend page choose **Amazon Bedrock with my AWS account (guided)** — or **Settings ▸
@@ -543,6 +562,9 @@ at the bottom.
 | `/swap [box] [model]` | Lists every Swapper box's models, or switches what one serves — the box behind this chat's model unless you name one. |
 | `/agents` | The kinds of subagent, the model servers they run on with how busy each is, and what is running now. |
 | `/skills` · `/skill <name>` · `/skill new <what>` · `/<name> args` | Skills: list, select for this chat, have the model write one, or run one. |
+| `/rewind [n]` | The chat's recent turns that changed files, newest first (and the Rewind sheet); `/rewind 2` asks to undo turn 2's file changes. |
+| `/mcp [reload]` | The MCP servers, whether each is connected, and their tools; `/mcp reload` reconnects them. |
+| `/sensitive [on\|off]` | Shows whether this chat is Sensitive and what that means for its model, or turns it on or off. |
 | `/help` | Lists these. |
 
 Long chats also compact automatically at 75% of the window (keeping up to ~96K recent tokens verbatim),
@@ -632,6 +654,50 @@ process protocol — drop a file in `~/Library/Application Support/Vision/plugin
 `${key}` interpolates an argument, shell-quoted, so a value containing spaces or `;` cannot break out
 of its position. `requiresApproval` defaults to **true** — a plugin runs arbitrary shell, and silence
 is the wrong default. A plugin tool may not shadow a built-in.
+
+## MCP servers
+
+**Settings ▸ MCP Servers** (also **Session ▸ MCP Servers…**) connects Vision to [Model Context
+Protocol](https://modelcontextprotocol.io) servers, and each server's tools join every chat as
+`mcp__<server>__<tool>` — GitHub, a database, your docs, a browser.
+
+- **Two kinds.** A *program* Vision starts and talks to over stdin/stdout (started through your login
+  shell, so `npx`, `uvx` and `docker` are found as in Terminal), or a *URL* (Streamable HTTP, with the
+  server's session id on every request). Resources, when a server has them, are one more tool:
+  `mcp__<server>__resources` lists them or reads one.
+- **Import** brings in the servers you already set up: Claude Code (`~/.claude.json` — its own servers and
+  this project's — and the project's `.mcp.json`), Claude Desktop (`claude_desktop_config.json`) and Cursor
+  (`~/.cursor/mcp.json`, the project's `.cursor/mcp.json`). Nothing starts while you look; the same server
+  in two apps is offered once; one Vision already has is greyed out. A server marked SSE is imported as
+  Streamable HTTP with a note (many offer both).
+- **Secrets stay in the Keychain.** Environment variables and HTTP headers (tokens, API keys) are kept
+  there, one item each — `mcp-servers.json` in the app's data folder holds only their names. `${NAME}` and
+  `${NAME:-default}` are filled in from your environment when the server starts, as Claude Code does.
+- **Every call asks first** (the usual permission card, naming the server, the tool and its arguments)
+  unless the chat has Full access or you trust the server: *Read-only tools without asking* (tools the
+  server marks read-only) or *All tools without asking*. Tools can be switched off one by one.
+- A server that fails says why (its own words from stderr, an HTTP status); one that dies is started
+  again on its next call. `/mcp` lists them in a chat.
+
+## Checkpoints and Rewind
+
+Before the agent changes a file in a turn, Vision keeps what the file held; when it's done, what the turn
+left. That covers its file tools (`write_file`, `edit`, its subagents' too, background ones included),
+and — in a git repository — what each shell command (and each local MCP tool that isn't read-only)
+changed: `git status` before and after, with the files that were already changed kept first. Ignored
+files (build output) aren't looked at; outside a git repository a shell command's changes aren't
+recorded.
+
+- **Files changed (N)** under the turn lists them; click one for its diff. **Rewind this turn…** puts every
+  file back to how it was before the turn and removes the ones it created — after a confirmation that says
+  which files go back and which changed again since (yours, or a later turn's): **Rewind All** throws
+  those later changes away, **Rewind Only the Others** leaves them.
+- **`/rewind`** (or **Session ▸ Rewind…**) lists the chat's recent turns that changed files; `/rewind 2`
+  asks to undo the second. A rewind is a turn of its own, so it can be rewound too.
+- The model is told with your next message which files went back, so it re-reads them.
+- Contents are kept once however many turns keep them (by SHA-256, under `checkpoints/` in the app's data
+  folder), for 30 days and at most 1 GB — the oldest go first. Files over 16 MB aren't kept, so a turn that
+  changes one can't rewind it (the card says so).
 
 ## Permissions
 

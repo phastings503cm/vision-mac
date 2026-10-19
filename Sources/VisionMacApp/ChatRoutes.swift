@@ -179,13 +179,15 @@ extension AppTransport {
     }
 
     /// The chat's own route as the fleet's "primary" for its subagents: when no worker is free (or there are none)
-    /// a subagent falls back to the model its own chat uses, never another chat's.
+    /// a subagent falls back to the model its own chat uses, never another chat's. It takes sensitive tasks when a
+    /// Sensitive chat may send to it as it is (`SensitivityPolicy.isPrivate`: Guardian and Bedrock count) — it
+    /// already sees the chat.
     @MainActor
     func fleetHome(for vm: SessionVM, profile: ProviderProfile) -> FleetServer {
         let sessionID = vm.id
         return FleetServer(
             id: profile.routeID, label: Self.routeLabel(profile), isPrimary: true,
-            maxParallel: min(max(profile.subagentParallel ?? 4, 1), 16), isPrivate: profile.isPrivateRoute,
+            maxParallel: min(max(profile.subagentParallel ?? 4, 1), 16), isPrivate: SensitivityPolicy.isPrivate(profile),
             interactiveOnly: profile.isInteractiveOnly,
             resolve: { [weak self] in
                 guard let self else { throw LLMError.noModel }

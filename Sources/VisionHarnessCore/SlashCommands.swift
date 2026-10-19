@@ -26,6 +26,12 @@ public enum SlashCommand: Equatable, Sendable {
     case agents
     /// Show or limit which apps this chat may control ("only [apps]", "any", "default").
     case control(String?)
+    /// The recent turns that changed files ("/rewind"), or undo one of them ("/rewind 2").
+    case rewind(String?)
+    /// The MCP servers and their tools; "/mcp reload" reconnects them.
+    case mcp(String?)
+    /// Show this chat's sensitivity, or set it ("/sensitive on", "/sensitive off").
+    case sensitive(String?)
     case help
 
     public struct Info: Sendable {
@@ -48,6 +54,9 @@ public enum SlashCommand: Equatable, Sendable {
         .init(usage: "/queue", summary: "Start the task queue — it works queued tasks one at a time, unattended"),
         .init(usage: "/agents", summary: "Show the model servers subagents run on, how busy each is, and what is running now"),
         .init(usage: "/control only [apps]|any|default", summary: "Limit this chat to controlling the apps it starts (and ones you name), or let it control any app"),
+        .init(usage: "/rewind [n]", summary: "List the recent turns that changed files, or undo turn n's file changes"),
+        .init(usage: "/mcp [reload]", summary: "Show the MCP servers and their tools, or reconnect them"),
+        .init(usage: "/sensitive [on|off]", summary: "Show or set whether this chat is Sensitive (private models only, or masked)"),
         .init(usage: "/help", summary: "List commands"),
     ]
 
@@ -68,6 +77,9 @@ public enum SlashCommand: Equatable, Sendable {
         case "/queue": return .queue
         case "/agents", "/fleet", "/servers": return .agents
         case "/control": return .control(arg)
+        case "/rewind", "/checkpoints": return .rewind(arg)
+        case "/mcp": return .mcp(arg)
+        case "/sensitive": return .sensitive(arg)
         case "/help", "/?", "/commands": return .help
         default: return nil
         }

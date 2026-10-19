@@ -49,6 +49,8 @@ public struct LogSession: Identifiable, Hashable, Codable, Sendable {
     /// primary when it next sends).
     public var route: String?
     public var thinking: String?
+    /// The chat is Sensitive (see `SensitivityPolicy`). Nil = no (an older chat).
+    public var sensitive: Bool?
 }
 
 private struct StoredItem: Codable {
@@ -211,6 +213,15 @@ public final class ConversationLog {
         guard var row = rows[id], row.route != route || row.thinking != thinking else { return }
         row.route = route
         row.thinking = thinking
+        rows[id] = row
+        persist(id)
+    }
+
+    /// Store whether the chat is Sensitive.
+    public func setSensitive(id: String, _ sensitive: Bool) {
+        let stored: Bool? = sensitive ? true : nil
+        guard var row = rows[id], row.sensitive != stored else { return }
+        row.sensitive = stored
         rows[id] = row
         persist(id)
     }

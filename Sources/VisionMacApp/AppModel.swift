@@ -11,7 +11,7 @@ enum WorkspaceMode: String, CaseIterable, Identifiable {
     var icon: String { self == .chat ? "bubble.left.and.bubble.right" : "chevron.left.forwardslash.chevron.right" }
 }
 
-enum SettingsTab: Hashable { case general, models, spark, guardian, skills, computer, importExport, plugins, editor }
+enum SettingsTab: Hashable { case general, models, spark, guardian, skills, computer, mcp, importExport, plugins, editor }
 
 /// The right column's tabs: the chat's tasks (its current plan first, then what is queued) and its Prompts timeline.
 enum RunPanelTab: String, CaseIterable, Identifiable {
@@ -104,6 +104,8 @@ final class AppModel {
         // What model servers refused before (a temperature Kimi fixes, …) is remembered across launches.
         RequestAdaptationStore.shared.fileURL = AppPaths.requestAdaptationsFile
         transport = AppTransport(config: config)
+        // The MCP servers in Settings ▸ MCP Servers connect in the background; their tools join every chat.
+        transport.startMCP()
         spark = SparkController(config: config, transport: transport)
         // Guardian's shared state: prompts on submit, turn durations for the
         // multitenant ETA cache, and the transport back-reference for the

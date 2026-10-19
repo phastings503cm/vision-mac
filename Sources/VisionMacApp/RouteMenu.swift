@@ -51,6 +51,9 @@ struct RouteMenuSections: View {
         if !routes.isEmpty {
             Section(title) {
                 ForEach(routes, id: \.routeID) { provider in
+                    // A Sensitive chat can't switch to a model it may not use (Claude Code; an online service while
+                    // the shield is off).
+                    let allowed = model.transport.sensitivityAllows(provider, in: session)
                     Button {
                         guard provider.routeID != current else { return }
                         if let session {
@@ -60,11 +63,14 @@ struct RouteMenuSections: View {
                             model.transport.resetRouteCache()
                         }
                     } label: {
-                        Label(provider.displayName,
+                        Label(provider.displayName + (allowed ? "" : " — not in a Sensitive chat"),
                               systemImage: provider.routeID == current ? "checkmark"
+                                  : !allowed ? "nosign"
                                   : provider.isPrivateRoute ? "lock.fill" : "shield.lefthalf.filled")
                     }
-                    .help(provider.isPrivateRoute ? "Private: may see sensitive data" : "Not private: sensitive details are masked before sending")
+                    .disabled(!allowed && provider.routeID != current)
+                    .help(!allowed ? (SensitivityPolicy.admission(for: provider, shieldOn: model.config.shield.enabled).refusal ?? "")
+                          : provider.isPrivateRoute ? "Private: may see sensitive data" : "Not private: sensitive details are masked before sending")
                 }
             }
         }

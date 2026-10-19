@@ -833,6 +833,9 @@ struct PromptResultsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     let record: PromptRecord
+    /// What the prompt's turn changed (its checkpoint record; the turn id is the prompt's id).
+    @State private var changes: TurnCheckpointRecord?
+    @State private var rewinding: RewindRequest?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -876,6 +879,21 @@ struct PromptResultsView: View {
                             }
                         }
                     }
+                    if let changes, let session = model.transport.sessions.first(where: { $0.id == record.chatID }) {
+                        RunSection(title: "Files changed", count: changes.changedFiles.count) {
+                            if changes.rewoundAt != nil {
+                                Text("Rewound").font(Theme.metaFont).foregroundStyle(Theme.noticeTint)
+                            }
+                            ForEach(changes.changedFiles) { file in
+                                ChangedFileRow(file: file, root: session.workspaceURL?.path)
+                            }
+                            let blocked = model.transport.rewindBlocked(turnID: changes.id, in: session)
+                            Button("Rewind this turn…") { rewinding = RewindRequest(chatID: session.id, turnID: changes.id) }
+                                .controlSize(.small)
+                                .disabled(blocked != nil)
+                                .help(blocked ?? "Put these files back to how they were before this turn (you confirm first)")
+                        }
+                    }
                     if let note = record.completionNote, !note.isEmpty {
                         RunSection(title: "Completion notes") {
                             Text(note).font(.callout).textSelection(.enabled)
@@ -907,6 +925,12 @@ struct PromptResultsView: View {
             .padding(12)
         }
         .frame(width: 580, height: 560)
+        .onAppear { changes = model.transport.checkpoint(chatID: record.chatID, turnID: record.id) }
+        .sheet(item: $rewinding, onDismiss: {
+            changes = model.transport.checkpoint(chatID: record.chatID, turnID: record.id)
+        }) { request in
+            RewindSheet(request: request).environment(model)
+        }
     }
 
     private var chatTitle: String {

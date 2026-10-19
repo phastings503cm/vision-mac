@@ -545,6 +545,8 @@ struct GuardianSettingsForm: View {
             var id: String
             var title: String
             var cwd: String?
+            /// The chat is Sensitive (left out when not): it stays Sensitive when it comes back.
+            var sensitive: Bool?
             var rows: [Row]
             struct Row: Codable {
                 var kind: String
@@ -572,7 +574,7 @@ struct GuardianSettingsForm: View {
                              output: nil, isError: false, at: entry.at)
             }
         }
-        let chat = Chat(id: vm.id, title: vm.title, cwd: vm.cwd, rows: rows)
+        let chat = Chat(id: vm.id, title: vm.title, cwd: vm.cwd, sensitive: vm.sensitive ? true : nil, rows: rows)
         return (try? JSONEncoder().encode(chat)) ?? Data()
     }
 
@@ -582,6 +584,8 @@ struct GuardianSettingsForm: View {
             var id: String
             var title: String
             var cwd: String?
+            /// The chat is Sensitive (left out when not): it stays Sensitive when it comes back.
+            var sensitive: Bool?
             var rows: [Row]
             struct Row: Codable {
                 var kind: String
@@ -594,7 +598,6 @@ struct GuardianSettingsForm: View {
             }
         }
         guard let chat = try? JSONDecoder().decode(Chat.self, from: payload) else { return }
-        let log = transport.log
         var entries: [ChatEntry] = []
         for row in chat.rows {
             let at = row.at
@@ -618,9 +621,11 @@ struct GuardianSettingsForm: View {
             }
         }
         if transport.sessions.contains(where: { $0.id == chat.id }) { return }
-        log.store(LogSession(id: chat.id, title: title, cwd: chat.cwd,
-                             preset: PermissionPreset.workspaceWrite.rawValue, updatedAt: updatedAt),
-                  items: AppTransport.logRows(for: entries, sessionID: chat.id))
+        // Sensitive when it was, or when its project starts chats Sensitive.
+        transport.storeImportedChat(LogSession(id: chat.id, title: title, cwd: chat.cwd,
+                                               preset: PermissionPreset.workspaceWrite.rawValue, updatedAt: updatedAt,
+                                               sensitive: chat.sensitive),
+                                    items: AppTransport.logRows(for: entries, sessionID: chat.id))
     }
 
 }
