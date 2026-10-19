@@ -12,6 +12,26 @@ prompt on first launch — right-click the app and choose **Open**, or run:
 xattr -d com.apple.quarantine /Applications/Vision.app
 ```
 
+## What's new in 0.16.6 — Claude Code with your Claude subscription
+
+- **A chat can run on Claude Code.** If you have a Claude Pro or Max plan and the `claude` command on this Mac,
+  choose **Claude Code — your Claude Pro or Max plan** in the wizard (or **Settings ▸ AI Models ▸ Add ▸ Claude
+  Code (your Claude plan)…**). The card finds `claude`, says whether it's signed in, shows how to install it or
+  sign in when something is missing, and adds Opus, Sonnet or Haiku to the model menu. Claude Code itself does the
+  talking with your own sign-in — Vision never reads or reuses it.
+- **It works like any other model in Vision.** Each turn carries on the chat's own Claude Code session; its text,
+  tool calls, plans and files changed show in the chat with their times; the line under a turn gives its steps,
+  tokens and Claude Code's own price estimate. Stop, run phases, the Prompts timeline, `/goal`, the task queue and
+  `/compact` all work, your plan's limits show as they get close, and a chat can move between Claude Code and any
+  other model without losing the conversation.
+- **Your permission setting decides what it may do.** *Plan only*, *Workspace write* and *Full access* map to Claude
+  Code's own modes; when Claude Code wants to write outside the project, run a command that changes things, or read
+  files elsewhere on your Mac (`~/.ssh`, `~/.aws`), Vision asks you on the usual permission card.
+- **A cloned project can't run code on your Mac by itself.** A folder's own Claude Code hooks and MCP servers load
+  only if you trusted the folder in Claude Code; otherwise the chat says which of its files were left out.
+- **The shield still covers what Vision hands over** — the conversation so far and secrets in your messages. Sensitive
+  chats can't use Claude Code, because it reads your files itself.
+
 ## What's new in 0.16.5 — your chats from Claude Code, Codex, OpenClaw, Claude.ai, ChatGPT and Guardian
 
 - **Import Chats.** **File ▸ Import Chats…** (⇧⌘I) brings in your conversations from **Claude Code**, **Codex**,
