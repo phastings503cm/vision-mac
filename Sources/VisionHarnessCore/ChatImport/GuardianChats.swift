@@ -23,9 +23,13 @@ public struct GuardianChatSummary: Sendable, Hashable {
     public var sharedBy: String?
     /// A chat with one of the org's AI staff.
     public var person: String?
+    /// Where Guardian itself imported the chat from (`Chat.importSource`: "claude-code", "codex", "openclaw",
+    /// "claude-ai", "chatgpt", "vision-mac", "vision-windows", "vision"), and the id it had there (`Chat.externalId`).
+    public var importSource: String?
+    public var externalID: String?
 
     public init(id: String, title: String, createdAt: Date? = nil, updatedAt: Date, model: String? = nil,
-                sharedBy: String? = nil, person: String? = nil) {
+                sharedBy: String? = nil, person: String? = nil, importSource: String? = nil, externalID: String? = nil) {
         self.id = id
         self.title = title
         self.createdAt = createdAt
@@ -33,13 +37,25 @@ public struct GuardianChatSummary: Sendable, Hashable {
         self.model = model
         self.sharedBy = sharedBy
         self.person = person
+        self.importSource = importSource
+        self.externalID = externalID
+    }
+
+    /// The key this conversation has where it came from, when Guardian imported it: "claude-code:<session id>", or
+    /// "vision:<chat id>" for a Vision chat (sent with Send to Guardian, then opened in Guardian) — so a chat this
+    /// Mac already has, imported directly or made here, isn't offered again through Guardian.
+    public var originKey: String? {
+        guard let source = importSource?.trimmingCharacters(in: .whitespaces).lowercased(), !source.isEmpty,
+              let external = externalID, !external.isEmpty else { return nil }
+        if source == "vision" || source.hasPrefix("vision-") { return ChatImportKey.make(.vision, external) }
+        return ChatImportKey.make(source, external)
     }
 
     public var candidate: ChatImportCandidate {
         let detail: String? = sharedBy.map { "Shared with you by \($0)" } ?? person.map { "With \($0)" }
         return ChatImportCandidate(source: .guardian, sourceID: id, title: title, createdAt: createdAt,
                                    updatedAt: updatedAt, messageCount: nil, detail: detail,
-                                   location: .guardianChat(id))
+                                   location: .guardianChat(id), alsoKnownAs: originKey.map { [$0] })
     }
 }
 
@@ -58,7 +74,8 @@ public enum GuardianChatImport {
                 createdAt: ImportDates.any(chat["createdAt"]), updatedAt: ImportDates.any(chat["updatedAt"]) ?? .now,
                 model: chat["modelId"] as? String,
                 sharedBy: shared ? (owner?["name"] as? String ?? owner?["email"] as? String ?? "someone") : nil,
-                person: person?["displayName"] as? String)
+                person: person?["displayName"] as? String,
+                importSource: chat["importSource"] as? String, externalID: chat["externalId"] as? String)
         }
     }
 

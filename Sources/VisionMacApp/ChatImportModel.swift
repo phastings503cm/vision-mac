@@ -109,8 +109,9 @@ final class ChatImportModel {
             guard let self else { return }
             switch outcome {
             case .success(let scan):
-                for (key, chat) in scan.loaded { self.loaded[key] = chat }
-                self.merge(scan.candidates)
+                // A chat already listed from a fuller copy keeps that copy (and the chat read with it).
+                let taken = self.merge(scan.candidates)
+                for (key, chat) in scan.loaded where taken.contains(key) { self.loaded[key] = chat }
                 self.problems += scan.problems
                 if let source = scan.candidates.first?.source { self.states[source] = .ready(self.count(source)) }
                 // What a file holds is what the person came for: tick its new chats.
@@ -124,17 +125,29 @@ final class ChatImportModel {
 
     private func take(_ scan: ChatImportScan, for source: ChatSource) {
         candidates.removeAll { $0.source == source || (source == .guardian && $0.location.isGuardian) }
-        for (key, chat) in scan.loaded { loaded[key] = chat }
-        merge(scan.candidates)
+        let taken = merge(scan.candidates)
+        for (key, chat) in scan.loaded where taken.contains(key) { loaded[key] = chat }
         problems += scan.problems.prefix(5)
         states[source] = scan.candidates.isEmpty && !scan.problems.isEmpty
             ? .failed(scan.problems.first ?? "") : .ready(scan.candidates.count)
     }
 
-    private func merge(_ found: [ChatImportCandidate]) {
-        var byID = Dictionary(candidates.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        for candidate in found { byID[candidate.id] = candidate }
-        candidates = byID.values.sorted { $0.updatedAt > $1.updatedAt }
+    /// Add what a look found. One line per chat: when an id is already listed (or repeats in `found`), the fuller
+    /// copy stays — the one used last, then the longer — never simply the last one seen. Returns the ids whose line
+    /// came from `found`.
+    @discardableResult
+    func merge(_ found: [ChatImportCandidate]) -> Set<String> {
+        var byID = Dictionary(candidates.map { ($0.id, $0) }, uniquingKeysWith: { first, second in
+            second.isFuller(than: first) ? second : first
+        })
+        var taken = Set<String>()
+        for candidate in found {
+            if let held = byID[candidate.id], !candidate.isFuller(than: held) { continue }
+            byID[candidate.id] = candidate
+            taken.insert(candidate.id)
+        }
+        candidates = byID.values.sorted { $0.updatedAt != $1.updatedAt ? $0.updatedAt > $1.updatedAt : $0.id < $1.id }
+        return taken
     }
 
     func count(_ source: ChatSource) -> Int { candidates.filter { $0.source == source }.count }
@@ -178,7 +191,11 @@ final class ChatImportModel {
     // MARK: Importing
 
     func importPicked() {
-        let chosen = candidates.filter { picked.contains($0.id) && !isImported($0) }
+        var chosen = candidates.filter { picked.contains($0.id) && !isImported($0) }
+        // The same conversation ticked twice — a Claude Code session and the copy Guardian imported of it — comes in
+        // once, from the source itself.
+        let ids = Set(chosen.map(\.id))
+        chosen.removeAll { ($0.alsoKnownAs ?? []).contains(where: ids.contains) }
         guard !chosen.isEmpty, !importing else { return }
         importing = true
         result = nil

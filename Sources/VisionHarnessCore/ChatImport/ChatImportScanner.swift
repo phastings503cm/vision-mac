@@ -84,10 +84,14 @@ public struct ChatImportScanner: Sendable {
         switch source {
         case .claudeCode:
             let files = ClaudeCodeChats.sessionFiles(root: ClaudeCodeChats.root(home: home, environment: environment))
-            return previewFiles(files, cache: &cache, seen: &seen, progress: progress) { file in
+            var scan = previewFiles(files, cache: &cache, seen: &seen, progress: progress) { file in
                 guard let chat = try ClaudeCodeChats.read(file, preview: true) else { return nil }
                 return ChatImportCandidate(chat, location: .file(file), detail: Self.claudeCodeDetail(chat))
             }
+            // A session continued in a worktree is copied into the worktree's project folder too: one session id,
+            // two files. Offer the fuller one (the other would block it, sharing its key, once imported).
+            scan.candidates = ChatImportCandidate.onePerID(scan.candidates)
+            return scan
         case .codex:
             let codexHome = CodexChats.home(home: home, environment: environment)
             let names = CodexChats.threadNames(codexHome: codexHome)
@@ -99,6 +103,8 @@ public struct ChatImportScanner: Sendable {
             for index in scan.candidates.indices {
                 if let name = names[scan.candidates[index].sourceID] { scan.candidates[index].title = name }
             }
+            // A rollout in both sessions/ and archived_sessions/ is offered once.
+            scan.candidates = ChatImportCandidate.onePerID(scan.candidates)
             return scan
         case .openClaw:
             return scanOpenClaw(cache: &cache, seen: &seen, progress: progress)

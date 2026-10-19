@@ -484,7 +484,8 @@ chats and the Vision chats your account keeps there. The list shows each chat's 
 count; tick some or all. Every message keeps its time, tool calls come in as tool cards, and a chat whose folder
 exists on this Mac opens in that project. A model never replays another tool's calls: they reach it as a written
 summary, so a Claude Code session can continue on Qwen, Bedrock or Guardian. Importing again brings only what is
-new (scheduled and scripted runs are hidden unless you ask). Reading changes nothing; nothing leaves the Mac except
+new (scheduled and scripted runs are hidden unless you ask; a session Claude Code copied into a worktree's folder is
+offered once, the fuller copy). Reading changes nothing; nothing leaves the Mac except
 the calls to your signed-in Guardian. The first look at a long Claude Code history takes a few seconds; later ones
 read only what changed.
 
@@ -678,7 +679,7 @@ Guardian (guardian.503cm.com) is the account side of the family — models, prom
 | Prompt history | harness → Guardian | automatically, as you send prompts while signed in, and again with the outcome when each ends — masked first (your vault's secrets always, and what the sensitive-data shield masks); **Send my prompts to the notebook** in Settings ▸ Guardian turns it off |
 | Prompt history | Guardian → harness | Settings ▸ Guardian browses the account's notebook |
 | Skills | both ways | import the account's skills; deposit the project's `.vision/skills` |
-| Chats | both ways | export all chats, or one with **Send Chat to Guardian**; **Import Chats** brings back the account's kept chats and your Guardian chats (read a page at a time) |
+| Chats | both ways | export all chats, or one with **Send Chat to Guardian**; **Import Chats** brings back the account's kept chats and your Guardian chats (read a page at a time; a chat Guardian imported from something this Mac already has shows as imported) |
 | Code projects | both ways | upload the open project's text files to the account's private repo store — Guardian's own github-for-one, ready for the AI Coders module — never `.env` files, keys or certificates; download one back |
 
 **Estimates across users**: the turn-phase ETA cache that Vision keeps per machine (`eta-cache.json`) has a multitenant big sibling in Guardian, which aggregates durations per task kind and scope across its users — the client sends nothing but the kind, the scope number and the wall-clock.

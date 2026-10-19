@@ -40,10 +40,20 @@ extension AppTransport {
     /// The (source, id) keys of the chats imported here.
     func importedKeys() -> Set<String> { log.importedKeys() }
 
-    /// Whether a previewed chat is already here: imported before, or a Vision chat with this id.
+    /// Whether a previewed chat is already here: imported before, or a Vision chat with this id — under its own key
+    /// or one it is also known by (a Guardian chat Guardian imported from Claude Code, or from a Vision chat).
     func isAlreadyImported(_ candidate: ChatImportCandidate, keys: Set<String>? = nil) -> Bool {
-        if (keys ?? importedKeys()).contains(candidate.id) { return true }
+        let keys = keys ?? importedKeys()
+        if keys.contains(candidate.id) { return true }
         if let id = candidate.preferredID, sessions.contains(where: { $0.id == id }) { return true }
+        for alias in candidate.alsoKnownAs ?? [] {
+            if keys.contains(alias) { return true }
+            let visionPrefix = ChatImportKey.make(.vision, "")
+            if alias.hasPrefix(visionPrefix) {
+                let id = String(alias.dropFirst(visionPrefix.count))
+                if sessions.contains(where: { $0.id == id }) { return true }
+            }
+        }
         return false
     }
 

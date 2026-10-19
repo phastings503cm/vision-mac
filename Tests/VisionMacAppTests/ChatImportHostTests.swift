@@ -233,6 +233,21 @@ final class ChatImportHostTests: XCTestCase {
         XCTAssertEqual(legacy.id, id)
         XCTAssertEqual(legacy.rows.map(\.kind), ["notice", "user", "tool", "assistant"])
         XCTAssertEqual(legacy.rows[1].at, t0)
+
+    }
+
+    func testAGuardianChatGuardianImportedFromSomethingAlreadyHereShowsAsImported() throws {
+        let imported = try XCTUnwrap(transport.importChats([claudeCodeChat()]).imported.first)
+        let local = transport.newSession(cwd: nil)
+        func guardianChat(_ source: String, _ external: String) -> ChatImportCandidate {
+            GuardianChatSummary(id: "g-\(external)", title: "t", updatedAt: t0, importSource: source, externalID: external).candidate
+        }
+        XCTAssertTrue(transport.isAlreadyImported(guardianChat("claude-code", "s1")), "the Claude Code session imported here")
+        XCTAssertTrue(transport.isAlreadyImported(guardianChat("vision-mac", local.id)), "a chat made here, sent, then opened in Guardian")
+        XCTAssertTrue(transport.isAlreadyImported(guardianChat("vision-windows", imported)))
+        XCTAssertFalse(transport.isAlreadyImported(guardianChat("claude-code", "s9")))
+        XCTAssertFalse(transport.isAlreadyImported(guardianChat("vision", "gone-chat")))
+        XCTAssertFalse(transport.isAlreadyImported(GuardianChatSummary(id: "g", title: "t", updatedAt: t0).candidate))
     }
 
     // MARK: Search
@@ -283,6 +298,23 @@ final class ChatImportHostTests: XCTestCase {
 
     // MARK: The sheet's model
 
+    func testTheSheetKeepsTheFullerCopyWhenAnIDRepeats() {
+        let model = ChatImportModel(transport: transport, guardian: nil,
+                                    scanner: ChatImportScanner(home: dir, environment: [:], cacheFolder: nil))
+        let stale = ChatImportCandidate(source: .claudeCode, sourceID: "s", title: "t", updatedAt: t0, messageCount: 857,
+                                        location: .file(dir.appendingPathComponent("worktree/s.jsonl")))
+        var full = stale
+        full.updatedAt = t0.addingTimeInterval(900)
+        full.messageCount = 876
+        full.location = .file(dir.appendingPathComponent("main/s.jsonl"))
+        XCTAssertEqual(model.merge([full, stale]), [full.id])
+        XCTAssertEqual(model.candidates, [full], "newest first in, older second: the older one doesn't replace it")
+        XCTAssertEqual(model.merge([stale]), [], "nor does it later")
+        XCTAssertEqual(model.candidates, [full])
+        model.merge([ChatImportCandidate(source: .codex, sourceID: "c", title: "c", updatedAt: t0, messageCount: 1, location: .loaded)])
+        XCTAssertEqual(model.candidates.map(\.messageCount), [876, 1])
+    }
+
     func testTheImportSheetOffersWhatIsNewAndImportsWhatWasTicked() async throws {
         let session = [
             #"{"type":"user","isSidechain":false,"message":{"role":"user","content":"Deploy the site"},"timestamp":"2026-10-01T10:00:00.000Z","cwd":"/nowhere","sessionId":"cc-1","entrypoint":"claude-desktop"}"#,
@@ -310,11 +342,16 @@ final class ChatImportHostTests: XCTestCase {
         model.filter = ""
         model.showAutomated = false
 
+        // The same session as Guardian imported it: ticked with it, it comes in once, from Claude Code itself.
+        let viaGuardian = GuardianChatSummary(id: "g-cc-1", title: "Deploy the site", updatedAt: t0,
+                                              importSource: "claude-code", externalID: "cc-1").candidate
+        model.merge([viaGuardian])
         model.selectAllShown()
-        XCTAssertEqual(model.pickedCount, 1)
+        XCTAssertEqual(model.pickedCount, 2)
         model.importPicked()
         try await waitUntil { !model.importing && model.result != nil }
-        XCTAssertEqual(model.result, "Imported 1 chat (2 messages).")
+        XCTAssertEqual(model.result, "Imported 1 chat (2 messages).", "the Guardian copy wasn't fetched (no Guardian here) or imported")
+        XCTAssertTrue(model.isImported(viaGuardian))
         XCTAssertTrue(transport.sessions.contains { $0.title == "Deploy the site" && $0.importSource == .claudeCode })
         let first = try XCTUnwrap(model.visible.first)
         XCTAssertTrue(model.isImported(first), "shown as imported; it can't be ticked again")

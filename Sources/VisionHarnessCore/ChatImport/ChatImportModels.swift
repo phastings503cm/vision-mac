@@ -148,10 +148,14 @@ public struct ChatImportCandidate: Identifiable, Hashable, Sendable, Codable {
     public var location: ChatImportLocation
     /// A Vision chat's own id (it keeps it on import).
     public var preferredID: String?
+    /// The same conversation under other keys: a Guardian chat that Guardian itself imported says where from
+    /// (`importSource` + `externalId` → "claude-code:<session>", or "vision:<chat id>" for a Vision chat sent there).
+    /// Already here when any of them is.
+    public var alsoKnownAs: [String]?
 
     public init(source: ChatSource, sourceID: String, title: String, createdAt: Date? = nil, updatedAt: Date,
                 messageCount: Int?, cwd: String? = nil, automated: Bool = false, detail: String? = nil,
-                location: ChatImportLocation, preferredID: String? = nil) {
+                location: ChatImportLocation, preferredID: String? = nil, alsoKnownAs: [String]? = nil) {
         self.source = source
         self.sourceID = sourceID
         self.title = title
@@ -163,9 +167,30 @@ public struct ChatImportCandidate: Identifiable, Hashable, Sendable, Codable {
         self.detail = detail
         self.location = location
         self.preferredID = preferredID
+        self.alsoKnownAs = alsoKnownAs
     }
 
     public var id: String { ChatImportKey.make(source, sourceID) }
+
+    /// Which of two copies of one conversation to offer (a Claude Code session copied into a worktree's project
+    /// folder, a chat in two export files): the one used last, then the longer one. Exact ties go to the location
+    /// that sorts first, so a scan always picks the same file.
+    public func isFuller(than other: ChatImportCandidate) -> Bool {
+        if updatedAt != other.updatedAt { return updatedAt > other.updatedAt }
+        let mine = messageCount ?? -1, theirs = other.messageCount ?? -1
+        if mine != theirs { return mine > theirs }
+        return String(describing: location) < String(describing: other.location)
+    }
+
+    /// One candidate per id — the fuller copy — newest first.
+    public static func onePerID(_ candidates: [ChatImportCandidate]) -> [ChatImportCandidate] {
+        var byID: [String: ChatImportCandidate] = [:]
+        for candidate in candidates {
+            if let held = byID[candidate.id], !candidate.isFuller(than: held) { continue }
+            byID[candidate.id] = candidate
+        }
+        return byID.values.sorted { $0.updatedAt != $1.updatedAt ? $0.updatedAt > $1.updatedAt : $0.id < $1.id }
+    }
 
     public init(_ chat: ImportedChat, location: ChatImportLocation, detail: String? = nil) {
         self.init(source: chat.source, sourceID: chat.sourceID, title: chat.title, createdAt: chat.createdAt,

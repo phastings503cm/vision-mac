@@ -482,6 +482,18 @@ final class ChatImportTests: XCTestCase {
         XCTAssertEqual(wire.requests.count, 1)
     }
 
+    func testAGuardianChatThatGuardianImportedSaysWhereFrom() throws {
+        let list = GuardianChatImport.summaries(Data(#"""
+        {"chats":[{"id":"g1","title":"Login fixes","updatedAt":"2026-10-02T10:00:00Z","importSource":"claude-code","externalId":"5b1c9a1e"},
+                  {"id":"g2","title":"Kept","updatedAt":"2026-10-03T10:00:00Z","importSource":"vision-mac","externalId":"AB12-cd34"},
+                  {"id":"g3","title":"Mine","updatedAt":"2026-10-04T10:00:00Z","importSource":null,"externalId":null}]}
+        """#.utf8))
+        XCTAssertEqual(list.map(\.candidate.alsoKnownAs), [["claude-code:5b1c9a1e"], ["vision:AB12-cd34"], nil])
+        XCTAssertEqual(list.map(\.candidate.id), ["guardian:g1", "guardian:g2", "guardian:g3"], "still fetched by its Guardian id")
+        XCTAssertEqual(GuardianChatSummary(id: "g", title: "t", updatedAt: .now, importSource: "vision-windows", externalID: "w1").originKey,
+                       "vision:w1")
+    }
+
     // MARK: The scanner and its cache
 
     func testTheScannerRemembersFilesItHasReadAndPicksUpNewOnes() throws {
@@ -535,6 +547,43 @@ final class ChatImportTests: XCTestCase {
         XCTAssertNotNil(try scanner.read(live))
         let cron = try XCTUnwrap(scan.candidates.first { $0.sourceID.hasPrefix("9a9a") })
         XCTAssertNotNil(try scanner.read(cron))
+    }
+
+    func testOneClaudeCodeSessionInTwoProjectFoldersIsOfferedOnceTheFullerCopy() throws {
+        // A session continued in a worktree: Claude Code copies it into the worktree's project folder, and the copy
+        // left behind stops growing. Both files hold one session id.
+        func line(_ type: String, _ text: String, _ at: String) -> String {
+            let message = type == "user" ? #"{"role":"user","content":"\#(text)"}"#
+                : #"{"model":"m","role":"assistant","content":[{"type":"text","text":"\#(text)"}]}"#
+            return #"{"type":"\#(type)","isSidechain":false,"message":\#(message),"timestamp":"\#(at)","cwd":"/Users/pat/code/demo","sessionId":"dup-1"}"#
+        }
+        let early = [line("user", "Fix the build", "2026-09-22T22:00:00.000Z"), line("assistant", "Fixed.", "2026-09-22T22:01:00.000Z")]
+        let late = early + [line("user", "Now the tests", "2026-09-22T23:10:00.000Z"), line("assistant", "Green.", "2026-09-22T23:15:00.000Z")]
+        let full = try write(late.joined(separator: "\n"), to: ".claude/projects/-Users-pat-code-demo/dup-1.jsonl")
+        let stale = try write(early.joined(separator: "\n"),
+                              to: ".claude/projects/-Users-pat-code-demo--claude-worktrees-x/dup-1.jsonl")
+        let scanner = ChatImportScanner(home: dir, environment: [:], cacheFolder: dir.appendingPathComponent("cache"))
+        for pass in ["cold", "cached"] {
+            let scan = scanner.scan(.claudeCode)
+            XCTAssertEqual(scan.candidates.count, 1, "\(pass): one session id, one line")
+            let offered = try XCTUnwrap(scan.candidates.first)
+            guard case .file(let offeredFile) = offered.location else { return XCTFail("\(pass): a file") }
+            XCTAssertEqual(offeredFile.resolvingSymlinksInPath().path, full.resolvingSymlinksInPath().path,
+                           "\(pass): the copy used last, not \(stale.deletingLastPathComponent().lastPathComponent)'s")
+            XCTAssertEqual(offered.messageCount, 4)
+            XCTAssertEqual(try scanner.read(offered)?.messageCount, 4)
+        }
+
+        // Same last use: the longer copy; same everything: always the same one.
+        let a = ChatImportCandidate(source: .claudeCode, sourceID: "s", title: "t", updatedAt: iso("2026-09-22T23:15:00Z"),
+                                    messageCount: 4, location: .file(stale))
+        var b = a
+        b.messageCount = 9
+        b.location = .file(full)
+        XCTAssertEqual(ChatImportCandidate.onePerID([b, a]).map(\.messageCount), [9])
+        XCTAssertEqual(ChatImportCandidate.onePerID([a, b]).map(\.messageCount), [9])
+        b.messageCount = 4
+        XCTAssertEqual(ChatImportCandidate.onePerID([a, b]), ChatImportCandidate.onePerID([b, a]))
     }
 
     // MARK: Search
