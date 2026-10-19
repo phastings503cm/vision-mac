@@ -18,7 +18,9 @@ import VisionHarnessCore
 // permission, and fall back to drawing the window's views (`cacheDisplay`).
 //
 //   --snapshot <folder>         where the PNGs go (or VISION_SNAPSHOT_DIR)
-//   --snapshot-scenes a,b       only these scenes (chat, code, setup, settings-models)
+//   --snapshot-scenes a,b       only these scenes (chat, code, setup, settings-models; and, only when named,
+//                               long-chat and long-chat-top — a 2,000-row chat opened, then scrolled to its
+//                               first row, measured into long-chat-measurements.txt)
 //   --snapshot-live <profile>   run the chat for real first, on Amazon Bedrock with this AWS profile, and save what
 //                               happened as chat-transcript.json (the seeded chat is made from such a run)
 //   --snapshot-region <region>  the live run's Region (default us-west-2)
@@ -29,6 +31,15 @@ enum Snapshot {
     enum Scene: String, CaseIterable, Sendable {
         case chat, code, setup
         case models = "settings-models"
+        /// A 2,000-row chat with a 10,000-line prompt, opened and measured (`SnapshotLongChat`).
+        case longChat = "long-chat"
+        /// The long chat scrolled from the bottom to its first row, a screenful at a time, measured.
+        case longChatTop = "long-chat-top"
+
+        /// What a plain `--snapshot` run takes (the README's pictures).
+        static let standard: [Scene] = [.chat, .code, .setup, .models]
+        /// The long chat's scenes, each run only when named.
+        var isLongChat: Bool { rawValue.hasPrefix("long-chat") }
     }
 
     struct Live: Equatable, Sendable {
@@ -39,7 +50,7 @@ enum Snapshot {
 
     struct Options: Equatable, Sendable {
         var output: URL
-        var scenes: [Scene] = Scene.allCases
+        var scenes: [Scene] = Scene.standard
         var live: Live?
     }
 
@@ -90,7 +101,7 @@ enum Snapshot {
         if let region, live != nil { live?.region = region }
         if let model, live != nil { live?.model = model }
         let folder = URL(fileURLWithPath: (output as NSString).expandingTildeInPath, isDirectory: true)
-        return Options(output: folder.standardizedFileURL, scenes: scenes?.isEmpty == false ? scenes! : Scene.allCases,
+        return Options(output: folder.standardizedFileURL, scenes: scenes?.isEmpty == false ? scenes! : Scene.standard,
                        live: live)
     }
 
@@ -162,6 +173,7 @@ enum Snapshot {
         unsetenv("HISTFILE")
 
         SnapshotSeed.install(home: home, live: options.live)
+        if options.scenes.contains(where: \.isLongChat) { SnapshotLongChat.install() }
     }
 
     /// The run is over (or the app is quitting early): the throwaway folder goes, and so does anything AppKit added
@@ -286,6 +298,8 @@ enum Snapshot {
             model.mode = .chat
             model.settingsTab = .models
             model.showSettings = true
+        case .longChat, .longChatTop:
+            await SnapshotLongChat.stage(scene, model, window: window, output: options?.output ?? FileManager.default.temporaryDirectory)
         }
     }
 
@@ -304,7 +318,7 @@ enum Snapshot {
         case .code:
             model.mode = .chat
             setSidebarCollapsed(false, in: window)
-        case .chat: break
+        case .chat, .longChat, .longChatTop: break
         }
     }
 

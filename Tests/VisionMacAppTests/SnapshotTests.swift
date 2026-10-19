@@ -20,7 +20,9 @@ final class SnapshotTests: XCTestCase {
     func testTheCommandLineNamesTheFolderScenesAndLiveRun() throws {
         let plain = try XCTUnwrap(Snapshot.options(arguments: ["Vision", "--snapshot", "/tmp/shots"], environment: [:]))
         XCTAssertEqual(plain.output.path, "/tmp/shots")
-        XCTAssertEqual(plain.scenes, Snapshot.Scene.allCases)
+        XCTAssertEqual(plain.scenes, Snapshot.Scene.standard)
+        XCTAssertEqual(Snapshot.options(arguments: ["Vision", "--snapshot", "/tmp/s", "--snapshot-scenes", "long-chat"],
+                                        environment: [:])?.scenes, [.longChat])
         XCTAssertNil(plain.live)
 
         let some = try XCTUnwrap(Snapshot.options(
