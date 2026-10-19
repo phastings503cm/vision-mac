@@ -80,7 +80,8 @@ public struct AgentTool: ToolExecutor {
         guard let definition = types.find(typeName) else {
             return ToolResult(output: "Error: unknown agent_type '\(typeName ?? "")'. Available: \(types.describe()).")
         }
-        let sensitive = JSONArgs.bool(args, "sensitive", default: false)
+        // A Sensitive chat with the shield off keeps every subagent on a private server.
+        let sensitive = JSONArgs.bool(args, "sensitive", default: false) || context.privateSubagentsOnly
         let step = Self.stepArgument(JSONArgs.dictionary(args)["step"])
 
         if JSONArgs.bool(args, "run_in_background", default: false) {

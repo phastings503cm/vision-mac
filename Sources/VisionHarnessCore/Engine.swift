@@ -161,6 +161,8 @@ public struct EngineConfig: Sendable {
     public var depth: Int = 0
     /// Unattended work (a queue task, `/goal`): handed to the tools as `ToolContext.unattended`.
     public var unattended = false
+    /// A Sensitive chat with the shield off: subagents run only on private servers (`ToolContext.privateSubagentsOnly`).
+    public var privateSubagentsOnly = false
 
     public init(maxIterations: Int = 30, toolTimeout: TimeInterval = 300,
                 model: String, temperature: Double? = nil, maxOutputTokens: Int? = nil,
@@ -319,7 +321,7 @@ public struct Engine: Sendable {
 
         // What a tool may touch while it runs — with the route as it stands now (a retry may have moved it).
         func makeContext() -> ToolContext {
-            ToolContext(workspace: workspace, policy: policy,
+            var context = ToolContext(workspace: workspace, policy: policy,
                         client: client, registry: registry,
                         depth: config.depth, model: model,
                         contextWindow: config.contextWindow,
@@ -332,6 +334,8 @@ public struct Engine: Sendable {
                         temperature: config.temperature, maxOutputTokens: config.maxOutputTokens,
                         unattended: config.unattended, fleetHome: fleetHome, machine: machineSeat,
                         computerGrants: computerGrants)
+            context.privateSubagentsOnly = config.privateSubagentsOnly
+            return context
         }
 
         for iteration in 0..<config.maxIterations {
