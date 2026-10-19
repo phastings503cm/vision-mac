@@ -2,9 +2,10 @@ import SwiftUI
 import VisionHarnessCore
 
 /// Settings › AI Models: the roster. Every route — your own boxes, subscription plans, Amazon Bedrock, any
-/// OpenAI-compatible server — with a switch to turn it on or off, its role (the *primary* you talk to, which hands
-/// out side tasks; *subagent* servers that take them in parallel; *backups* that take over when the primary stops
-/// answering) and whether it is *private* (may see sensitive data) or gets sensitive details masked.
+/// OpenAI-compatible server, Guardian, Claude Code — with a switch to turn it on or off, its role (the *primary* new
+/// chats start with; *subagent* servers that take any chat's side tasks in parallel — each chat's own model leads its
+/// own; *backups* that take over when the primary stops answering) and whether it is *private* (may see sensitive
+/// data) or gets sensitive details masked.
 struct ProviderSettings: View {
     @Environment(AppModel.self) private var model
     @State private var editing: ProviderProfile?
@@ -226,7 +227,8 @@ struct ProviderRoutesList: View {
                     }
                 }
             }
-            Text("Primary answers you. Subagents take side tasks in parallel. Backups take over if the primary stops answering. Private models may see sensitive data; the others get it masked.")
+            GuardianSubagentRows(report: report)
+            Text("Primary is the model new chats start with; each chat's own model leads its own subagents. Subagents take side tasks in parallel. Backups take over if the primary stops answering. Private models may see sensitive data; the others get it masked.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             SensitiveDataSection()
@@ -251,41 +253,35 @@ struct ProviderRoutesList: View {
 
 // MARK: - The fleet at a glance
 
-/// Who leads and who helps, drawn as a line of chips, with the one switch that applies to the whole
-/// fleet. Hidden with a single route (there is nothing to arrange).
+/// Who helps, drawn as a line of chips, with the one switch that applies to every chat's subagents. Hidden with a
+/// single route (there is nothing to arrange).
 struct FleetCard: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
         let config = model.config
-        if let main = config.mainRoute, config.providers.count > 1 {
-            let workers = model.transport.workerRoutes
+        if let main = config.mainRoute, config.providers.count + config.guardianModelRoutes.count > 1 {
+            let enlisted = config.enlistedRoutes
             let backups = config.backupRoutes
             VStack(alignment: .leading, spacing: 10) {
-                if workers.isEmpty {
+                if enlisted.isEmpty {
                     Label("Several models? Put them all to work", systemImage: "point.3.connected.trianglepath.dotted")
                         .font(.callout.weight(.semibold))
-                    Text("\(AppTransport.routeLabel(main)) is the primary. Tick “Subagent” for another model — a second DGX Spark, or Amazon Bedrock — and the primary hands side tasks to it, so they run in parallel instead of queueing.")
+                    Text(Self.emptyText)
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 } else {
-                    Label("\(AppTransport.routeLabel(main)) leads · subagents run on \(workers.count == 1 ? "1 other model" : "\(workers.count) other models")",
-                          systemImage: "point.3.connected.trianglepath.dotted")
+                    Label("Each chat's own model leads · subagents can run on:", systemImage: "point.3.connected.trianglepath.dotted")
                         .font(.callout.weight(.semibold))
-                    HStack(alignment: .center, spacing: 8) {
-                        chip(AppTransport.routeLabel(main), systemImage: "crown.fill", filled: true)
-                        Image(systemName: "arrow.right").foregroundStyle(.secondary)
-                        ForEach(workers, id: \.routeID) { worker in
-                            chip("\(AppTransport.routeLabel(worker)) · \(worker.subagentParallel ?? 2) at a time",
-                                 systemImage: "gearshape.2", filled: false)
-                        }
-                    }
-                    Toggle("When those are all busy, let subagents use the primary too",
+                    FlowChips(items: enlisted.map { "\(AppTransport.routeLabel($0)) · \($0.subagentParallel ?? 2) at a time" })
+                    Toggle("When those are all busy, let subagents use the chat's own model too",
                            isOn: Binding(get: { config.subagentsUsePrimary },
                                          set: { config.subagentsUsePrimary = $0 }))
                         .toggleStyle(.checkbox)
                         .font(.caption)
-                    if workers.contains(where: { $0.kind == .bedrock }) {
+                    Text("A chat on Claude Code uses Claude Code's own subagents.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if enlisted.contains(where: { $0.kind == .bedrock }) {
                         Label("Subagent tasks sent to Amazon Bedrock are billed to your AWS account.", systemImage: "creditcard")
                             .font(.caption).foregroundStyle(.secondary)
                     }
@@ -303,12 +299,96 @@ struct FleetCard: View {
         }
     }
 
-    private func chip(_ text: String, systemImage: String, filled: Bool) -> some View {
-        Label(text, systemImage: systemImage)
-            .font(.system(size: 11, weight: .medium))
-            .padding(.horizontal, 9).padding(.vertical, 4)
-            .background(filled ? Color.accentColor.opacity(0.18) : Theme.surfaceStrong, in: Capsule())
-            .lineLimit(1)
+    static let emptyText = "Each chat's own model leads. Tick “Subagent” on other models — a second DGX Spark, Amazon Bedrock, Guardian, Claude Code — and a chat's model can hand side tasks to them, choosing one by name or letting Vision pick the least busy."
+}
+
+/// Chips that wrap onto more lines when there are many.
+private struct FlowChips: View {
+    let items: [String]
+
+    var body: some View {
+        // A grid of adaptive columns wraps without measuring anything.
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 8, alignment: .leading)], alignment: .leading, spacing: 6) {
+            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                Label(item, systemImage: "gearshape.2")
+                    .font(.system(size: 11, weight: .medium))
+                    .padding(.horizontal, 9).padding(.vertical, 4)
+                    .background(Theme.surfaceStrong, in: Capsule())
+                    .lineLimit(1)
+            }
+        }
+    }
+}
+
+/// Guardian's live models (while signed in), each with its own "Use for subagents" tick — they are never saved as
+/// routes, so their ticks live in the Guardian map. Primary keeps one as a route on the sign-in's token.
+struct GuardianSubagentRows: View {
+    @Environment(AppModel.self) private var model
+    let report: (ProviderSettings.StatusLine) -> Void
+
+    var body: some View {
+        let config = model.config
+        let routes = config.guardianModelRoutes
+        if config.guardianToken != nil, !routes.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Guardian").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    .padding(.horizontal, 12)
+                ForEach(routes, id: \.routeID) { route in
+                    HStack(spacing: 10) {
+                        Color.clear.frame(width: RosterColumn.on, height: 1)
+                        HStack(spacing: 6) {
+                            Image(systemName: ProviderProfile.Kind.guardian.icon).foregroundStyle(.secondary)
+                            Text(config.guardianMenuLabel(route.routeID)).font(.callout.weight(.semibold)).lineLimit(1)
+                            if route.isInteractiveOnly {
+                                Text("Interactive only").font(.system(size: 10, weight: .semibold))
+                                    .padding(.horizontal, 6).padding(.vertical, 2)
+                                    .background(Theme.surfaceStrong, in: Capsule())
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        Button {
+                            config.makeGuardianModelMain(route)
+                            model.transport.resetRouteCache()
+                            report(.init(text: "\(config.guardianMenuLabel(route.routeID)) is now the primary."))
+                        } label: {
+                            Image(systemName: "circle").foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .frame(width: RosterColumn.role)
+                        .help("Make this the primary (for new chats): it is kept as a route on your Guardian sign-in.")
+                        Toggle("Subagent", isOn: Binding(get: { route.isSubagentWorker },
+                                                         set: { config.setSubagentWorker(route.routeID, $0) }))
+                            .toggleStyle(.checkbox).labelsHidden()
+                            .frame(width: RosterColumn.role)
+                            .help(RouteRow.guardianHelp)
+                        Toggle("Backup", isOn: .constant(false))
+                            .toggleStyle(.checkbox).labelsHidden().disabled(true)
+                            .frame(width: RosterColumn.role)
+                            .help("Make it the primary or save it as a route to use it as a backup.")
+                        HStack(spacing: 4) {
+                            Image(systemName: "lock.fill").font(.system(size: 11)).foregroundStyle(Theme.successTint)
+                        }
+                        .frame(width: RosterColumn.privacy)
+                        .help("Private: Guardian is your organisation's own server.")
+                        if route.isSubagentWorker {
+                            Picker("", selection: Binding(
+                                get: { min(max(route.subagentParallel ?? 2, 1), 8) },
+                                set: { config.setSubagentParallel(route.routeID, $0) })) {
+                                ForEach(1...8, id: \.self) { Text("\($0)").tag($0) }
+                            }
+                            .labelsHidden().pickerStyle(.menu).controlSize(.small)
+                            .frame(width: RosterColumn.status + RosterColumn.actions)
+                            .help("How many subagents may work on this model at the same time")
+                        } else {
+                            Color.clear.frame(width: RosterColumn.status + RosterColumn.actions, height: 1)
+                        }
+                    }
+                    .padding(10)
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.corner))
+                    .overlay(RoundedRectangle(cornerRadius: Theme.corner).strokeBorder(Theme.hairline))
+                }
+            }
+        }
     }
 }
 
@@ -325,8 +405,15 @@ struct RouteRow: View {
 
     private var config: AppConfig { model.config }
     private var isMain: Bool { config.activeRoute == provider.routeID }
-    /// Effective worker: flagged, not the main model, and not the same machine as one already counted.
-    private var isEffectiveWorker: Bool { model.transport.workerRoutes.contains { $0.routeID == provider.routeID } }
+    /// An enlisted route earlier in the list on the same machine: a chat uses only the first of them.
+    private var sameMachine: ProviderProfile? {
+        let machine = AppConfig.machineOf(provider)
+        for route in config.enlistedRoutes {
+            if route.routeID == provider.routeID { return nil }
+            if AppConfig.machineOf(route) == machine { return route }
+        }
+        return nil
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -360,22 +447,20 @@ struct RouteRow: View {
                 }
                 .buttonStyle(.plain)
                 .frame(width: RosterColumn.role)
-                .help(isMain ? "The primary: it answers you" : "Make this the primary. The current one keeps helping as a subagent when a fleet is running.")
+                .help(isMain ? "The primary: new chats and projects start with it" : "Make this the primary (for new chats). No chat's model changes.")
 
                 Toggle("Subagent", isOn: Binding(get: { provider.isSubagentWorker },
                                                  set: { config.setSubagentWorker(provider.routeID, $0) }))
                     .toggleStyle(.checkbox).labelsHidden()
-                    .disabled(isMain || !provider.runsVisionEngine)
                     .frame(width: RosterColumn.role)
-                    .help(!provider.runsVisionEngine ? Self.ownAgentHelp
-                          : isMain ? "Takes effect when another model is the primary." : "Take side tasks from the primary, in parallel.")
+                    .help(Self.subagentHelp(provider))
 
                 Toggle("Backup", isOn: Binding(get: { provider.isBackup },
                                                set: { config.setBackup(provider.routeID, $0); model.transport.resetRouteCache() }))
                     .toggleStyle(.checkbox).labelsHidden()
                     .disabled(isMain || !provider.runsVisionEngine)
                     .frame(width: RosterColumn.role)
-                    .help(!provider.runsVisionEngine ? Self.ownAgentHelp
+                    .help(!provider.runsVisionEngine ? Self.noBackupHelp
                           : isMain ? "Takes effect when another model is the primary." : "Use if the primary fails: a turn the primary can't answer runs here.")
 
                 HStack(spacing: 4) {
@@ -447,13 +532,14 @@ struct RouteRow: View {
     /// Bedrock's model and sign-in.
     @ViewBuilder
     private var extras: some View {
-        let showsWorker = provider.isSubagentWorker && !isMain && provider.isEnabled && provider.runsVisionEngine
-        if provider.kind == .claudeCode {
-            Button("Claude Code Card…") { model.showClaudeCodeGuide(closing: true) }
-                .controlSize(.small)
-                .help("Is the claude command installed and signed in; add more Claude Code models.")
-        } else if showsWorker || provider.kind == .bedrock {
+        let showsWorker = provider.isSubagentWorker && provider.isEnabled
+        if showsWorker || provider.kind == .bedrock || provider.kind == .claudeCode {
             HStack(spacing: 8) {
+                if provider.kind == .claudeCode {
+                    Button("Claude Code Card…") { model.showClaudeCodeGuide(closing: true) }
+                        .controlSize(.small)
+                        .help("Is the claude command installed and signed in; add more Claude Code models.")
+                }
                 if showsWorker {
                     Text("Subagents at a time:").font(.caption).foregroundStyle(.secondary)
                     Picker("", selection: Binding(
@@ -466,8 +552,8 @@ struct RouteRow: View {
                     .frame(width: 56)
                     .controlSize(.small)
                     .help("How many subagents may work on this server at the same time")
-                    if !isEffectiveWorker {
-                        Text("· the same server as another subagent route, so not used")
+                    if let first = sameMachine {
+                        Text("· the same machine as \(AppTransport.routeLabel(first)): a chat uses only the first of them")
                             .font(.caption).foregroundStyle(.secondary)
                             .help("A self-hosted server runs one model at a time (a Spark swaps them); a second route on it would only queue behind the first.")
                     }
@@ -484,8 +570,20 @@ struct RouteRow: View {
         }
     }
 
-    /// Why a Claude Code route takes no subagent or backup role.
-    static let ownAgentHelp = "Claude Code runs its own agent (with its own subagents), so it is only ever a chat's model — not a subagent server or a backup."
+    /// What "Use for subagents" does on this route.
+    static func subagentHelp(_ route: ProviderProfile) -> String {
+        switch route.kind {
+        case .claudeCode: claudeCodeHelp
+        case .guardian: guardianHelp
+        default: generalHelp
+        }
+    }
+
+    static let generalHelp = "Use for subagents: chats on other models can hand side tasks to this one. A chat never uses its own model's machine as a subagent server."
+    static let claudeCodeHelp = "Use for subagents: each task runs as one claude -p job in the chat's folder, on your Claude plan. Never for Sensitive chats."
+    static let guardianHelp = "Use for subagents: billed to your organisation's Guardian account; needs you signed in to Guardian."
+    /// Why a Claude Code route takes no backup role.
+    static let noBackupHelp = "Claude Code runs its own agent, so it can't take over a turn of Vision's own engine as a backup."
 
     private var statusColor: Color {
         switch result?.tone {

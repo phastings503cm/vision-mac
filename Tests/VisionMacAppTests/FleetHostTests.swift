@@ -101,7 +101,7 @@ final class FleetHostTests: XCTestCase {
         let subagentRequests = FakeModelServer.seen.filter { $0.lastUser == "count the files" }
         XCTAssertEqual(subagentRequests.map(\.host), ["worker.test"], "the side task went to the other machine")
         XCTAssertFalse(hosts().filter { $0 == "main.test" }.isEmpty, "and the chat stayed on the main one")
-        XCTAssertTrue(results.contains { $0.contains("Subagent 'scan' finished") && $0.contains("on Worker") }, "\(results)")
+        XCTAssertTrue(results.contains { $0.contains("Subagent 'scan' finished") && $0.contains("on worker") }, "the report names the server by its handle: \(results)")
     }
 
     func testWithoutAWorkerTheSubagentSharesTheMainServerAndTheReportDoesNotNameOne() async throws {
@@ -124,7 +124,7 @@ final class FleetHostTests: XCTestCase {
         XCTAssertTrue(hosts().contains("worker.test"), "it tried the worker first")
         XCTAssertTrue(FakeModelServer.seen.contains { $0.host == "main.test" && $0.lastUser == "count the files" },
                       "and then did the work on the main server")
-        XCTAssertTrue(results.contains { $0.contains("Subagent 'scan' finished") && $0.contains("on Main") && $0.contains("1 server failure") },
+        XCTAssertTrue(results.contains { $0.contains("Subagent 'scan' finished") && $0.contains("on primary") && $0.contains("1 server failure") },
                       "the report says where it ran and that a server failed on the way: \(results)")
         let fleet = transport.fleet.snapshot()
         XCTAssertEqual(fleet.first { $0.label == "Worker" }?.healthy, false, "the dead worker is skipped for a while")
@@ -176,46 +176,53 @@ final class FleetHostTests: XCTestCase {
         XCTAssertTrue(AppTransport.workerNeedsModelList(unnamed), "with no model named there is nothing to trust")
     }
 
-    func testMakingAnotherRouteMainSendsTheChatThere() async throws {
+    func testMakingAnotherRouteThePrimarySendsANewChatThere() async throws {
         let t = makeTransport([route("Alpha", host: "alpha.test"), route("Beta", host: "beta.test", worker: true)])
         FakeModelServer.reset { _, _ in .text("hello") }
         t.config.makeMain(route("Beta", host: "beta.test").routeID)
         t.resetRouteCache()
         _ = try await ask("hi", until: "hello")
-        XCTAssertEqual(Set(hosts().filter { $0 != "" }), ["beta.test"], "the conductor is Beta now: \(hosts())")
-        XCTAssertEqual(t.workerRoutes.map(\.name), ["Alpha"], "Alpha kept helping")
-        let snapshot = t.fleet.snapshot()
-        XCTAssertEqual(snapshot.first { $0.isPrimary }?.label, "Beta")
-        XCTAssertEqual(snapshot.filter { !$0.isPrimary }.map(\.label), ["Alpha"])
+        XCTAssertEqual(Set(hosts().filter { $0 != "" }), ["beta.test"], "new chats start on Beta now: \(hosts())")
+        XCTAssertEqual(t.config.enlistedRoutes.map(\.name), ["Beta"], "no flag changed")
+        XCTAssertEqual(t.fleet.snapshot().map(\.label), ["Beta"])
     }
 
-    func testTheMainAgentIsToldWhichSubagentServersArePrivate() async throws {
+    /// The catalogue of subagent servers is in the agent tool's description — once, with what the primary needs to
+    /// choose — and no longer in the system prompt.
+    func testTheMainAgentIsToldAboutItsSubagentServersInTheAgentTool() async throws {
         var spark = route("Spark 2", host: "spark2.local", worker: true)
         spark.baseURL = "http://192.168.1.43:8002/v1"
         _ = makeTransport([route("Main", host: "main.test"), spark, route("Kimi Code", host: "kimi.test", worker: true)])
         FakeModelServer.reset { _, _ in .text("All done.") }
-        _ = try await ask("hi")
+        let (vm, _) = try await ask("hi")
         let system = try XCTUnwrap(FakeModelServer.seen.first?.messages.first { $0["role"] == "system" }?["content"])
-        XCTAssertTrue(system.contains("Subagent servers: Spark 2 (private), Kimi Code (not private)."), system)
-        XCTAssertTrue(system.contains("Servers that aren't private must not receive sensitive data."))
-        XCTAssertEqual(transport.fleet.servers.map(\.isPrivate), [false, true, false], "Main and Kimi Code are online services")
+        XCTAssertFalse(system.contains("--- Subagent servers ---"), "said once, in the tool")
+        let agent = try XCTUnwrap(transport.engines[vm.id]?.registry.specs.first { $0.name == "agent" })
+        XCTAssertTrue(agent.description.contains("\n\nSubagent servers — set `server` to one of these ids"), agent.description)
+        XCTAssertTrue(agent.description.contains("\n- spark-2: OpenAI-compatible server · stub-model ·"), agent.description)
+        XCTAssertTrue(agent.description.contains(" · private · local · "), agent.description)
+        XCTAssertTrue(agent.description.contains("\n- kimi-code: OpenAI-compatible server · stub-model ·"), agent.description)
+        XCTAssertTrue(agent.description.contains("\n- primary: this chat's own model (stub-model on Main) · used when the others are busy"))
+        XCTAssertTrue(agent.description.contains("Servers that aren't private must not receive sensitive data."))
+        XCTAssertEqual(transport.fleet.servers.map(\.isPrivate), [true, false], "Kimi Code is an online service")
     }
 
-    func testWithoutSubagentServersThereIsNoServerNote() async throws {
+    func testWithoutSubagentServersThereIsNoCatalogue() async throws {
         _ = makeTransport([route("Main", host: "main.test")])
         FakeModelServer.reset { _, _ in .text("All done.") }
-        _ = try await ask("hi")
-        let system = try XCTUnwrap(FakeModelServer.seen.first?.messages.first { $0["role"] == "system" }?["content"])
-        XCTAssertFalse(system.contains("Subagent servers:"))
+        let (vm, _) = try await ask("hi")
+        let agent = try XCTUnwrap(transport.engines[vm.id]?.registry.specs.first { $0.name == "agent" })
+        XCTAssertFalse(agent.description.contains("Subagent servers"))
     }
 
     func testTheFleetFollowsTheRoutesAsTheyChange() {
         let t = makeTransport([route("Main", host: "main.test"), route("Other", host: "other.test")])
-        XCTAssertEqual(t.fleet.snapshot().map(\.label), ["Main"], "a spare is not in the fleet")
+        XCTAssertTrue(t.fleet.snapshot().isEmpty, "nothing enlisted: subagents run on their chat's own model")
         t.config.setSubagentWorker(route("Other", host: "other.test").routeID, true)
         t.config.setSubagentParallel(route("Other", host: "other.test").routeID, 5)
-        XCTAssertEqual(t.fleet.snapshot().map(\.label), ["Main", "Other"])
+        XCTAssertEqual(t.fleet.snapshot().map(\.label), ["Other"])
         XCTAssertEqual(t.fleet.snapshot().last?.maxParallel, 5)
+        XCTAssertEqual(t.fleet.servers.first?.handle, "other")
         t.config.subagentsUsePrimary = false
         XCTAssertFalse(t.fleet.usePrimaryWhenWorkersBusy)
     }

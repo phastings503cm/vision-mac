@@ -208,35 +208,40 @@ private struct ActivityRow: View {
     }
 }
 
-/// The model servers and how busy each is.
+/// The subagent servers and how busy each is, then each chat model that has subagents on it right now.
 private struct ServersFooter: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
         let servers = model.transport.fleet.snapshot()
+        let enlisted = servers.filter { $0.role != "home" }
+        let homes = servers.filter { $0.role == "home" }
         VStack(alignment: .leading, spacing: 4) {
-            Text("Model servers").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            if servers.isEmpty {
-                Text("None configured.").font(.caption).foregroundStyle(.secondary)
-            }
-            ForEach(servers) { server in
-                HStack(spacing: 6) {
-                    Circle().fill(server.healthy ? Theme.successTint : Theme.errorTint).frame(width: 6, height: 6)
-                    Text(server.label).font(.caption.weight(.medium))
-                    Text(server.isPrimary ? "main model" : "subagents")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    Text("\(server.inFlight)/\(server.maxParallel) busy · \(server.completed) done"
-                         + (server.failed > 0 ? " · \(server.failed) failed" : "")
-                         + (server.healthy ? "" : " · not answering"))
-                        .font(.caption).monospacedDigit().foregroundStyle(.secondary)
-                }
-            }
-            if servers.count == 1 {
-                Text("Subagents share the main model. Turn on “Use for subagents” for another route in Settings ▸ AI Models to run them on other servers.")
+            Text("Subagent servers").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            if enlisted.isEmpty {
+                Text("None — subagents run on their chat's own model. Tick “Subagent” on other models in Settings ▸ AI Models to hand side tasks to them.")
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            ForEach(enlisted) { server in
+                row(server, role: "subagents",
+                    counts: "\(server.inFlight)/\(server.maxParallel) busy · \(server.completed) done"
+                        + (server.failed > 0 ? " · \(server.failed) failed" : "")
+                        + (server.healthy ? "" : " · not answering"))
+            }
+            ForEach(homes) { home in
+                row(home, role: "a chat's own model", counts: "\(home.inFlight)/\(home.maxParallel) busy")
+            }
+        }
+    }
+
+    private func row(_ server: FleetStatus, role: String, counts: String) -> some View {
+        HStack(spacing: 6) {
+            Circle().fill(server.healthy ? Theme.successTint : Theme.errorTint).frame(width: 6, height: 6)
+            Text(server.label).font(.caption.weight(.medium))
+            Text("— " + role).font(.caption).foregroundStyle(.secondary)
+            Spacer()
+            Text(counts).font(.caption).monospacedDigit().foregroundStyle(.secondary)
         }
     }
 }
@@ -263,7 +268,8 @@ struct AgentLogView: View {
                     Text("\(run.agentType) agent\(run.isBackground ? " · background" : "") · \(run.status.rawValue) · \(run.elapsed().formattedDuration)")
                         .font(.caption).foregroundStyle(.secondary)
                     if let placement = run.placementLabel {
-                        Label(placement, systemImage: "cpu").font(.callout).foregroundStyle(Color.accentColor)
+                        Label(placement + (SubagentPlacement.Reason.label(run.placementReason).map { " · \($0)" } ?? ""),
+                              systemImage: "cpu").font(.callout).foregroundStyle(Color.accentColor)
                     }
                     if let note = run.placement {
                         Text(note).font(.caption).foregroundStyle(Theme.noticeTint)

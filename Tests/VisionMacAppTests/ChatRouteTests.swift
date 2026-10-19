@@ -198,10 +198,8 @@ final class ChatRouteTests: XCTestCase {
         defer { lease.release() }
         XCTAssertEqual(lease.label, "Kimi")
         XCTAssertEqual((lease.target.client as? any ProviderClient)?.profile.baseURL, "http://kimi.test/v1")
-        // Without a chat, the primary.
-        let primary = try await t.fleet.acquire()
-        defer { primary.release() }
-        XCTAssertEqual(primary.label, "Spark")
+        // The fleet is only the routes enlisted for subagents: each chat brings its own model as their primary.
+        XCTAssertTrue(t.fleet.servers.isEmpty)
     }
 
     // MARK: The thinking picker

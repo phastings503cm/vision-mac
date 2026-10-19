@@ -14,8 +14,9 @@ let package = Package(
         .target(name: "VisionHarnessCore"),
         // The native SwiftUI app — it IS the harness.
         .executableTarget(name: "VisionMacApp", dependencies: ["VisionHarnessCore"]),
-        // Engine tests (tools, permissions, Qwen XML parser, loop).
-        .testTarget(name: "VisionHarnessCoreTests", dependencies: ["VisionHarnessCore"]),
+        // Engine tests (tools, permissions, Qwen XML parser, loop). Fixtures/ holds files shared with Vision for
+        // Windows; the tests read them from the source tree.
+        .testTarget(name: "VisionHarnessCoreTests", dependencies: ["VisionHarnessCore"], exclude: ["Fixtures"]),
         // The harness end to end: the task queue runner, /goal, retries —
         // driven against a fake model server.
         .testTarget(name: "VisionMacAppTests", dependencies: ["VisionMacApp", "VisionHarnessCore"]),

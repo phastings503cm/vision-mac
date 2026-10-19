@@ -35,6 +35,9 @@ public struct AgentRun: Identifiable, Sendable, Hashable {
     public var model: String?
     /// Why it runs where it does when that isn't where it was asked to ("asked for spark-2 — not a subagent server").
     public var placement: String?
+    /// How its server was chosen: a `SubagentPlacement.Reason` code ("picked", "agent-file", "least-busy",
+    /// "fallback"); nil when there was no choice.
+    public var placementReason: String?
     /// The plan step it is working (see `PlanAssignment`).
     public var assignment: String?
     /// The plan step the agent tool's `step` argument named (a number or the step's text), as given.
@@ -156,16 +159,23 @@ public final class AgentRoster: @unchecked Sendable {
         update(id) { var run = $0; run.server = label; return run }
     }
 
-    /// Where it runs now: the route, the model, and — when that isn't where it was asked to run — why.
-    public func setPlacement(_ id: String, route: String, model: String, note: String? = nil) {
+    /// Where it runs now: the route, the model, how it was chosen (a `SubagentPlacement.Reason` code) and — when that
+    /// isn't where it was asked to run — why.
+    public func setPlacement(_ id: String, route: String, model: String, reason: String? = nil, note: String? = nil) {
         let at = now()
         update(id) { run in
             var run = run
             let moved = run.route != nil && run.route != route
             run.route = route
             run.model = model
-            if let note { run.placement = note }
+            if let reason {
+                run.placementReason = reason
+                run.placement = note
+            } else if let note {
+                run.placement = note
+            }
             run.log.append(AgentRunLine(at: at, text: (moved ? "Moved to " : "Running on ") + "\(model) · \(route)"
+                                        + (SubagentPlacement.Reason.label(reason).map { " — \($0)" } ?? "")
                                         + (note.map { " — \($0)" } ?? "")))
             Self.trim(&run)
             return run
@@ -236,27 +246,8 @@ public final class AgentRoster: @unchecked Sendable {
 
 // MARK: - Which servers may see what
 
-/// How the main agent is told about the subagent servers and their privacy, in its system prompt and in the `agent`
-/// and `delegate` tools' descriptions.
+/// The words the main agent is told about subagent servers, in the `agent` and `delegate` tools (the same on Windows).
 public enum SubagentServers {
-    /// One subagent server: its name, and whether it may see sensitive data.
-    public struct Entry: Sendable, Hashable {
-        public var name: String
-        public var isPrivate: Bool
-
-        public init(name: String, isPrivate: Bool) {
-            self.name = name
-            self.isPrivate = isPrivate
-        }
-    }
-
-    /// "Subagent servers: Spark 2 (private), Kimi Code (not private)"
-    public static func list(_ servers: [Entry]) -> String? {
-        guard !servers.isEmpty else { return nil }
-        return "Subagent servers: " + servers.map { "\($0.name) (\($0.isPrivate ? "private" : "not private"))" }
-            .joined(separator: ", ")
-    }
-
     /// What to do about servers that aren't private.
     public static let guidance =
         "Servers that aren't private must not receive sensitive data. Describe their tasks in general terms — no names, credentials, personal or client details; the app also masks what it detects."
@@ -265,15 +256,7 @@ public enum SubagentServers {
     public static let sensitiveParameter =
         "Set true when the task needs sensitive data (personal data, credentials, client details). It then runs only on a private server."
 
-    /// The whole note, for the system prompt and the tools; nil when there are no subagent servers.
-    public static func note(_ servers: [Entry]) -> String? {
-        guard let list = list(servers) else { return nil }
-        var text = list + ". "
-        if servers.contains(where: { !$0.isPrivate }) {
-            text += guidance + " A task that needs sensitive data gets sensitive: true, so it runs only on a private server."
-        } else {
-            text += "All of them are private."
-        }
-        return text
-    }
+    /// What `server` does.
+    public static let serverParameter =
+        "Where this task runs: an id from the subagent servers listed in the agent tool, or \"primary\" for this chat's own model. Leave it out to let Vision pick the least busy. A chosen server that is busy is waited for up to 2 minutes; after that, or if it can't take the task, another server runs it and the report says so."
 }

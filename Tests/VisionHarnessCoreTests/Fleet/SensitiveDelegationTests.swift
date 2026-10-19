@@ -189,21 +189,30 @@ final class SensitiveDelegationTests: XCTestCase {
     }
 
     func testTheModelIsToldWhichServersArePrivate() throws {
-        let servers = [SubagentServers.Entry(name: "Spark 2", isPrivate: true), SubagentServers.Entry(name: "Kimi Code", isPrivate: false)]
-        let note = try XCTUnwrap(SubagentServers.note(servers))
-        XCTAssertTrue(note.hasPrefix("Subagent servers: Spark 2 (private), Kimi Code (not private). "))
+        func entry(_ id: String, _ isPrivate: Bool, primary: Bool = false) -> SubagentPool.Entry {
+            SubagentPool.Entry(id: id, routeID: id + "|m", label: id, provider: "p", model: "m", context: nil, isPrivate: isPrivate,
+                               tier: .local, speed: .standard, images: true, ownAgent: false, parallel: 2, machine: "route:" + id,
+                               kind: .openAICompatible, interactiveOnly: false, isPrimary: primary)
+        }
+        let pool = SubagentPool(entries: [entry("spark-2", true), entry("kimi-code", false), entry("primary", true, primary: true)])
+        let note = try XCTUnwrap(SubagentPool.describe(pool))
+        XCTAssertTrue(note.contains("- spark-2: p · m · private · local · standard · images · 2 at a time"), note)
+        XCTAssertTrue(note.contains("- kimi-code: p · m · not private ·"), note)
         XCTAssertTrue(note.contains("Servers that aren't private must not receive sensitive data. Describe their tasks in general terms — no names, credentials, personal or client details; the app also masks what it detects."))
-        XCTAssertNil(SubagentServers.note([]))
-        XCTAssertFalse(SubagentServers.note([servers[0]])!.contains("must not receive"))
+        XCTAssertNil(SubagentPool.describe(SubagentPool(entries: [entry("primary", true, primary: true)])))
+        XCTAssertFalse(SubagentPool.describe(SubagentPool(entries: [entry("spark-2", true), entry("primary", true, primary: true)]))!
+            .contains("must not receive"))
 
-        let registry = ToolRegistry.standard(agents: nil, servers: servers)
+        let registry = ToolRegistry.standard(agents: nil, pool: pool)
         for spec in registry.specs {
             XCTAssertNoThrow(try JSONSerialization.jsonObject(with: Data(spec.parameters.utf8)), spec.name)
         }
+        XCTAssertTrue(try XCTUnwrap(registry.specs.first { $0.name == "agent" }).description.hasSuffix(note), "listed once, in the agent tool")
+        XCTAssertFalse(try XCTUnwrap(registry.specs.first { $0.name == "delegate" }).description.contains("spark-2"))
         for name in ["agent", "delegate"] {
             let spec = try XCTUnwrap(registry.specs.first { $0.name == name })
-            XCTAssertTrue(spec.description.contains("Subagent servers: Spark 2 (private), Kimi Code (not private)"), name)
             XCTAssertTrue(spec.parameters.contains(#""sensitive":{"type":"boolean","description":"Set true when the task needs sensitive data (personal data, credentials, client details). It then runs only on a private server."#), name)
+            XCTAssertTrue(spec.parameters.contains(#""server":{"type":"string","description":"Where this task runs:"#), name)
         }
     }
 }

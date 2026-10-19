@@ -444,7 +444,7 @@ extension AppTransport {
                     chatID: vm.id, chatTitle: chatTitle, title: "\(run.description) (\(run.agentType))",
                     assignment: run.assignment.map { "Plan step: \($0)" },
                     placement: run.placementLabel ?? "waiting for a model server",
-                    status: run.placement.map { "Running · \($0)" } ?? "Running",
+                    status: Self.runStatus(run),
                     activity: run.activity, startedAt: run.startedAt, running: true,
                     tokens: run.promptTokens + run.completionTokens, steps: run.steps, agentRunID: run.id))
             }
@@ -476,6 +476,15 @@ extension AppTransport {
                 startedAt: active?.startedAt, running: true, tokens: active.map(\.totalTokens), steps: active?.rounds))
         }
         return items
+    }
+
+    /// A subagent's status line: how its server was chosen ("Running · picked by the primary", "Running · least busy",
+    /// "Running · fallback — spark-2 stayed busy for 2 minutes").
+    static func runStatus(_ run: AgentRun) -> String {
+        if let label = SubagentPlacement.Reason.label(run.placementReason) {
+            return "Running · " + label + (run.placement.map { " — \($0)" } ?? "")
+        }
+        return run.placement.map { "Running · \($0)" } ?? "Running"
     }
 
     /// How many things are working now (the toolbar's count): main agents, subagents and the queue runner.

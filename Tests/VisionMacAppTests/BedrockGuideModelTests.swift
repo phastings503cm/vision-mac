@@ -692,7 +692,7 @@ final class BedrockGuideModelTests: XCTestCase {
         let guide = try await connectedGuide(FakeBedrockBackend(), config: config)
         XCTAssertEqual(guide.role, .subagents)
         XCTAssertEqual(config.mainRoute?.name, "Spark 1", "the working setup is not disturbed")
-        XCTAssertEqual(config.workerRoutes.map(\.name), ["Bedrock · Claude Sonnet 4.5"], "Spark 2 is a spare until ticked")
+        XCTAssertEqual(config.enlistedRoutes.map(\.name), ["Bedrock · Claude Sonnet 4.5"], "Spark 2 is a spare until ticked")
         XCTAssertTrue(guide.hasOtherRoutes)
     }
 
@@ -704,12 +704,13 @@ final class BedrockGuideModelTests: XCTestCase {
         guide.onSaved = { _ in saved += 1 }
         guide.role = .main
         XCTAssertEqual(config.mainRoute?.name, "Bedrock · Claude Sonnet 4.5")
-        XCTAssertEqual(Set(config.workerRoutes.map(\.name)), ["Spark 1", "Spark 2"], "all three are still in use")
+        XCTAssertEqual(Set(config.enlistedRoutes.map(\.name)), ["Spark 2", "Bedrock · Claude Sonnet 4.5"],
+                       "the lead moving ticks nothing: Bedrock and Spark 2 still serve other chats' subagents")
         XCTAssertEqual(saved, 1)
 
         guide.role = .subagents
         XCTAssertEqual(config.mainRoute?.name, "Spark 1", "the lead goes back to whoever had it")
-        XCTAssertTrue(config.workerRoutes.map(\.name).contains("Bedrock · Claude Sonnet 4.5"))
+        XCTAssertTrue(config.enlistedRoutes.map(\.name).contains("Bedrock · Claude Sonnet 4.5"))
     }
 
     func testAFailedHelloSavesNothing() async throws {
@@ -763,7 +764,7 @@ final class BedrockGuideModelTests: XCTestCase {
         XCTAssertEqual(config.providers.map(\.name), ["Bedrock · Claude Opus 4.1", "Bedrock · Claude Sonnet 4.5"],
                        "adding a model does not delete the other one")
         XCTAssertEqual(config.mainRoute?.name, "Bedrock · Claude Opus 4.1")
-        XCTAssertEqual(config.workerRoutes.map(\.name), ["Bedrock · Claude Sonnet 4.5"])
+        XCTAssertEqual(config.enlistedRoutes.map(\.name), ["Bedrock · Claude Sonnet 4.5"])
     }
 
     // MARK: Done

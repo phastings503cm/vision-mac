@@ -44,6 +44,7 @@ public final class AppConfig {
         static let projectChoices = "routes.byProject.v1"
         static let guardianPromptSync = "guardian.promptSync.v1"
         static let claudeCodePath = "claudeCode.path.v1"
+        static let guardianSubagents = "guardian.subagents.v1"
     }
 
     private let defaults: UserDefaults
@@ -59,16 +60,26 @@ public final class AppConfig {
     public var providers: [ProviderProfile] = [] {
         didSet { persist(); routesChanged() }
     }
-    /// Identity of the active route: `"<provider name>|<model>"`. The active
-    /// route is the *main model*: the chat talks to it and it hands out subagent
-    /// tasks. Routes flagged `subagentWorker` take those tasks (see `AgentFleet`).
+    /// Identity of the active route: `"<provider name>|<model>"` — the *primary*: the model new chats and projects
+    /// start with. Each chat's own model leads its own subagents (see `SubagentPool`); routes flagged
+    /// `subagentWorker` take their side tasks (see `AgentFleet`).
     public var activeRoute: String? {
         didSet { persist(); routesChanged() }
     }
-    /// When every subagent server is busy, let subagents use the main model's
-    /// server too. False keeps it free for the main agent.
+    /// When every subagent server is busy, let subagents use the chat's own model too. False keeps it free for the
+    /// chat itself. (The key predates per-chat pools: it meant the primary's server.)
     public var subagentsUsePrimary: Bool = true {
         didSet { persist(); routesChanged() }
+    }
+    /// Guardian's live models ticked "Use for subagents": model id → subagents at a time (0 = the default, 2). A saved
+    /// Guardian route with the same identity keeps its own flag, which wins. Older builds ignore it.
+    public var guardianSubagents: [String: Int] = [:] {
+        didSet {
+            guard !loading else { return }
+            if guardianSubagents.isEmpty { defaults.removeObject(forKey: Keys.guardianSubagents) }
+            else { defaults.set(try? JSONEncoder().encode(guardianSubagents), forKey: Keys.guardianSubagents) }
+            routesChanged()
+        }
     }
     /// Called whenever the set of routes, the main model or the subagent
     /// settings change, so the fleet can be rebuilt. Not called while loading.
@@ -284,16 +295,16 @@ public final class AppConfig {
 
     // MARK: - The fleet
 
-    /// The routes as the user arranged them: which is the main model and which
-    /// serve subagents. Read by the settings and the model menu.
+    /// The routes as the user arranged them: which is the primary (the default for new chats). Read by the settings
+    /// and the model menu.
     public var mainRoute: ProviderProfile? { providers.first { $0.routeID == activeRoute } }
 
-    /// Routes flagged to serve subagents, the main model excluded (it cannot
-    /// be its own worker) and so are routes that are switched off. The fleet
-    /// may still collapse machines that are the same server — see
-    /// `AppTransport.workerRoutes`.
-    public var flaggedWorkers: [ProviderProfile] {
-        providers.filter { $0.isEnabled && $0.isSubagentWorker && $0.runsVisionEngine && $0.routeID != activeRoute }
+    /// The routes enlisted to serve subagents: switched on and ticked "Use for subagents", of any kind (Claude Code and
+    /// Guardian too, and the primary itself), in Settings order — then Guardian's live models ticked in the Guardian
+    /// map. Each chat's pool is made from these (`SubagentPool.build`): its own machine, and what it may not use, left
+    /// out.
+    public var enlistedRoutes: [ProviderProfile] {
+        providers.filter { $0.isEnabled && $0.isSubagentWorker } + guardianModelRoutes.filter(\.isSubagentWorker)
     }
 
     /// The routes that take over, in order, when the main model stops answering: switched on, marked
@@ -349,49 +360,37 @@ public final class AppConfig {
         route.name.isEmpty ? route.model : route.name
     }
 
-    /// The routes subagents currently run on (workers). One self-hosted machine is one worker however
-    /// many models it is listed with (a Spark serves one at a time, so a second route there would only
-    /// queue behind the first), and the main route's own machine is never its own worker. A hosted
-    /// service (Bedrock, OpenAI …) serves every model at once: those are told apart by route, so a
-    /// cheaper model in the same Region can take the side tasks while a stronger one is the main model.
-    public var workerRoutes: [ProviderProfile] {
-        var seen = Set<String>()
-        if let main = mainRoute { seen.insert(Self.machineOf(main)) }
-        return flaggedWorkers.filter { seen.insert(Self.machineOf($0)).inserted }
-    }
-
-    /// What counts as "the same server": a self-hosted route is its base URL; a hosted service
-    /// (Bedrock, OpenAI, …) is its own route.
+    /// What counts as "the same machine": a self-hosted OpenAI-style server is its base URL (a Spark serves one model
+    /// at a time); everything else — Bedrock, Guardian, the Anthropic API, Claude Code, any hosted API — is its own
+    /// route (see `SubagentPool.machine`).
     public nonisolated static func machineOf(_ route: ProviderProfile) -> String {
-        route.kind != .bedrock && route.isSelfHosted
-            ? route.baseURL.trimmingCharacters(in: .whitespaces).lowercased()
-                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            : "route:" + route.routeID
+        SubagentPool.machine(kind: SubagentPool.Kind(route.kind), baseURL: route.baseURL, routeID: route.routeID,
+                             selfHosted: route.isSelfHosted)
     }
 
-    /// Make another route the main model — the *conductor*.
-    ///
-    /// When a fleet is running (some other route serves subagents) the previous
-    /// main model stays in it as a subagent server, so swapping who leads never
-    /// drops a machine: three servers before, three servers after. Its own
-    /// settings are untouched, and a route that was a subagent server keeps
-    /// that flag for when it steps down again.
+    /// Make another route the primary: the model new chats and projects start with. No chat's pool changes, so no
+    /// flag changes either (a route serving subagents keeps serving them; the old primary is ticked only if it was).
     public func makeMain(_ routeID: String) {
         guard routeID != activeRoute, let index = providers.firstIndex(where: { $0.routeID == routeID }) else { return }
         // The main model is always switched on.
         if !providers[index].isEnabled { providers[index].enabled = nil }
-        if let old = providers.firstIndex(where: { $0.routeID == activeRoute }),
-           !providers[old].isSubagentWorker,
-           // A fleet exists when some route besides the current main serves subagents — the route
-           // about to become main included: {A main, B worker} must stay two servers after B leads.
-           providers.contains(where: { $0.isEnabled && $0.isSubagentWorker && $0.routeID != activeRoute }) {
-            providers[old].subagentWorker = true
-        }
         activeRoute = routeID
     }
 
-    /// Tick or untick "use for subagents" on a route.
+    /// One of Guardian's live models as the primary: kept as a configured route on the sign-in's token.
+    public func makeGuardianModelMain(_ route: ProviderProfile) {
+        store(route)
+        setAPIKey(guardianToken ?? "", for: route)
+        makeMain(route.routeID)
+    }
+
+    /// Tick or untick "use for subagents" on a route — one of Guardian's live models goes in the Guardian map.
     public func setSubagentWorker(_ routeID: String, _ on: Bool) {
+        if isGuardianModel(routeID) {
+            let id = String(routeID.dropFirst(Self.guardianRouteName.count + 1))
+            if on { guardianSubagents[id] = guardianSubagents[id] ?? 0 } else { guardianSubagents[id] = nil }
+            return
+        }
         guard let index = providers.firstIndex(where: { $0.routeID == routeID }),
               providers[index].isSubagentWorker != on else { return }
         providers[index].subagentWorker = on ? true : nil
@@ -399,6 +398,11 @@ public final class AppConfig {
 
     /// How many subagents may work on a route at once (nil = the default).
     public func setSubagentParallel(_ routeID: String, _ count: Int?) {
+        if isGuardianModel(routeID) {
+            let id = String(routeID.dropFirst(Self.guardianRouteName.count + 1))
+            if guardianSubagents[id] != nil { guardianSubagents[id] = count ?? 0 }
+            return
+        }
         guard let index = providers.firstIndex(where: { $0.routeID == routeID }),
               providers[index].subagentParallel != count else { return }
         providers[index].subagentParallel = count
@@ -498,6 +502,10 @@ public final class AppConfig {
         subagentsUsePrimary = defaults.object(forKey: Keys.subagentsUsePrimary) as? Bool ?? true
         guardianPromptSync = defaults.object(forKey: Keys.guardianPromptSync) as? Bool ?? true
         claudeCodePath = defaults.string(forKey: Keys.claudeCodePath) ?? ""
+        if let data = defaults.data(forKey: Keys.guardianSubagents),
+           let decoded = try? JSONDecoder().decode([String: Int].self, from: data) {
+            guardianSubagents = decoded
+        }
         if let data = defaults.data(forKey: Keys.shield), let decoded = try? JSONDecoder().decode(ShieldSettings.self, from: data) {
             shield = decoded
         }

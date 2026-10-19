@@ -281,6 +281,18 @@ public enum PlanCatalog {
         }
     }
 
+    /// Whether the plan a route was made from is a monthly subscription — its region's terms, else the plan's (nil when
+    /// the address is no known plan's).
+    public static func isSubscription(_ route: ProviderProfile) -> Bool? {
+        let base = route.baseURL.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        for plan in plans {
+            if let region = plan.regions.first(where: { base == $0.baseURL.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "/")) }) {
+                return region.isSubscription ?? plan.isSubscription
+            }
+        }
+        return nil
+    }
+
     // MARK: The key
 
     /// A hint for a pasted key that is recognisably the wrong one (nil when nothing stands out).

@@ -90,10 +90,16 @@ public struct ClaudeCodeInvocation: Sendable, Equatable {
     /// The folder's own Claude Code settings load too (the person trusted it in Claude Code — `ClaudeCodeTrust`);
     /// false = only the person's own (`--setting-sources user`).
     public var projectSettings: Bool
+    /// `--max-turns`: a subagent job's step budget (nil = Claude Code's own). The option is real but hidden from the
+    /// help (2.1.299 takes `--max-turns 1`), so it is passed without asking the help.
+    public var maxTurns: Int?
+    /// `--no-session-persistence` (when the CLI lists it): a subagent job leaves no session in ~/.claude/projects.
+    public var noSessionPersistence: Bool
 
     public init(model: String? = nil, effort: String? = nil, preset: PermissionPreset = .workspaceWrite,
                 session: ClaudeCodeSessionChoice? = nil, appendSystemPrompt: String? = nil, addDirs: [String] = [],
-                oneShotSystemPrompt: String? = nil, projectSettings: Bool = false) {
+                oneShotSystemPrompt: String? = nil, projectSettings: Bool = false, maxTurns: Int? = nil,
+                noSessionPersistence: Bool = false) {
         self.model = model
         self.effort = effort
         self.preset = preset
@@ -102,6 +108,8 @@ public struct ClaudeCodeInvocation: Sendable, Equatable {
         self.addDirs = addDirs
         self.oneShotSystemPrompt = oneShotSystemPrompt
         self.projectSettings = projectSettings
+        self.maxTurns = maxTurns
+        self.noSessionPersistence = noSessionPersistence
     }
 
     /// The command line for `install` (after the executable).
@@ -128,6 +136,8 @@ public struct ClaudeCodeInvocation: Sendable, Equatable {
         case .new(let id) where install.supports("--session-id"): args += ["--session-id", id]
         default: break
         }
+        if let maxTurns, maxTurns > 0 { args += ["--max-turns", String(maxTurns)] }
+        if noSessionPersistence, install.supports("--no-session-persistence") { args.append("--no-session-persistence") }
         if let note = appendSystemPrompt, !note.isEmpty, install.supports("--append-system-prompt") {
             args += ["--append-system-prompt", note]
         }

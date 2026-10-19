@@ -43,13 +43,17 @@ public final class AppTransport {
     @ObservationIgnored private var vaultGrants: [String: VaultGrants] = [:]
     /// Per chat: background subagents it launched.
     @ObservationIgnored var backgroundPools: [String: BackgroundAgents] = [:]
-    /// The model servers subagents run on: the main route is the primary, the routes flagged "Use for
-    /// subagents" are workers. One per app, shared by every chat, so two chats can't both fill the same Spark.
+    /// The model servers subagents run on: every route enlisted "Use for subagents"; each chat's own model stands in
+    /// as the primary for its own subagents. One per app, shared by every chat, so two chats can't both fill the same
+    /// Spark.
     @ObservationIgnored let fleet = AgentFleet()
     /// Per chat: every subagent it started — waiting for a server, working, finished.
     @ObservationIgnored var rosters: [String: AgentRoster] = [:]
     /// Worker route → what the server said it serves, and when (a Spark may have swapped models since).
     @ObservationIgnored var workerProbe: [String: (info: ModelInfo, at: Date)] = [:]
+    /// Worker route → the last model id and window its server reported: what the subagent catalogue says, kept until the
+    /// server reports something else (so the tool description — and the prompt cache — only change when it does).
+    @ObservationIgnored var workerSeen: [String: (model: String, context: Int?)] = [:]
     /// Agent types by project folder, with the stamp of the files they were read from.
     @ObservationIgnored var agentCatalogs: [String: (catalog: AgentCatalog, stamp: String)] = [:]
     /// Per chat: queue tasks the agent has added (capped, so a runaway loop
@@ -69,10 +73,10 @@ public final class AppTransport {
     /// many rounds in a row have failed (tests shorten it).
     @ObservationIgnored var goalErrorBackoff: @Sendable (Int) -> TimeInterval = { RequestRetry.backoff(attempt: $0 + 1) }
 
-    @ObservationIgnored private var engines: [String: Engine] = [:]
+    @ObservationIgnored private(set) var engines: [String: Engine] = [:]
     /// What each session's engine was built with; a mismatch rebuilds it
     /// (provider or served model changed, window re-detected, thinking level).
-    @ObservationIgnored private var engineKeys: [String: EngineKey] = [:]
+    @ObservationIgnored private(set) var engineKeys: [String: EngineKey] = [:]
     @ObservationIgnored var transcripts: [String: [LLMMessage]] = [:]
     /// Pending permission questions, keyed by a token unique to each question
     /// (tool-call ids repeat across turns and chats: "call-0", "xml-0").
@@ -204,8 +208,9 @@ public final class AppTransport {
         var agents: String
         /// The backups the main model's client falls over to.
         var backups: [ProviderProfile]
-        /// The subagent servers and their privacy are in the prompt and the agent tools' descriptions.
-        var servers: [SubagentServers.Entry]
+        /// The chat's subagent pool is in the agent tool's description (its entries only — never how busy they are,
+        /// so the prompt cache holds until the pool really changes).
+        var servers: SubagentPool
         /// Unattended work (a queue task, `/goal`): no backups or subagent servers that are interactive-only.
         var unattended: Bool
         /// The MCP servers' tools changed (a server connected, failed, or listed new tools).
@@ -328,8 +333,8 @@ public final class AppTransport {
 
     Parallel and background work: for a well-scoped side task, launch a subagent with `agent` — pick an \
     `agent_type` (explore: read-only research; plan; review; worker: makes changes). To fan several \
-    independent tasks out at once use `delegate`; with several model servers configured they run on \
-    different machines. With run_in_background: true a subagent works while you continue (several can run \
+    independent tasks out at once use `delegate`; when the agent tool lists subagent servers, the tasks run \
+    on those, and `server` picks one. With run_in_background: true a subagent works while you continue (several can run \
     at once); you're told when each finishes, and agent_status / agent_stop manage them. Long-running \
     programs go in `process_start`. Follow-up work that can happen later, unattended, goes on the task \
     queue with `queue_task`.
@@ -1068,7 +1073,7 @@ public final class AppTransport {
 
     private func engine(for sessionID: String, vm: SessionVM, client: any LLMClient,
                         window: Int, thinking: ThinkingLevel?, skillState: SkillState, unattended: Bool,
-                        home: FleetServer? = nil) -> Engine {
+                        home: FleetServer? = nil, pool: SubagentPool? = nil) -> Engine {
         // A chat without a project works in its own scratch folder, which the permission preset then confines it to
         // exactly as a project folder would.
         let workspace = vm.workspaceURL ?? scratchFolder(for: vm, create: true)
@@ -1081,9 +1086,7 @@ public final class AppTransport {
         // and a catalog the model can load from with `use_skill`.
         if !skillState.result.text.isEmpty { prompt += "\n\n" + skillState.result.text }
         prompt += "\n\n" + Self.vaultPrompt(vault.all)
-        // Which subagent servers may see sensitive data.
-        let servers = subagentServerEntries
-        if let note = SubagentServers.note(servers) { prompt += "\n\n--- Subagent servers ---\n" + note }
+        // The subagent servers (and which may see sensitive data) are listed once, in the agent tool's description.
         if let note = mcpPromptNote { prompt += "\n\n--- MCP servers ---\n" + note }
         if vm.sensitive { prompt += "\n\n" + Self.sensitivePrompt }
         if vm.preset == .plan {
@@ -1096,7 +1099,7 @@ public final class AppTransport {
         }
         systemPrompts[sessionID] = prompt
 
-        let builtins = ToolRegistry.standard(agents: agentCatalog(for: vm), servers: servers.isEmpty ? nil : servers)
+        let builtins = ToolRegistry.standard(agents: agentCatalog(for: vm), pool: pool)
         var extra: [any ToolExecutor] = PluginLoader.tools(from: plugins, reserved: Set(builtins.names))
         if !skillState.active.isEmpty { extra.append(UseSkillTool(skills: skillState.active)) }
         extra.append(VaultSearchTool(vault: vault))
@@ -1137,6 +1140,8 @@ public final class AppTransport {
         engineConfig.unattended = unattended
         // A Sensitive chat with the shield off keeps its subagents on private servers.
         engineConfig.privateSubagentsOnly = privateSubagentsOnly(vm)
+        // A Sensitive chat sends no pictures to a subagent server that only sees it masked.
+        engineConfig.sensitiveChat = vm.sensitive
         let engine = Engine(
             client: client,
             registry: registry,
@@ -1170,7 +1175,8 @@ public final class AppTransport {
             roster: roster(for: sessionID),
             agentTypes: agentCatalog(for: vm),
             fleetHome: home,
-            machineSeat: machineSeat(for: sessionID, vm: vm)
+            machineSeat: machineSeat(for: sessionID, vm: vm),
+            fleetPool: pool
         )
         engines[sessionID] = engine
         return engine
@@ -2280,10 +2286,12 @@ public final class AppTransport {
         let skillState = self.skillState(for: vm)
         let unattended = isUnattended(vm)
         let backups = backupProfiles(unattended: unattended, excluding: profile.routeID, sensitive: vm.sensitive)
+        // This chat's subagent servers: every enlisted route but its own machine and what it may not use.
+        let pool = subagentPool(for: vm, profile: profile, unattended: unattended)
         let key = EngineKey(profile: profile, window: window, thinking: thinking, preset: vm.preset,
                             skills: skillState.signature, computerTools: config.computerToolsEnabled,
                             vision: visionOn(for: profile), vault: vault.revision, agents: agentsStamp(for: vm),
-                            backups: backups, servers: subagentServerEntries, unattended: unattended,
+                            backups: backups, servers: pool, unattended: unattended,
                             mcp: mcpToolsRevision,
                             sensitive: vm.sensitive ? (shieldOn ? "shield" : "private-only") : "")
         if let previous = engineKeys[sessionID], previous.profile.model != profile.model {
@@ -2295,7 +2303,7 @@ public final class AppTransport {
         } else {
             engine = self.engine(for: sessionID, vm: vm, client: mainClient(profile, backups: backups, sessionID: sessionID),
                                  window: window, thinking: thinking, skillState: skillState, unattended: unattended,
-                                 home: fleetHome(for: vm, profile: profile))
+                                 home: fleetHome(for: vm, profile: profile), pool: pool)
             engineKeys[sessionID] = key
         }
         retryRoute[sessionID] = nil
@@ -2789,9 +2797,6 @@ public final class AppTransport {
 
     /// How a route is named next to a subagent: the route's own name (e.g. "Spark 2").
     public static func routeLabel(_ route: ProviderProfile) -> String { AppConfig.routeLabel(route) }
-
-    /// The routes subagents currently run on (see `AppConfig.workerRoutes`).
-    public var workerRoutes: [ProviderProfile] { config.workerRoutes }
 
     // MARK: - Context window
 

@@ -26,10 +26,13 @@ public struct FleetTarget: Sendable {
     public var ownSettings: Bool
     /// The thinking level for this target when it has `ownSettings` (nil = the route's own default).
     public var thinking: ThinkingLevel?
+    /// An engine of its own works the task instead of Vision's (Claude Code: one `claude -p` job in the chat's
+    /// folder); nil = Vision's engine on `client`.
+    public var external: (any ExternalSubagent)?
 
     public init(client: any LLMClient, model: String, contextWindow: Int? = nil,
                 vision: Bool? = nil, temperature: Double? = nil, maxOutputTokens: Int? = nil,
-                ownSettings: Bool = false, thinking: ThinkingLevel? = nil) {
+                ownSettings: Bool = false, thinking: ThinkingLevel? = nil, external: (any ExternalSubagent)? = nil) {
         self.client = client
         self.model = model
         self.contextWindow = contextWindow
@@ -38,6 +41,7 @@ public struct FleetTarget: Sendable {
         self.maxOutputTokens = maxOutputTokens
         self.ownSettings = ownSettings
         self.thinking = thinking
+        self.external = external
     }
 }
 
@@ -56,18 +60,31 @@ public struct FleetServer: Sendable, Identifiable {
     public var isPrivate: Bool
     /// The plan behind it allows interactive use only: it takes no unattended work (the queue, `/goal`).
     public var interactiveOnly: Bool
+    /// What the main agent calls it in the `server` argument ("dgx-spark"; "primary" for a chat's own model).
+    public var handle: String?
+    /// What counts as its machine (see `SubagentPool.machine`).
+    public var machine: String?
+    /// Its route kind, in the pool's words ("openai-compatible", "claude-code", …).
+    public var kind: String?
+    /// A chat's own model, standing in as the primary for that chat's subagents.
+    public var isHome: Bool
     /// Probe the server and return its live client and model. Throws if it can't be reached — a server
     /// that answers no model list at all counts as unreachable. Cancelled with the task that is leasing.
     public var resolve: @Sendable () async throws -> FleetTarget
 
     public init(id: String, label: String, isPrimary: Bool = false, maxParallel: Int = 2, isPrivate: Bool = true,
-                interactiveOnly: Bool = false, resolve: @escaping @Sendable () async throws -> FleetTarget) {
+                interactiveOnly: Bool = false, handle: String? = nil, machine: String? = nil, kind: String? = nil,
+                isHome: Bool = false, resolve: @escaping @Sendable () async throws -> FleetTarget) {
         self.id = id
         self.label = label
         self.isPrimary = isPrimary
         self.maxParallel = maxParallel
         self.isPrivate = isPrivate
         self.interactiveOnly = interactiveOnly
+        self.handle = handle
+        self.machine = machine
+        self.kind = kind
+        self.isHome = isHome
         self.resolve = resolve
     }
 }
@@ -84,9 +101,15 @@ public struct FleetStatus: Sendable, Hashable, Identifiable {
     public var unhealthyUntil: Date?
     public var completed: Int
     public var failed: Int
+    /// "primary" (a configured primary), "worker" (a subagent server) or "home" (a chat's own model, listed while its
+    /// subagents run on it).
+    public var role: String
+    /// What the main agent calls it ("dgx-spark", "primary").
+    public var handle: String?
 
     public init(id: String, label: String, isPrimary: Bool, inFlight: Int, maxParallel: Int,
-                healthy: Bool, unhealthyUntil: Date? = nil, completed: Int, failed: Int) {
+                healthy: Bool, unhealthyUntil: Date? = nil, completed: Int, failed: Int, role: String? = nil,
+                handle: String? = nil) {
         self.id = id
         self.label = label
         self.isPrimary = isPrimary
@@ -96,6 +119,8 @@ public struct FleetStatus: Sendable, Hashable, Identifiable {
         self.unhealthyUntil = unhealthyUntil
         self.completed = completed
         self.failed = failed
+        self.role = role ?? (isPrimary ? "primary" : "worker")
+        self.handle = handle
     }
 }
 
@@ -113,6 +138,36 @@ public struct FleetUnavailableError: Error, LocalizedError, Sendable {
     public var errorDescription: String? { message }
 }
 
+/// One task asking the fleet for a server.
+public struct FleetRequest: Sendable {
+    /// The server the main agent picked with `server` (its id — the home's for "primary"); waited for up to
+    /// `AgentFleet.pinWait` when busy, then only a preference.
+    public var pinned: String?
+    /// An agent file's soft preference (matched against names, ids and handles).
+    public var preferred: String?
+    /// It needs sensitive data: private servers only.
+    public var sensitive: Bool
+    /// A queue task or a `/goal`: no server whose plan allows interactive use only.
+    public var unattended: Bool
+    /// The asking chat's own server, which stands in for the primary.
+    public var home: FleetServer?
+    /// The ids of the configured servers this chat may use besides its home (nil = every one).
+    public var pool: Set<String>?
+    /// The asking chat is Sensitive: a server that only sees it masked gets no pictures.
+    public var sensitiveChat: Bool
+
+    public init(pinned: String? = nil, preferred: String? = nil, sensitive: Bool = false, unattended: Bool = false,
+                home: FleetServer? = nil, pool: Set<String>? = nil, sensitiveChat: Bool = false) {
+        self.pinned = pinned
+        self.preferred = preferred
+        self.sensitive = sensitive
+        self.unattended = unattended
+        self.home = home
+        self.pool = pool
+        self.sensitiveChat = sensitiveChat
+    }
+}
+
 /// A slot on one server. Call `release()` when the work is over (`defer` is the usual place) and
 /// `fail(_:)` first if the server itself was the problem, so the next task goes elsewhere.
 ///
@@ -123,9 +178,15 @@ public final class FleetLease: @unchecked Sendable {
     public let server: FleetServer
     public let target: FleetTarget
     public var label: String { server.label }
+    /// What the main agent calls the server ("dgx-spark", "primary").
+    public var handle: String { server.handle ?? server.label }
     /// Servers tried first that couldn't take the work, and why ("DGX Spark: didn't answer") — so the person can
     /// see why a subagent runs where it does.
     public let skipped: [String]
+    /// Why it runs here (nil when the lease was made by hand).
+    public let reason: SubagentPlacement.Reason?
+    /// What a fallback is about ("spark-2 stayed busy for 2 minutes").
+    public let note: String?
 
     private let fleet: AgentFleet
     private let lock = NSLock()
@@ -133,11 +194,14 @@ public final class FleetLease: @unchecked Sendable {
     private var failed = false
     private var abandoned = false
 
-    init(fleet: AgentFleet, server: FleetServer, target: FleetTarget, skipped: [String] = []) {
+    init(fleet: AgentFleet, server: FleetServer, target: FleetTarget, skipped: [String] = [],
+         reason: SubagentPlacement.Reason? = nil, note: String? = nil) {
         self.fleet = fleet
         self.server = server
         self.target = target
         self.skipped = skipped
+        self.reason = reason
+        self.note = note
     }
 
     /// The server misbehaved (unreachable, overloaded, erroring): keep new work away from it for a while.
@@ -172,6 +236,7 @@ public final class AgentFleet: @unchecked Sendable {
         var completed = 0
         var failed = 0
         var unhealthyUntil: Date?
+        var lastError: String?
     }
 
     /// One task parked in `acquire`, woken by a release, a reconfiguration, a blacklisted server's
@@ -207,8 +272,11 @@ public final class AgentFleet: @unchecked Sendable {
     private let now: @Sendable () -> Date
     private var configured: [FleetServer] = []
     private var states: [String: State] = [:]
+    /// Chats' own servers with subagents on them right now (for the status list).
+    private var homes: [String: FleetServer] = [:]
     private var waiters: [Waiter] = []
     private var unhealthyForSeconds: TimeInterval = 60
+    private var pinWaitSeconds: TimeInterval = SubagentPlacement.pinWait
     private var primaryTakesOverflow = true
     private var changeHandler: (@Sendable () -> Void)?
 
@@ -222,6 +290,15 @@ public final class AgentFleet: @unchecked Sendable {
         get { lock.withLock { unhealthyForSeconds } }
         set { lock.withLock { unhealthyForSeconds = newValue } }
     }
+
+    /// How long a busy server the main agent picked is waited for (2 minutes; tests shorten it).
+    public var pinWait: TimeInterval {
+        get { lock.withLock { pinWaitSeconds } }
+        set { lock.withLock { pinWaitSeconds = newValue } }
+    }
+
+    /// A Claude plan's usage limit with no reset time keeps Claude Code off this long.
+    public static let usageLimitPause: TimeInterval = 15 * 60
 
     /// When every worker is busy, let subagents run on the primary too (a vLLM server batches requests,
     /// so this is usually a gain). False keeps the primary free for the main agent.
@@ -248,7 +325,10 @@ public final class AgentFleet: @unchecked Sendable {
             configured = servers
             for server in servers where states[server.id] == nil { states[server.id] = State() }
             for gone in Array(states.keys) where !servers.contains(where: { $0.id == gone }) {
-                if states[gone]?.inFlight == 0 { states[gone] = nil }
+                if states[gone]?.inFlight == 0 {
+                    states[gone] = nil
+                    homes[gone] = nil
+                }
             }
             return takeWaitersLocked()
         }
@@ -256,75 +336,119 @@ public final class AgentFleet: @unchecked Sendable {
         raiseChanged()
     }
 
+    /// Every configured server, then each chat's own server that has subagents on it now (role "home").
     public func snapshot() -> [FleetStatus] {
         lock.withLock {
             let at = now()
-            return configured.map { server in
+            func status(_ server: FleetServer, role: String?) -> FleetStatus {
                 let state = states[server.id] ?? State()
                 let pending = state.unhealthyUntil.flatMap { $0 > at ? $0 : nil }
                 return FleetStatus(id: server.id, label: server.label, isPrimary: server.isPrimary,
                                    inFlight: state.inFlight, maxParallel: server.maxParallel,
                                    healthy: isHealthyLocked(state, at), unhealthyUntil: pending,
-                                   completed: state.completed, failed: state.failed)
+                                   completed: state.completed, failed: state.failed, role: role, handle: server.handle)
             }
+            var out = configured.map { status($0, role: nil) }
+            for home in homes.values.sorted(by: { $0.label < $1.label })
+            where !configured.contains(where: { $0.id == home.id }) && (states[home.id]?.inFlight ?? 0) > 0 {
+                out.append(status(home, role: "home"))
+            }
+            return out
         }
+    }
+
+    /// How busy each of a chat's pool entries is now, keyed by entry id — for `SubagentPool.loadLine`. The chat's own
+    /// model is `home` (its state is shared with the same route serving other chats as a subagent server).
+    public func loads(for pool: SubagentPool, home: FleetServer?) -> [String: SubagentPool.Load] {
+        lock.withLock {
+            let at = now()
+            var out: [String: SubagentPool.Load] = [:]
+            for entry in pool.entries {
+                let id = entry.isPrimary ? (home?.id ?? entry.routeID) : entry.routeID
+                let state = states[id] ?? State()
+                let until = state.unhealthyUntil.flatMap { $0 > at ? $0 : nil }
+                out[entry.id] = SubagentPool.Load(inFlight: state.inFlight, healthy: until == nil,
+                                                  retryIn: until.map { $0.timeIntervalSince(at) })
+            }
+            return out
+        }
+    }
+
+    /// How many servers one request may choose between (its home included).
+    public func choiceCount(home: FleetServer?, pool: Set<String>?) -> Int {
+        lock.withLock { serversLocked(home: home, pool: pool).count }
     }
 
     // MARK: Leasing
 
     private enum Step {
-        case chosen(FleetServer)
-        case wait(Waiter, recovery: TimeInterval?)
+        case chosen(FleetServer, SubagentPlacement.Reason, String?)
+        case wait(Waiter, until: Date?)
     }
 
     /// What a task marked sensitive is told when nothing private can take it.
-    public static let noPrivateServer =
-        "No private server is free for a sensitive task. Do it yourself, or rewrite it without the sensitive details and try again."
+    public static let noPrivateServer = SubagentPlacement.noPrivateServer
 
     /// Wait for a free slot on a suitable server and lease it. `preferred` names a server the caller would
     /// like (matched against the label and id); it is a preference, not a demand. A `sensitive` task runs only on
     /// a private server: a private worker, else the primary when it is private and may take subagents. An
     /// `unattended` one (for the queue or `/goal`) never runs on a server whose plan allows interactive use only.
-    /// Throws `FleetUnavailableError` when no server can be reached (or, for a sensitive task, none is private), and
-    /// `CancellationError` when the task is cancelled while it waits (a lease already being resolved is given back).
     /// `home` is the asking chat's own server: it stands in for the configured primary, so a chat's subagents fall
     /// back to the model that chat uses — never to the one another chat picked (the workers are shared).
     public func acquire(preferred: String? = nil, sensitive: Bool = false, unattended: Bool = false,
                         home: FleetServer? = nil) async throws -> FleetLease {
+        try await acquire(FleetRequest(preferred: preferred, sensitive: sensitive, unattended: unattended, home: home))
+    }
+
+    /// Lease a server for one task (see `SubagentPlacement` for the order). A server the main agent picked
+    /// (`pinned`) is waited for up to `pinWait` when busy; after that, or when it can't take the task, another server
+    /// runs it and the lease's `note` says why. Throws `FleetUnavailableError` when no server can take it, and
+    /// `CancellationError` when the task is cancelled while it waits (a lease already being resolved is given back).
+    public func acquire(_ request: FleetRequest) async throws -> FleetLease {
         var tried = Set<String>()
         var lastError: (any Error)?
         var skipped: [String] = []
+        let deadline: Date? = request.pinned == nil ? nil : lock.withLock { now().addingTimeInterval(pinWaitSeconds) }
         while true {
             try Task.checkCancellation()
             let step: Step = try lock.withLock {
-                let servers = serversLocked(home: home)
-                if servers.isEmpty { throw FleetUnavailableError("No model server is configured.") }
-                let eligible = eligibleLocked(sensitive: sensitive, unattended: unattended, among: servers)
-                if eligible.isEmpty, !sensitive {
-                    throw FleetUnavailableError("No model server here may take unattended work: each one is for interactive use only under its plan's terms.")
+                let servers = serversLocked(home: request.home, pool: request.pool)
+                if servers.isEmpty { throw FleetUnavailableError(SubagentPlacement.noServer) }
+                let at = now()
+                let candidates = servers.map { server -> SubagentPlacement.Candidate in
+                    let state = states[server.id] ?? State()
+                    return SubagentPlacement.Candidate(
+                        id: server.id, handle: server.handle ?? server.label, label: server.label, isPrimary: server.isPrimary,
+                        isPrivate: server.isPrivate, interactiveOnly: server.interactiveOnly, inFlight: state.inFlight,
+                        parallel: server.maxParallel, healthyAt: state.unhealthyUntil, error: state.lastError)
                 }
-                // Every server that may take it was tried and failed (or, for a sensitive task, there is none):
-                // say so rather than wait for something that can't come.
-                if eligible.allSatisfy({ tried.contains($0.id) }) {
-                    if sensitive { throw FleetUnavailableError(Self.noPrivateServer, underlying: lastError) }
-                    throw FleetUnavailableError("No model server answered"
-                                                + (lastError.map { ": \($0.localizedDescription)" } ?? "."),
-                                                underlying: lastError)
-                }
-                if let chosen = chooseLocked(preferred: preferred, tried: tried, among: eligible, sensitive: sensitive,
-                                             servers: servers) {
+                let decision = SubagentPlacement.choose(
+                    SubagentPlacement.Request(pinned: request.pinned, agentFile: request.preferred, sensitive: request.sensitive,
+                                              unattended: request.unattended, pinDeadline: deadline, tried: tried,
+                                              overflow: primaryTakesOverflow, lastError: lastError?.localizedDescription,
+                                              pinWait: pinWaitSeconds),
+                    candidates, now: at)
+                switch decision {
+                case .run(let id, let reason, let note):
+                    guard let chosen = servers.first(where: { $0.id == id }) else { throw FleetUnavailableError(SubagentPlacement.noServer) }
                     states[chosen.id, default: State()].inFlight += 1
-                    return .chosen(chosen)
+                    if chosen.isHome || chosen.id == request.home?.id { homes[chosen.id] = chosen }
+                    return .chosen(chosen, reason, note)
+                case .wait(let until):
+                    let waiter = Waiter()
+                    waiters.append(waiter)
+                    return .wait(waiter, until: until)
+                case .unavailable(let message):
+                    throw FleetUnavailableError(message, underlying: lastError)
                 }
-                let waiter = Waiter()
-                waiters.append(waiter)
-                return .wait(waiter, recovery: nextRecoveryLocked(among: eligible, tried: tried))
             }
 
             switch step {
-            case .wait(let waiter, let recovery):
-                // A blacklisted server comes back by itself when its time is up, with nothing else to wake us.
-                let timer: Task<Void, Never>? = recovery.map { seconds in
+            case .wait(let waiter, let until):
+                // A blacklisted server comes back by itself when its time is up, and a pin's wait ends at its
+                // deadline — with nothing else to wake us.
+                let seconds = until.map { $0.timeIntervalSince(now()) + 0.05 }
+                let timer: Task<Void, Never>? = seconds.map { seconds in
                     Task {
                         if (try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))) != nil {
                             waiter.wake()
@@ -339,11 +463,13 @@ public final class AgentFleet: @unchecked Sendable {
                 timer?.cancel()
                 lock.withLock { waiters.removeAll { $0 === waiter } }
 
-            case .chosen(let server):
+            case .chosen(let server, let reason, let note):
                 raiseChanged()
                 do {
-                    let target = try await server.resolve()
-                    return FleetLease(fleet: self, server: server, target: target, skipped: skipped)
+                    var target = try await server.resolve()
+                    // A Sensitive chat sends a server that only sees it masked no pictures: the shield can't check them.
+                    if request.sensitiveChat, !server.isPrivate { target.vision = false }
+                    return FleetLease(fleet: self, server: server, target: target, skipped: skipped, reason: reason, note: note)
                 } catch {
                     if Task.isCancelled {
                         release(server.id, failed: false, counted: false)
@@ -360,21 +486,32 @@ public final class AgentFleet: @unchecked Sendable {
         }
     }
 
-    /// Whether `server` is the one a preference names (its label or route id contains it, any case) — how an agent
-    /// file's `server:`/`model:` line picks a server.
+    /// Whether `server` is the one a preference names (its label, route id or handle contains it, any case) — how an
+    /// agent file's `server:`/`model:` line picks a server.
     public static func matches(_ server: FleetServer, preferred: String) -> Bool {
         let wanted = preferred.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !wanted.isEmpty else { return false }
         return server.label.range(of: wanted, options: .caseInsensitive) != nil
             || server.id.range(of: wanted, options: .caseInsensitive) != nil
+            || (server.handle?.range(of: wanted, options: .caseInsensitive) != nil)
     }
 
     /// Whether `error` is the server's fault rather than the request's — the kind of failure another
     /// server might not have.
     public static func isServerFault(_ error: Error) -> Bool {
         if error is CancellationError { return false }
+        // A worker that can't take work for now (a Claude plan's usage limit).
+        if error is SubagentServerPaused { return true }
+        // Claude Code that isn't there, isn't signed in, is out of its plan's usage or won't start in this folder:
+        // another server can do the task. A task that failed on its own (`.failed`) would fail anywhere.
+        if let claude = error as? ClaudeCodeError {
+            switch claude {
+            case .notInstalled, .couldNotStart, .notSignedIn, .rateLimited, .untrustedFolder: return true
+            case .sessionNotFound, .sessionInUse, .sensitiveChat, .failed: return false
+            }
+        }
         // Credentials that one server rejects may be fine on another (a worker with a stale key, a
-        // Bedrock sign-in that expired), and so may a certificate this Mac doesn't trust.
+        // Bedrock sign-in that expired, Guardian signed out), and so may a certificate this Mac doesn't trust.
         if let llm = error as? LLMError {
             switch llm {
             case .http(let status, _), .rejected(let status, _, _, _):
@@ -389,12 +526,24 @@ public final class AgentFleet: @unchecked Sendable {
         return RequestRetry.disposition(for: error) != .fail
     }
 
-    func markFailed(_ id: String, _ error: Error) {
+    /// Keep new work off a server that failed: for `until` when given, until a usage limit resets (else 15 minutes)
+    /// for a paused one, else for `unhealthyFor`.
+    func markFailed(_ id: String, _ error: Error, until: Date? = nil) {
         guard Self.isServerFault(error) || error is FleetUnavailableError else { return }
         lock.withLock {
-            if states[id] != nil { states[id]?.unhealthyUntil = now().addingTimeInterval(unhealthyForSeconds) }
+            guard states[id] != nil else { return }
+            let at = now()
+            states[id]?.unhealthyUntil = until ?? Self.pause(for: error, at: at) ?? at.addingTimeInterval(unhealthyForSeconds)
+            states[id]?.lastError = error.localizedDescription
         }
         raiseChanged()
+    }
+
+    /// How long a server that hit a usage limit stays out.
+    static func pause(for error: Error, at: Date) -> Date? {
+        if let paused = error as? SubagentServerPaused { return paused.until ?? at.addingTimeInterval(usageLimitPause) }
+        if case ClaudeCodeError.rateLimited = error { return at.addingTimeInterval(usageLimitPause) }
+        return nil
     }
 
     func release(_ id: String, failed: Bool, counted: Bool) {
@@ -406,9 +555,11 @@ public final class AgentFleet: @unchecked Sendable {
                 } else if counted {
                     state.completed += 1
                     state.unhealthyUntil = nil   // it just did real work
+                    state.lastError = nil
                 }
                 if state.inFlight == 0, !configured.contains(where: { $0.id == id }) {
                     states[id] = nil
+                    homes[id] = nil
                 } else {
                     states[id] = state
                 }
@@ -421,77 +572,13 @@ public final class AgentFleet: @unchecked Sendable {
 
     // MARK: Choosing
 
-    /// The servers a task may run on: any, or for a sensitive task the private workers — and the primary when it is
-    /// private and may take subagents (it always may when there are no workers at all). Unattended work leaves out
-    /// the servers that are for interactive use only.
-    private func eligibleLocked(sensitive: Bool, unattended: Bool, among servers: [FleetServer]) -> [FleetServer] {
-        let allowed = unattended ? servers.filter { !$0.interactiveOnly } : servers
-        guard sensitive else { return allowed }
-        let primaryMay = primaryTakesSensitiveLocked(servers)
-        return allowed.filter { $0.isPrivate && (!$0.isPrimary || primaryMay) }
-    }
-
-    /// The servers one request may use: the configured ones, with the asking chat's own server as the primary.
-    private func serversLocked(home: FleetServer?) -> [FleetServer] {
-        guard var home else { return configured }
+    /// The servers one request may use: the configured ones (only those in the chat's pool, when it has one), with the
+    /// asking chat's own server as the primary.
+    private func serversLocked(home: FleetServer?, pool: Set<String>?) -> [FleetServer] {
+        let allowed = pool.map { ids in configured.filter { ids.contains($0.id) } } ?? configured
+        guard var home else { return allowed }
         home.isPrimary = true
-        return configured.filter { !$0.isPrimary && $0.id != home.id } + [home]
-    }
-
-    private func primaryTakesSensitiveLocked(_ servers: [FleetServer]) -> Bool {
-        guard servers.contains(where: { $0.isPrimary && $0.isPrivate }) else { return false }
-        return primaryTakesOverflow || !servers.contains(where: { !$0.isPrimary })
-    }
-
-    private func chooseLocked(preferred: String?, tried: Set<String>, among eligible: [FleetServer],
-                              sensitive: Bool, servers: [FleetServer]) -> FleetServer? {
-        let at = now()
-        let candidates = eligible.filter { !tried.contains($0.id) }
-        if candidates.isEmpty { return nil }
-        // Skip servers that just failed — unless that would leave none.
-        var healthy = candidates.filter { isHealthyLocked(states[$0.id], at) }
-        if healthy.isEmpty { healthy = candidates }
-
-        func pick(from pool: [FleetServer]) -> FleetServer? {
-            var best: (server: FleetServer, load: Double, index: Int)?
-            for server in pool where hasCapacityLocked(server) {
-                let load = Double(states[server.id]?.inFlight ?? 0) / Double(max(1, server.maxParallel))
-                let index = servers.firstIndex { $0.id == server.id } ?? Int.max
-                if let current = best, (current.load, current.index) <= (load, index) { continue }
-                best = (server, load, index)
-            }
-            return best?.server
-        }
-
-        if let wanted = preferred?.trimmingCharacters(in: .whitespacesAndNewlines), !wanted.isEmpty {
-            let matches = healthy.filter { Self.matches($0, preferred: wanted) }
-            if let favourite = pick(from: matches) { return favourite }
-        }
-        let workers = healthy.filter { !$0.isPrimary }
-        if let worker = pick(from: workers) { return worker }
-        let primaries = healthy.filter(\.isPrimary)
-        // For a sensitive task the primary is eligible only when it is private and may take subagents.
-        if sensitive { return pick(from: primaries) }
-        // No workers at all, or the primary may take overflow: use it. Otherwise wait for a worker.
-        if workers.isEmpty || primaryTakesOverflow { return pick(from: primaries) }
-        return nil
-    }
-
-    /// How long until the first blacklisted server (an eligible one not yet tried) is trusted again; nil if none
-    /// is waiting out a ban.
-    private func nextRecoveryLocked(among eligible: [FleetServer], tried: Set<String>) -> TimeInterval? {
-        let at = now()
-        var soonest: TimeInterval?
-        for server in eligible where !tried.contains(server.id) {
-            guard let until = states[server.id]?.unhealthyUntil, until > at else { continue }
-            let left = until.timeIntervalSince(at) + 0.05
-            if soonest == nil || left < soonest! { soonest = left }
-        }
-        return soonest
-    }
-
-    private func hasCapacityLocked(_ server: FleetServer) -> Bool {
-        (states[server.id]?.inFlight ?? 0) < max(1, server.maxParallel)
+        return allowed.filter { !$0.isPrimary && $0.id != home.id } + [home]
     }
 
     private func isHealthyLocked(_ state: State?, _ at: Date) -> Bool {

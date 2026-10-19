@@ -163,6 +163,8 @@ public struct EngineConfig: Sendable {
     public var unattended = false
     /// A Sensitive chat with the shield off: subagents run only on private servers (`ToolContext.privateSubagentsOnly`).
     public var privateSubagentsOnly = false
+    /// A Sensitive chat: a subagent server that only sees it masked gets no pictures (`ToolContext.sensitiveChat`).
+    public var sensitiveChat = false
 
     public init(maxIterations: Int = 30, toolTimeout: TimeInterval = 300,
                 model: String, temperature: Double? = nil, maxOutputTokens: Int? = nil,
@@ -226,6 +228,8 @@ public struct Engine: Sendable {
     public let fleet: AgentFleet?
     /// This chat's own server, the fleet's primary for its subagents (nil = the configured primary).
     public let fleetHome: FleetServer?
+    /// This chat's subagent servers (nil = every server the fleet has).
+    public let fleetPool: SubagentPool?
     /// Where this chat's subagent runs are recorded for the UI.
     public let roster: AgentRoster?
     /// The kinds of subagent this chat offers.
@@ -251,8 +255,10 @@ public struct Engine: Sendable {
                 roster: AgentRoster? = nil,
                 agentTypes: AgentCatalog? = nil,
                 fleetHome: FleetServer? = nil,
-                machineSeat: MachineSeat? = nil) {
+                machineSeat: MachineSeat? = nil,
+                fleetPool: SubagentPool? = nil) {
         self.fleetHome = fleetHome
+        self.fleetPool = fleetPool
         self.client = client
         self.registry = registry
         self.systemPrompt = systemPrompt
@@ -335,6 +341,8 @@ public struct Engine: Sendable {
                         unattended: config.unattended, fleetHome: fleetHome, machine: machineSeat,
                         computerGrants: computerGrants)
             context.privateSubagentsOnly = config.privateSubagentsOnly
+            context.sensitiveChat = config.sensitiveChat
+            context.fleetPool = fleetPool
             return context
         }
 

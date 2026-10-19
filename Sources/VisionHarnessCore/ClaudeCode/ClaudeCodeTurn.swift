@@ -104,6 +104,8 @@ public struct ClaudeCodeTurnOutcome: Sendable {
     public var interrupted: Bool
     /// Why the turn failed (nil: it finished, or was stopped).
     public var failure: ClaudeCodeError?
+    /// The plan's usage limit, when Claude Code reported one (its reset time keeps a subagent server paused).
+    public var rateLimit: ClaudeCodeRateLimit? = nil
 }
 
 public enum ClaudeCodeTurn {
@@ -187,7 +189,7 @@ public enum ClaudeCodeTurn {
         return ClaudeCodeTurnOutcome(sessionID: state.sessionID, progressed: state.progressed, result: state.result,
                                      usage: state.usage, lastReplyText: state.lastReplyText, contextTokens: state.contextTokens,
                                      model: state.model, apiKeySource: state.apiKeySource, interrupted: exit.interrupted,
-                                     failure: exit.interrupted ? nil : failure(state, exit: exit))
+                                     failure: exit.interrupted ? nil : failure(state, exit: exit), rateLimit: state.rateLimit)
     }
 
     /// Why a turn failed, in plain words — or nil when it finished.

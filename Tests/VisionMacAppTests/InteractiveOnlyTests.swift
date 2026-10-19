@@ -89,13 +89,23 @@ final class InteractiveOnlyTests: XCTestCase {
         XCTAssertEqual(transport.backupProfiles().map(\.name), ["Qwen Coding Plan"], "a chat with you may fall back to it")
         XCTAssertTrue(transport.backupProfiles(unattended: true).isEmpty, "unattended work may not")
 
-        let ordinary = try await transport.fleet.acquire()
+        // A chat on Spark: its own model is the primary for its subagents.
+        let home = FleetServer(id: spark.routeID, label: "Spark", isPrimary: true, handle: "primary", isHome: true) {
+            FleetTarget(client: FleetReportsStub(), model: "stub-model")
+        }
+        let ordinary = try await transport.fleet.acquire(home: home)
         XCTAssertEqual(ordinary.label, "Qwen Coding Plan", "a subagent from a chat with you runs on the worker")
         ordinary.release()
         transport.fleet.usePrimaryWhenWorkersBusy = false
-        let unattended = try await transport.fleet.acquire(unattended: true)
+        let unattended = try await transport.fleet.acquire(unattended: true, home: home)
         XCTAssertEqual(unattended.label, "Spark", "an unattended one keeps off it")
         unattended.release()
+        // And the plan isn't even in an unattended chat's pool.
+        let vm = transport.newSession(cwd: dir.path)
+        vm.routeID = spark.routeID
+        let pool = transport.subagentPool(for: vm, profile: spark, unattended: true)
+        XCTAssertFalse(pool.workers.contains { $0.routeID == plan.routeID })
+        XCTAssertEqual(pool.dropped.first?.reason, "for interactive use only, and this run is unattended")
     }
 
     /// Each chat has its own model, so it's the chat's route that matters: when the user marks it interactive-only
@@ -130,3 +140,10 @@ final class InteractiveOnlyTests: XCTestCase {
     }
 }
 
+/// A client that is never asked anything (the fleet only leases).
+private struct FleetReportsStub: LLMClient {
+    func stream(_ request: LLMRequest) -> AsyncThrowingStream<LLMStreamEvent, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+    func listModels() async throws -> [String] { [] }
+}

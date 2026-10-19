@@ -7,8 +7,9 @@ import VisionHarnessCore
 // own route and thinking level (stored with the conversation); a new chat starts with what its project's chats last
 // chose (else the primary), and every path that works for a chat — its turns, retries, `/goal`, the queue task
 // running in it, its subagents' fallback server, compaction, carrying on after background agents — uses that chat's
-// route. The primary in Settings ▸ AI Models is the default for new projects and the fleet's main server; choosing a
-// model in a chat changes only that chat (and what its project's next chats start with).
+// route. The primary in Settings ▸ AI Models is the default for new chats and projects; each chat's own model leads its
+// own subagents (see `SubagentPool`). Choosing a model in a chat changes only that chat (and what its project's next
+// chats start with).
 
 /// A chat's model choice: the route it talks to and its thinking level (`ThinkingLevel` raw value).
 public struct ChatChoice: Codable, Hashable, Sendable {
@@ -72,18 +73,28 @@ extension AppConfig {
     public func guardianModelRoute(_ routeID: String?) -> ProviderProfile? {
         guard isGuardianModel(routeID), let routeID else { return nil }
         let id = String(routeID.dropFirst(Self.guardianRouteName.count + 1))
-        var route = Self.guardianRoute(guardianModels.first { $0.id == id } ?? GuardianModel(id: id),
-                                       base: guardianModelBase, org: guardianOrgID)
+        var route = withSubagentFlag(Self.guardianRoute(guardianModels.first { $0.id == id } ?? GuardianModel(id: id),
+                                                        base: guardianModelBase, org: guardianOrgID))
         let token = guardianToken ?? ""
         route.apiKey = token.isEmpty ? nil : token
         return route
     }
 
-    /// Guardian's models as routes, for the menus (no token on them).
+    /// Guardian's models as routes, for the menus (no token on them) — those ticked in the Guardian map flagged
+    /// "Use for subagents". A model that is also a saved route is the saved route.
     public var guardianModelRoutes: [ProviderProfile] {
         let stored = Set(providers.map(\.routeID))
-        return guardianModels.map { Self.guardianRoute($0, base: guardianModelBase, org: guardianOrgID) }
+        return guardianModels.map { withSubagentFlag(Self.guardianRoute($0, base: guardianModelBase, org: guardianOrgID)) }
             .filter { !stored.contains($0.routeID) }
+    }
+
+    /// A Guardian model route with its "Use for subagents" tick and count from the Guardian map.
+    func withSubagentFlag(_ route: ProviderProfile) -> ProviderProfile {
+        guard let parallel = guardianSubagents[route.model] else { return route }
+        var flagged = route
+        flagged.subagentWorker = true
+        flagged.subagentParallel = parallel > 0 ? parallel : nil
+        return flagged
     }
 
     /// The route for one of Guardian's models.
@@ -188,7 +199,8 @@ extension AppTransport {
         return FleetServer(
             id: profile.routeID, label: Self.routeLabel(profile), isPrimary: true,
             maxParallel: min(max(profile.subagentParallel ?? 4, 1), 16), isPrivate: SensitivityPolicy.isPrivate(profile),
-            interactiveOnly: profile.isInteractiveOnly,
+            interactiveOnly: profile.isInteractiveOnly, handle: SubagentPool.primaryID, machine: AppConfig.machineOf(profile),
+            kind: SubagentPool.Kind(profile.kind).rawValue, isHome: true,
             resolve: { [weak self] in
                 guard let self else { throw LLMError.noModel }
                 return try await self.resolveHomeTarget(sessionID: sessionID)

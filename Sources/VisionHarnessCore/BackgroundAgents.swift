@@ -194,7 +194,7 @@ public struct AgentStatusTool: ToolExecutor {
     public static let name = "agent_status"
     public static let spec = ToolSpec(
         name: name,
-        description: "Check on background subagents started with agent(run_in_background: true). Without an id, lists them all. With an id, returns that agent's full report when it has finished; pass wait_seconds to wait for it (up to 600) instead of polling.",
+        description: "Check on background subagents started with agent(run_in_background: true). Without an id, lists them all and how busy each subagent server is. With an id, returns that agent's full report when it has finished; pass wait_seconds to wait for it (up to 600) instead of polling.",
         parameters: #"{"type":"object","properties":{"id":{"type":"string","description":"A background agent id, e.g. bg-1"},"wait_seconds":{"type":"integer","description":"Wait up to this many seconds for it to finish (max 600)"}}}"#
     )
 
@@ -207,14 +207,16 @@ public struct AgentStatusTool: ToolExecutor {
         let id = (Self.string(args, "id") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !id.isEmpty else {
             let jobs = pool.all
-            guard !jobs.isEmpty else { return ToolResult(output: "No background agents have been started in this chat.") }
+            guard !jobs.isEmpty else {
+                return ToolResult(output: AgentTool.withLoad("No background agents have been started in this chat.", context: context))
+            }
             let lines = jobs.map { j -> String in
                 var line = "- \(j.id) “\(j.description)”: \(j.status.rawValue), \(j.elapsed.formattedDuration)"
                 if j.status != .running, let r = j.report { line += " — " + String((r.components(separatedBy: "\n").first ?? "").prefix(120)) }
                 return line
             }
-            return ToolResult(output: "Background agents:\n" + lines.joined(separator: "\n")
-                              + "\nPass an id for a full report (and wait_seconds to wait for a running one).")
+            return ToolResult(output: AgentTool.withLoad("Background agents:\n" + lines.joined(separator: "\n")
+                              + "\nPass an id for a full report (and wait_seconds to wait for a running one).", context: context))
         }
         let wait = min(max(JSONArgs.int(args, "wait_seconds", default: 0), 0), 600)
         guard let job = await pool.wait(id, timeout: TimeInterval(wait)) else {

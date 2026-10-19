@@ -15,35 +15,55 @@ public struct AgentTool: ToolExecutor {
     public static let spec: ToolSpec = AgentTool.spec(for: .default)
 
     /// A subagent's default step budget; agent types may set their own.
-    private static let defaultMaxSteps = 30
+    static let defaultMaxSteps = 30
     /// How many times a task moves to another server after its server fails.
     private static let maxFailovers = 2
 
     /// The agent types the tool's description offers (nil = the built-in ones). Which types a call may
     /// *use* comes from the context (`ToolContext.agentTypes`), the chat's own definitions.
     public let catalog: AgentCatalog?
-    /// The subagent servers and whether each is private, for the description (nil = not said).
-    public let servers: [SubagentServers.Entry]?
+    /// The chat's subagent servers, listed in the description (nil = not said).
+    public let pool: SubagentPool?
 
-    public init(catalog: AgentCatalog? = nil, servers: [SubagentServers.Entry]? = nil) {
+    public init(catalog: AgentCatalog? = nil, pool: SubagentPool? = nil) {
         self.catalog = catalog
-        self.servers = servers
+        self.pool = pool
     }
 
-    public var spec: ToolSpec { Self.spec(for: catalog ?? .default, servers: servers) }
+    public var spec: ToolSpec { Self.spec(for: catalog ?? .default, pool: pool) }
 
-    public static func spec(for catalog: AgentCatalog, servers: [SubagentServers.Entry]? = nil) -> ToolSpec {
+    /// The description: what a subagent is, the agent types, and — with servers besides the chat's own model — the
+    /// stable catalogue of them (`SubagentPool.describe`; how busy they are comes back in results instead).
+    public static func spec(for catalog: AgentCatalog, pool: SubagentPool? = nil) -> ToolSpec {
         var description = "Spawn a subagent to work a self-contained task (e.g. 'find every usage of X and report the call sites'). It works autonomously in a bounded loop and returns a final report. Prefer this over doing long exploration yourself when the task is well-scoped. "
             + "Pick agent_type for a specialist — " + catalog.describe() + ". Omit it for the general worker. "
             + "Several agent calls in one turn run at the same time. Set run_in_background to true to launch it in the background and keep working: check on it with agent_status (you're also told automatically when one finishes) and stop one with agent_stop. To fan out many independent tasks in one go, use `delegate`."
-        if let note = SubagentServers.note(servers ?? []) { description += " " + note }
-        return ToolSpec(
-            name: name,
-            description: description,
-            parameters: #"{"type":"object","properties":{"description":{"type":"string","description":"What to name this subagent"},"prompt":{"type":"string","description":"The complete task for the subagent. It cannot ask you questions and cannot see this conversation — everything it needs goes here."},"agent_type":{"type":"string","description":"The kind of subagent (default: general)"},"run_in_background":{"type":"boolean","description":"Start it in the background and return at once (default false: wait for its report)"},"step":{"type":"string","description":""#
-                + stepParameter + #""},"sensitive":{"type":"boolean","description":""#
-                + SubagentServers.sensitiveParameter + #""}},"required":["description","prompt"]}"#
-        )
+        if let pool, let catalogue = SubagentPool.describe(pool) { description += "\n\n" + catalogue }
+        return ToolSpec(name: name, description: description, parameters: parameters)
+    }
+
+    /// The parameters (the same on Windows; compared structurally by the shared fixture).
+    public static let parameters = #"{"type":"object","properties":{"description":{"type":"string","description":"What to name this subagent"},"prompt":{"type":"string","description":"The complete task for the subagent. It cannot ask you questions and cannot see this conversation — everything it needs goes here."},"agent_type":{"type":"string","description":"The kind of subagent (default: general)"},"server":{"type":"string","description":"#
+        + jsonString(SubagentServers.serverParameter)
+        + #"},"run_in_background":{"type":"boolean","description":"Start it in the background and return at once (default false: wait for its report)"},"step":{"type":"string","description":"#
+        + jsonString(stepParameter) + #"},"sensitive":{"type":"boolean","description":"#
+        + jsonString(SubagentServers.sensitiveParameter) + #"}},"required":["description","prompt"]}"#
+
+    /// A string as a JSON literal, quotes included.
+    static func jsonString(_ text: String) -> String {
+        var out = "\""
+        for scalar in text.unicodeScalars {
+            switch scalar {
+            case "\"": out += "\\\""
+            case "\\": out += "\\\\"
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\t": out += "\\t"
+            default:
+                if scalar.value < 0x20 { out += String(format: "\\u%04x", scalar.value) } else { out.unicodeScalars.append(scalar) }
+            }
+        }
+        return out + "\""
     }
 
     /// The `step` argument of agent and delegate's tasks: which plan step the subagent works, so the plan, the Tasks
@@ -80,6 +100,13 @@ public struct AgentTool: ToolExecutor {
         guard let definition = types.find(typeName) else {
             return ToolResult(output: "Error: unknown agent_type '\(typeName ?? "")'. Available: \(types.describe()).")
         }
+        // Where the main agent wants it: checked before anything starts.
+        let pin: SubagentPool.Entry?
+        switch Self.serverChoice(Self.string(args, "server"), context: context) {
+        case .entry(let entry): pin = entry
+        case .error(let message): return ToolResult(output: message)
+        case nil: pin = nil
+        }
         // A Sensitive chat with the shield off keeps every subagent on a private server.
         let sensitive = JSONArgs.bool(args, "sensitive", default: false) || context.privateSubagentsOnly
         let step = Self.stepArgument(JSONArgs.dictionary(args)["step"])
@@ -91,12 +118,14 @@ public struct AgentTool: ToolExecutor {
             // The background run belongs to the pool (stop / agent_stop cancel it), not to this call.
             let launched = pool.launch(description: desc, work: {
                 let outcome = try await Self.runCore(prompt: prompt, description: desc, definition: definition,
-                                                     background: true, sensitive: sensitive, step: step, context: context)
-                return (outcome.ok, outcome.report)
+                                                     background: true, sensitive: sensitive, step: step, pin: pin,
+                                                     context: context)
+                // A task that ran elsewhere than the main agent picked says so in front of its report.
+                return (outcome.ok, outcome.fallbackLine().map { $0 + "\n\n" + outcome.report } ?? outcome.report)
             })
             switch launched {
             case .success(let job):
-                return ToolResult(output: "Started background agent \(job.id) “\(desc)”. It works while you continue — you'll be told automatically when it finishes; agent_status {\"id\":\"\(job.id)\",\"wait_seconds\":120} waits for it, agent_stop stops it.")
+                return ToolResult(output: Self.withLoad("Started background agent \(job.id) “\(desc)”. It works while you continue — you'll be told automatically when it finishes; agent_status {\"id\":\"\(job.id)\",\"wait_seconds\":120} waits for it, agent_stop stops it.", context: context))
             case .failure(let error):
                 return ToolResult(output: "Error: " + (error.errorDescription ?? "can't start another background agent."))
             }
@@ -104,19 +133,40 @@ public struct AgentTool: ToolExecutor {
 
         do {
             let outcome = try await Self.runCore(prompt: prompt, description: desc, definition: definition,
-                                                 background: false, sensitive: sensitive, step: step, context: context)
-            return ToolResult(output: Self.present(description: desc, outcome: outcome))
+                                                 background: false, sensitive: sensitive, step: step, pin: pin, context: context)
+            return ToolResult(output: Self.withLoad(Self.present(description: desc, outcome: outcome), context: context))
         } catch {
             return ToolResult(output: "Error: cancelled by user.")
         }
     }
 
+    /// What a `server` argument names in this chat (nil when it isn't given).
+    static func serverChoice(_ raw: String?, context: ToolContext) -> SubagentPool.Choice? {
+        guard let raw, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let pool = context.fleetPool ?? SubagentPool.from(servers: context.fleet?.servers ?? [])
+        return SubagentPool.match(raw, in: pool)
+    }
+
+    /// `text`, then — after a blank line — how busy each of the chat's subagent servers is now (when it has any
+    /// besides its own model). Results only: descriptions stay stable for the prompt cache.
+    static func withLoad(_ text: String, context: ToolContext) -> String {
+        guard let line = loadLine(context: context) else { return text }
+        return text + "\n\n" + line
+    }
+
+    /// "Subagent servers now: dgx-spark 1/2 busy · primary 0/4 busy." (nil without servers besides the chat's own).
+    static func loadLine(context: ToolContext) -> String? {
+        guard let fleet = context.fleet, let pool = context.fleetPool, pool.hasWorkers else { return nil }
+        return SubagentPool.loadLine(pool, loads: fleet.loads(for: pool, home: context.fleetHome))
+    }
+
     /// The report as the parent sees it. The first line keeps a fixed shape; a specialist type or a named
-    /// server is added on a line of its own.
+    /// server is added on a line of its own, and a task that ran elsewhere than the main agent picked says so.
     static func present(description: String, outcome: SubagentOutcome) -> String {
         var text = outcome.ok ? "Subagent '\(description)' finished." : "Subagent '\(description)' failed: \(outcome.report)"
         let details = outcome.details()
         if !details.isEmpty { text += "\n" + details }
+        if let moved = outcome.fallbackLine() { text += "\n" + moved }
         if outcome.ok { text += "\n\n" + outcome.report }
         return text
     }
@@ -134,9 +184,9 @@ public struct AgentTool: ToolExecutor {
 
     /// The whole life of one subagent: wait for a server, run, fail over if the server dies, and keep the
     /// roster current. Throws only `CancellationError` (the run was stopped); every other way it can end is
-    /// an outcome.
+    /// an outcome. `pin` is the server the main agent picked (`server`).
     static func runCore(prompt firstPrompt: String, description: String, definition: AgentDefinition,
-                        background: Bool, sensitive: Bool = false, step: String? = nil,
+                        background: Bool, sensitive: Bool = false, step: String? = nil, pin: SubagentPool.Entry? = nil,
                         context: ToolContext) async throws -> SubagentOutcome {
         let roster = context.roster
         let runID = roster?.begin(description: description, agentType: definition.name, background: background,
@@ -150,53 +200,76 @@ public struct AgentTool: ToolExecutor {
         var failovers = 0
         var firstServer: String?
         // The report names the server only when there was a choice of servers; a lone one is just "the model".
-        let choice = (context.fleet?.servers.count ?? 0) > 1
-        func named(_ label: String?) -> String? { choice ? label : nil }
+        let poolIDs = context.fleetPool?.workerRouteIDs
+        let choice = (context.fleet?.choiceCount(home: context.fleetHome, pool: poolIDs) ?? 0) > 1
+        func named(_ handle: String?) -> String? { choice ? handle : nil }
+        // The pinned server's fleet id: the chat's own server for "primary".
+        let pinnedID: String? = pin.map { entry in
+            entry.isPrimary ? (context.fleetHome?.id ?? context.fleet?.servers.first(where: \.isPrimary)?.id ?? entry.routeID)
+                : entry.routeID
+        }
         var prompt = firstPrompt
+        var movedNote: String?
+        var placement: (reason: SubagentPlacement.Reason?, note: String?) = (nil, nil)
         let trace = AttemptTrace()
+        func outcome(ok: Bool, report: String, server: String?) -> SubagentOutcome {
+            SubagentOutcome(ok: ok, report: report, agentType: definition.name, server: named(server), elapsed: elapsed(),
+                            failovers: failovers, reason: placement.reason, note: placement.note,
+                            pinned: placement.reason == .fallback ? pin?.id : nil)
+        }
         do {
             while true {
                 var lease: FleetLease?
                 let target: FleetTarget
                 if let fleet = context.fleet {
-                    if let runID { roster?.note(runID, "waiting for a free server") }
+                    if let runID {
+                        roster?.note(runID, pin.map { "waiting for \($0.id), which the primary picked (up to \(SubagentPlacement.waitWords(fleet.pinWait)))" }
+                            ?? "waiting for a free server")
+                    }
                     do {
                         // A task that needs sensitive data runs only on a private server.
-                        lease = try await fleet.acquire(preferred: definition.server, sensitive: sensitive,
-                                                        unattended: context.unattended, home: context.fleetHome)
+                        lease = try await fleet.acquire(FleetRequest(
+                            pinned: pinnedID, preferred: definition.server, sensitive: sensitive, unattended: context.unattended,
+                            home: context.fleetHome, pool: poolIDs, sensitiveChat: context.sensitiveChat))
                     } catch let unavailable as FleetUnavailableError {
                         if let runID { roster?.finish(runID, status: .failed, report: unavailable.message) }
-                        return SubagentOutcome(ok: false, report: unavailable.message, agentType: definition.name,
-                                               server: named(firstServer), elapsed: elapsed(), failovers: failovers)
+                        return outcome(ok: false, report: unavailable.message, server: firstServer)
                     }
                     let leased = lease!
                     target = leased.target
-                    if firstServer == nil { firstServer = leased.label }
+                    if firstServer == nil { firstServer = leased.handle }
                     if let runID, choice { roster?.setServer(runID, leased.label) }
+                    placement = Self.placement(lease: leased, movedNote: movedNote, choice: choice || pin != nil)
                     if let runID {
-                        roster?.setPlacement(runID, route: leased.label, model: target.model,
-                                             note: Self.placementNote(definition: definition, lease: leased, fleet: fleet))
+                        roster?.setPlacement(runID, route: leased.label, model: target.model, reason: placement.reason?.rawValue,
+                                             note: Self.placementNote(definition: definition, lease: leased, fleet: fleet,
+                                                                      note: placement.note))
                     }
                 } else {
                     // No fleet: it would run on the chat's own model — for a sensitive task, only if that is private
                     // (as a Sensitive chat counts it: own hardware, Guardian, Bedrock in your account).
                     if sensitive, !((context.client as? any ProviderClient).map { SensitivityPolicy.isPrivate($0.profile) } ?? false) {
                         if let runID { roster?.finish(runID, status: .failed, report: AgentFleet.noPrivateServer) }
-                        return SubagentOutcome(ok: false, report: AgentFleet.noPrivateServer, agentType: definition.name,
-                                               server: nil, elapsed: elapsed(), failovers: failovers)
+                        return outcome(ok: false, report: AgentFleet.noPrivateServer, server: nil)
                     }
                     target = FleetTarget(client: context.client, model: context.model, contextWindow: context.contextWindow)
                     if let runID { roster?.setPlacement(runID, route: "this chat's model", model: context.model) }
                 }
 
                 do {
-                    // With one server there is nowhere to fail over to: wait it out as long as the main agent would.
-                    let (ok, report) = try await runEngine(prompt: prompt, definition: definition, target: target, context: context,
+                    let (ok, report): (Bool, String)
+                    if let external = target.external {
+                        // An engine of its own (Claude Code): one job in the chat's folder, its report back like any.
+                        (ok, report) = try await runExternal(external, prompt: prompt, definition: definition, target: target,
+                                                             context: context, runID: runID, trace: trace)
+                    } else {
+                        // With one server there is nowhere to fail over to: wait it out as long as the main agent would.
+                        (ok, report) = try await runEngine(prompt: prompt, definition: definition, target: target, context: context,
                                                            runID: runID, boundedRetries: choice, trace: trace)
+                    }
                     lease?.release()
                     if let runID { roster?.finish(runID, status: ok ? .done : .failed, report: report) }
-                    return SubagentOutcome(ok: ok, report: report, agentType: definition.name,
-                                           server: named(lease?.label ?? firstServer), elapsed: elapsed(), failovers: failovers)
+                    return outcome(ok: ok, report: report, server: lease?.handle ?? firstServer)
                 } catch where error is CancellationError || Task.isCancelled {
                     lease?.abandon()
                     lease?.release()
@@ -207,6 +280,7 @@ public struct AgentTool: ToolExecutor {
                     failed.fail(error)
                     failed.release()
                     failovers += 1
+                    movedNote = SubagentPlacement.movedNote(from: failed.handle, error: error.localizedDescription)
                     // The task starts again from the top on the next server — after work that already changed things,
                     // it has to look before it repeats a step (a migration, a commit, a deploy).
                     if trace.mutated { prompt = Self.interruptedNote + firstPrompt }
@@ -216,8 +290,7 @@ public struct AgentTool: ToolExecutor {
                     lease?.release()
                     let message = error.localizedDescription
                     if let runID { roster?.finish(runID, status: .failed, report: message) }
-                    return SubagentOutcome(ok: false, report: message, agentType: definition.name,
-                                           server: named(lease?.label ?? firstServer), elapsed: elapsed(), failovers: failovers)
+                    return outcome(ok: false, report: message, server: lease?.handle ?? firstServer)
                 }
             }
         } catch is CancellationError {
@@ -226,16 +299,24 @@ public struct AgentTool: ToolExecutor {
         }
     }
 
-    /// Why a subagent runs where it does when that isn't the obvious place: its agent file asked for a server it
-    /// didn't get, or servers tried first couldn't take it. Nil when it runs where it was meant to.
-    static func placementNote(definition: AgentDefinition, lease: FleetLease, fleet: AgentFleet) -> String? {
+    /// How the lease's server was chosen, as the roster and the report say it: after a failover, a fallback "moved
+    /// here"; with no choice of servers (and no pick), nothing.
+    static func placement(lease: FleetLease, movedNote: String?, choice: Bool) -> (reason: SubagentPlacement.Reason?, note: String?) {
+        if let movedNote { return (.fallback, movedNote) }
+        guard choice else { return (nil, nil) }
+        return (lease.reason, lease.reason == .fallback ? lease.note : nil)
+    }
+
+    /// Why a subagent runs where it does when that isn't the obvious place: the main agent's pick or its agent file
+    /// asked for a server it didn't get, or servers tried first couldn't take it. Nil when it runs where it was meant to.
+    static func placementNote(definition: AgentDefinition, lease: FleetLease, fleet: AgentFleet, note: String? = nil) -> String? {
         var notes: [String] = []
-        if let wanted = definition.server, !wanted.isEmpty, !AgentFleet.matches(lease.server, preferred: wanted) {
-            if fleet.servers.contains(where: { AgentFleet.matches($0, preferred: wanted) }) {
-                notes.append("its agent file asks for “\(wanted)”, which was busy or not answering")
-            } else {
-                notes.append("its agent file asks for “\(wanted)”, but no model server by that name is set up (Settings ▸ AI Models: turn on “Use for subagents” for that route)")
-            }
+        if let note {
+            notes.append(note)
+        } else if lease.reason == nil, let wanted = definition.server, !wanted.isEmpty,
+                  !AgentFleet.matches(lease.server, preferred: wanted) {
+            notes.append(fleet.servers.contains(where: { AgentFleet.matches($0, preferred: wanted) })
+                         ? SubagentPlacement.agentFileBusy(wanted) : SubagentPlacement.agentFileMissing(wanted))
         }
         if !lease.skipped.isEmpty {
             notes.append("tried first: " + lease.skipped.map { String($0.prefix(140)) }.joined(separator: "; "))
@@ -393,6 +474,36 @@ public struct AgentTool: ToolExecutor {
             : (true, text)
     }
 
+    /// A task on a server that runs its own agent (Claude Code): one job in the chat's folder, under the chat's
+    /// permissions (Plan only for a read-only type), its steps on the roster, its report back like any subagent's.
+    private static func runExternal(_ external: any ExternalSubagent, prompt: String, definition: AgentDefinition,
+                                    target: FleetTarget, context: ToolContext, runID: String?,
+                                    trace: AttemptTrace) async throws -> (ok: Bool, report: String) {
+        let roster = context.roster
+        var note = ClaudeCodeSubagent.note
+        if !definition.prompt.isEmpty { note += "\n\n" + definition.prompt }
+        let job = ExternalSubagentJob(
+            prompt: prompt, systemNote: note, workspace: context.workspace,
+            preset: definition.isReadOnly ? .plan : context.policy.preset, readOnly: definition.isReadOnly,
+            maxSteps: definition.maxSteps ?? defaultMaxSteps,
+            activity: { text, step in
+                guard let runID, let roster else { return }
+                roster.note(runID, text, step: step)
+            },
+            noteMutation: { trace.noteMutation() },
+            requestPermission: context.requestPermission)
+        let result = try await external.run(job)
+        if result.mutated { trace.noteMutation() }
+        if let runID, let roster {
+            roster.addTokens(runID, prompt: result.promptTokens, completion: result.completionTokens)
+            if let cost = result.costUSD {
+                roster.note(runID, "≈ " + (cost < 0.01 ? "under $0.01" : "$" + String(format: "%.2f", cost))
+                            + " at API prices (paid by your Claude plan)")
+            }
+        }
+        return (result.ok, result.report)
+    }
+
     /// The model settings a subagent sends: a target on another route uses that route's own (nil = its provider's
     /// default) — never the parent chat's temperature, output limit or thinking level; the primary (or no fleet)
     /// shares the parent's.
@@ -423,20 +534,30 @@ public struct SubagentOutcome: Sendable {
     public var ok: Bool
     public var report: String
     public var agentType: String
-    /// The server it ran on — only when there was a choice of servers.
+    /// The server it ran on, as the main agent names it ("dgx-spark") — only when there was a choice of servers.
     public var server: String?
     public var elapsed: TimeInterval
     /// How many times its task moved to another server after one failed.
     public var failovers: Int
+    /// How its server was chosen (nil when there was no choice).
+    public var reason: SubagentPlacement.Reason?
+    /// Why it ran where it did, for a fallback.
+    public var note: String?
+    /// The server the main agent picked, when it ran somewhere else.
+    public var pinned: String?
 
     public init(ok: Bool, report: String, agentType: String, server: String? = nil,
-                elapsed: TimeInterval = 0, failovers: Int = 0) {
+                elapsed: TimeInterval = 0, failovers: Int = 0, reason: SubagentPlacement.Reason? = nil,
+                note: String? = nil, pinned: String? = nil) {
         self.ok = ok
         self.report = report
         self.agentType = agentType
         self.server = server
         self.elapsed = elapsed
         self.failovers = failovers
+        self.reason = reason
+        self.note = note
+        self.pinned = pinned
     }
 
     /// "(explore agent · on spark-2 · 34s)" — empty for a plain general agent on the only server.
@@ -447,5 +568,12 @@ public struct SubagentOutcome: Sendable {
         if failovers > 0 { parts.append("after \(failovers) server failure\(failovers == 1 ? "" : "s")") }
         if !parts.isEmpty { parts.append(elapsed.formattedDuration) }
         return parts.isEmpty ? "" : "(" + parts.joined(separator: " · ") + ")"
+    }
+
+    /// "Ran on bedrock instead of spark-2: spark-2 stayed busy for 2 minutes." — when it didn't run where the main
+    /// agent picked.
+    public func fallbackLine() -> String? {
+        guard reason == .fallback, let pinned, let server, server != pinned, let note else { return nil }
+        return "Ran on \(server) instead of \(pinned): \(note)."
     }
 }

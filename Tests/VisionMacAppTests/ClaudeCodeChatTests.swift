@@ -451,7 +451,7 @@ final class ClaudeCodeChatTests: XCTestCase {
         XCTAssertEqual(config.providers.count, 2, "adding again doesn't duplicate")
         config.providers[1].subagentWorker = true
         config.providers[1].backup = true
-        XCTAssertTrue(config.flaggedWorkers.isEmpty, "Claude Code never serves Vision's subagents")
-        XCTAssertTrue(config.backupRoutes.isEmpty, "nor stands in as a backup")
+        XCTAssertEqual(config.enlistedRoutes.map(\.routeID), ["Claude Code|opus"], "ticked, Claude Code serves other chats' subagents")
+        XCTAssertTrue(config.backupRoutes.isEmpty, "but never stands in as a backup")
     }
 }

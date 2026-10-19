@@ -36,6 +36,9 @@ public struct ToolContext: Sendable {
     /// This chat's own server, which stands in for the fleet's primary (see `AgentFleet.acquire`). Nil = the
     /// configured primary.
     public let fleetHome: FleetServer?
+    /// This chat's subagent servers — what the agent tools' `server` argument may name (see `SubagentPool`). Nil = every
+    /// server the fleet has.
+    public var fleetPool: SubagentPool?
     /// Every subagent this chat has started, for the UI. Nil = not tracked.
     public let roster: AgentRoster?
     /// The kinds of subagent available (nil = the built-in ones).
@@ -60,6 +63,8 @@ public struct ToolContext: Sendable {
     /// The chat is Sensitive and the shield is off: every subagent task runs only on a private server, as if it were
     /// marked `sensitive` (see `SensitivityPolicy.subagentsPrivateOnly`).
     public var privateSubagentsOnly = false
+    /// The chat is Sensitive: a subagent server that only sees it masked gets no pictures (the shield can't check them).
+    public var sensitiveChat = false
 
     public init(workspace: URL, policy: PermissionPolicy,
                 client: any LLMClient, registry: ToolRegistry, depth: Int = 0,
@@ -268,9 +273,8 @@ public struct ToolRegistry: Sendable {
     }
 
     /// The built-in tool set. `agents` are the agent types the `agent` and `delegate` tools offer in their
-    /// descriptions (nil = the built-in ones); `servers`, the subagent servers and their privacy, which they name.
-    public static func standard(depth: Int = 0, agents: AgentCatalog? = nil,
-                                servers: [SubagentServers.Entry]? = nil) -> ToolRegistry {
+    /// descriptions (nil = the built-in ones); `pool`, the chat's subagent servers, which the agent tool lists.
+    public static func standard(depth: Int = 0, agents: AgentCatalog? = nil, pool: SubagentPool? = nil) -> ToolRegistry {
         // `agent` and `delegate` are only offered at the top level: subagents don't spawn
         // subagents (keeps the permission surface and cost predictable).
         var tools: [any ToolExecutor] = [
@@ -279,8 +283,8 @@ public struct ToolRegistry: Sendable {
             RunShellCommandTool(), WebFetchTool(), TodoWriteTool(), ExitPlanModeTool(),
         ]
         if depth == 0 {
-            tools.append(AgentTool(catalog: agents, servers: servers))
-            tools.append(DelegateTool(catalog: agents, servers: servers))
+            tools.append(AgentTool(catalog: agents, pool: pool))
+            tools.append(DelegateTool(catalog: agents))
         }
         return ToolRegistry(tools: tools)
     }

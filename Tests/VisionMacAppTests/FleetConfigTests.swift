@@ -2,8 +2,8 @@ import XCTest
 import VisionHarnessCore
 @testable import VisionMacApp
 
-/// How routes are arranged into a fleet: which one is the main model (the conductor), which serve
-/// subagents, and what happens to that arrangement when another route takes the lead.
+/// How routes are arranged: which one is the primary (the model new chats start with) and which are enlisted to serve
+/// subagents — and that changing the primary changes no flag.
 @MainActor
 final class FleetConfigTests: XCTestCase {
 
@@ -39,36 +39,32 @@ final class FleetConfigTests: XCTestCase {
 
     private func names(_ routes: [ProviderProfile]) -> [String] { routes.map(\.name) }
 
-    // MARK: Who the workers are
+    // MARK: Who is enlisted
 
-    func testWorkersAreTheFlaggedRoutesExceptTheMainOne() {
-        let c = config([spark("Spark 1", host: "spark1.local"), spark("Spark 2", host: "spark2.local", worker: true),
+    func testEnlistedRoutesAreEveryFlaggedRouteThePrimaryToo() {
+        // The primary is only the default for new chats: flagged, it serves chats on other models.
+        let c = config([spark("Spark 1", host: "spark1.local", worker: true), spark("Spark 2", host: "spark2.local", worker: true),
                         bedrock(worker: true), spark("Spare", host: "old.local")])
-        XCTAssertEqual(names(c.workerRoutes), ["Spark 2", "Amazon Bedrock"])
-        XCTAssertEqual(names(c.flaggedWorkers), ["Spark 2", "Amazon Bedrock"])
+        XCTAssertEqual(names(c.enlistedRoutes), ["Spark 1", "Spark 2", "Amazon Bedrock"])
     }
 
-    func testTheMainRouteIsNeverItsOwnWorker() {
-        let c = config([spark("Spark 1", host: "spark1.local", worker: true), spark("Spark 2", host: "spark2.local", worker: true)])
-        XCTAssertEqual(names(c.workerRoutes), ["Spark 2"])
+    func testRoutesSwitchedOffAreNotEnlisted() {
+        var off = spark("Off", host: "off.local", worker: true)
+        off.enabled = false
+        let c = config([spark("Spark 1", host: "spark1.local"), off, spark("On", host: "on.local", worker: true)])
+        XCTAssertEqual(names(c.enlistedRoutes), ["On"])
     }
 
-    func testOneMachineIsOneWorkerHoweverManyModelsItIsListedWith() {
-        // A Spark serves one model at a time, so a second route on it would only queue behind the first.
-        let c = config([spark("Spark 1", host: "spark1.local"),
-                        spark("Spark 1 (coder)", host: "spark1.local", model: "coder", worker: true),   // the main's own machine
-                        spark("Spark 2", host: "spark2.local", worker: true),
-                        ProviderProfile(kind: .openAICompat, name: "Spark 2 (big)", baseURL: "http://SPARK2.local:8002/v1/",
-                                        model: "big", subagentWorker: true)])                            // same machine, spelled differently
-        XCTAssertEqual(names(c.workerRoutes), ["Spark 2"])
-    }
-
-    func testAHostedServiceIsToldApartByRoute() {
-        // Bedrock serves every model at once: a cheaper model can be a worker while a stronger one leads.
-        let c = config([bedrock(model: "us.anthropic.claude-opus-4-1-20250805-v1:0"),
-                        bedrock(model: "us.anthropic.claude-haiku-4-5-20251001-v1:0", worker: true),
-                        bedrock(model: "amazon.nova-pro-v1:0", worker: true)])
-        XCTAssertEqual(c.workerRoutes.map(\.model), ["us.anthropic.claude-haiku-4-5-20251001-v1:0", "amazon.nova-pro-v1:0"])
+    func testAMachineIsItsBaseURLForASelfHostedServerAndItsRouteForEverythingElse() {
+        XCTAssertEqual(AppConfig.machineOf(spark("Spark 2", host: "SPARK2.local")), "http://spark2.local:8002/v1")
+        XCTAssertEqual(AppConfig.machineOf(bedrock()), "route:" + bedrock().routeID)
+        // Each Guardian model is its own server (they all share one address).
+        let haiku = AppConfig.guardianRoute(GuardianModel(id: "claude-haiku-5-5"), base: "https://guardian.503cm.com/v1", org: nil)
+        let sonnet = AppConfig.guardianRoute(GuardianModel(id: "claude-sonnet-5-5"), base: "https://guardian.503cm.com/v1", org: nil)
+        XCTAssertNotEqual(AppConfig.machineOf(haiku), AppConfig.machineOf(sonnet))
+        // And so is each Claude Code model.
+        XCTAssertEqual(AppConfig.machineOf(ProviderProfile(kind: .claudeCode, name: "Claude Code", baseURL: ProviderProfile.claudeCodeBaseURL,
+                                                           model: "opus")), "route:Claude Code|opus")
     }
 
     func testTheRouteLabelFallsBackToTheModel() {
@@ -76,44 +72,18 @@ final class FleetConfigTests: XCTestCase {
         XCTAssertEqual(AppConfig.routeLabel(ProviderProfile(kind: .ollama, name: "", baseURL: "http://127.0.0.1:11434/v1", model: "qwen3:8b")), "qwen3:8b")
     }
 
-    // MARK: Swapping the conductor
+    // MARK: Changing the primary
 
-    func testMakingAnotherRouteMainKeepsTheOldMainWorkingInTheFleet() {
-        // The user's setup: two Sparks and Bedrock, one leads, the other two take subagent tasks.
+    func testMakingAnotherRouteThePrimaryChangesNoFlags() {
+        // The primary is the default for new chats; no chat's pool changes, so nothing is ticked for the person.
         let c = config([spark("Spark 1", host: "spark1.local"), spark("Spark 2", host: "spark2.local", worker: true), bedrock(worker: true)])
+        let before = c.providers.map(\.subagentWorker)
         c.makeMain(bedrock().routeID)
         XCTAssertEqual(c.mainRoute?.name, "Amazon Bedrock")
-        XCTAssertEqual(names(c.workerRoutes), ["Spark 1", "Spark 2"], "the old main becomes a subagent server; nothing is dropped")
-
-        c.makeMain(spark("Spark 2", host: "x").routeID)
-        XCTAssertEqual(c.mainRoute?.name, "Spark 2")
-        XCTAssertEqual(names(c.workerRoutes), ["Spark 1", "Amazon Bedrock"])
-
+        XCTAssertEqual(c.providers.map(\.subagentWorker), before)
+        XCTAssertEqual(names(c.enlistedRoutes), ["Spark 2", "Amazon Bedrock"], "a flagged primary keeps serving other chats")
         c.makeMain(spark("Spark 1", host: "x").routeID)
-        XCTAssertEqual(names(c.workerRoutes), ["Spark 2", "Amazon Bedrock"], "and back again: still all three in use")
-    }
-
-    func testATwoServerFleetStaysTwoServersAfterASwap() {
-        let c = config([spark("Spark 1", host: "spark1.local"), spark("Spark 2", host: "spark2.local", worker: true)])
-        c.makeMain(spark("Spark 2", host: "x").routeID)
-        XCTAssertEqual(c.mainRoute?.name, "Spark 2")
-        XCTAssertEqual(names(c.workerRoutes), ["Spark 1"])
-    }
-
-    func testSwappingWithoutAFleetDoesNotInventOne() {
-        // Two unrelated routes, no subagent servers: switching from one to the other is just a switch.
-        let c = config([spark("Spark 1", host: "spark1.local"), bedrock()])
-        c.makeMain(bedrock().routeID)
-        XCTAssertEqual(c.mainRoute?.name, "Amazon Bedrock")
-        XCTAssertTrue(c.workerRoutes.isEmpty)
-        XCTAssertFalse(c.providers[0].isSubagentWorker)
-    }
-
-    func testAWorkerFlagIsKeptWhileARouteLeadsSoItCanComeBack() {
-        let c = config([spark("Spark 1", host: "spark1.local"), spark("Spark 2", host: "spark2.local", worker: true), bedrock(worker: true)])
-        c.makeMain(spark("Spark 2", host: "x").routeID)
-        XCTAssertTrue(c.providers.first { $0.name == "Spark 2" }!.isSubagentWorker)
-        XCTAssertFalse(names(c.workerRoutes).contains("Spark 2"), "but a route that leads does not serve itself")
+        XCTAssertEqual(c.providers.map(\.subagentWorker), before)
     }
 
     func testMakingTheCurrentOrAnUnknownRouteMainChangesNothing() {
@@ -132,10 +102,10 @@ final class FleetConfigTests: XCTestCase {
         let two = spark("Spark 2", host: "x").routeID
         c.setSubagentWorker(two, true)
         c.setSubagentParallel(two, 4)
-        XCTAssertEqual(names(c.workerRoutes), ["Spark 2"])
-        XCTAssertEqual(c.workerRoutes.first?.subagentParallel, 4)
+        XCTAssertEqual(names(c.enlistedRoutes), ["Spark 2"])
+        XCTAssertEqual(c.enlistedRoutes.first?.subagentParallel, 4)
         c.setSubagentWorker(two, false)
-        XCTAssertTrue(c.workerRoutes.isEmpty)
+        XCTAssertTrue(c.enlistedRoutes.isEmpty)
         XCTAssertNil(c.providers[1].subagentWorker, "off is stored as absent, so old files stay identical")
     }
 
@@ -174,7 +144,7 @@ final class FleetConfigTests: XCTestCase {
         c.replace(bedrock(), with: changed)
         XCTAssertEqual(c.providers.map(\.name), ["Spark 1", "Amazon Bedrock", "Spark 2"], "same position")
         XCTAssertEqual(c.providers[1].model, "us.anthropic.claude-haiku-4-5-20251001-v1:0")
-        XCTAssertEqual(c.workerRoutes.map(\.name), ["Amazon Bedrock", "Spark 2"])
+        XCTAssertEqual(c.enlistedRoutes.map(\.name), ["Amazon Bedrock", "Spark 2"])
         XCTAssertEqual(c.mainRoute?.name, "Spark 1")
     }
 
@@ -217,10 +187,10 @@ final class FleetConfigTests: XCTestCase {
 
         let second = AppConfig(defaults: store, secrets: MemorySecretStore())
         XCTAssertEqual(second.mainRoute?.name, "Spark 1")
-        XCTAssertEqual(names(second.workerRoutes), ["Spark 2", "Amazon Bedrock"])
-        XCTAssertEqual(second.workerRoutes.last?.subagentParallel, 3)
+        XCTAssertEqual(names(second.enlistedRoutes), ["Spark 2", "Amazon Bedrock"])
+        XCTAssertEqual(second.enlistedRoutes.last?.subagentParallel, 3)
         XCTAssertFalse(second.subagentsUsePrimary)
-        XCTAssertEqual(second.workerRoutes.last?.awsProfile, "vision-bedrock")
+        XCTAssertEqual(second.enlistedRoutes.last?.awsProfile, "vision-bedrock")
     }
 
     func testRoutesSavedByAnOlderBuildStillLoad() throws {
@@ -231,7 +201,7 @@ final class FleetConfigTests: XCTestCase {
         let c = AppConfig(defaults: store, secrets: MemorySecretStore())
         XCTAssertEqual(c.mainRoute?.name, "Spark")
         XCTAssertTrue(c.subagentsUsePrimary, "on by default")
-        XCTAssertTrue(c.workerRoutes.isEmpty)
+        XCTAssertTrue(c.enlistedRoutes.isEmpty)
     }
 
     // MARK: AWS sign-in expiry

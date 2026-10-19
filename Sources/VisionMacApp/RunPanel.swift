@@ -180,7 +180,9 @@ struct AgentChip: View {
         }
         .padding(.horizontal, 6).padding(.vertical, 2)
         .background(Theme.surfaceStrong, in: Capsule())
-        .help("\(run.description) — \(run.activity)" + (run.placement.map { "\n\($0)" } ?? ""))
+        .help("\(run.description) — \(run.activity)"
+              + (SubagentPlacement.Reason.label(run.placementReason).map { " · \($0)" } ?? "")
+              + (run.placement.map { "\n\($0)" } ?? ""))
     }
 }
 

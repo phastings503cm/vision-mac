@@ -760,7 +760,7 @@ final class BedrockGuideModel {
         guard let route = savedRoute, editing == nil else { return }
         switch role {
         case .main:
-            // (If a fleet is running, the route that led stays in it as a subagent server.)
+            // Only the default for new chats changes: no route's "Use for subagents" tick does.
             config.makeMain(route.routeID)
         case .subagents:
             config.setSubagentWorker(route.routeID, true)

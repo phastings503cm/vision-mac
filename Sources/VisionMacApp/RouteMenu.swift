@@ -4,8 +4,7 @@ import VisionHarnessCore
 /// The routes as menu sections, shared by the toolbar and the composer: the chat's own model, the subagent
 /// servers, the backups and the others, each marked private (a lock) or masked (a shield). With a chat, choosing one
 /// switches *that chat* (and what its project's next chats start with) — another chat keeps its own model. Without
-/// one, choosing makes it the primary. Routes that are switched off don't appear. A new primary keeps the previous
-/// one working as a subagent server when a fleet is running — see `AppConfig.makeMain`.
+/// one, choosing makes it the primary (the model new chats start with). Routes that are switched off don't appear.
 struct RouteMenuSections: View {
     @Environment(AppModel.self) private var model
     /// The chat the choice is for (nil = the app's primary).
@@ -15,7 +14,7 @@ struct RouteMenuSections: View {
         let config = model.config
         let usable = config.providers.filter(\.isEnabled)
         let current = session.flatMap { model.transport.chatRouteID($0) } ?? config.activeRoute
-        let workers = Set(model.transport.workerRoutes.map(\.routeID))
+        let workers = Set(config.enlistedRoutes.map(\.routeID))
         let backups = Set(config.backupRoutes.map(\.routeID))
         let main = usable.filter { $0.routeID == current }
         let helping = usable.filter { workers.contains($0.routeID) && $0.routeID != current }
@@ -23,22 +22,24 @@ struct RouteMenuSections: View {
         let others = usable.filter { $0.routeID != current && !workers.contains($0.routeID) && !backups.contains($0.routeID) }
 
         section(session == nil ? "Primary — answers you" : "This chat", main, current: current)
-        section("Subagents — take side tasks in parallel", helping, current: current)
+        section("Subagents — take side tasks from any chat's model", helping, current: current)
         section("Backups — take over if the primary fails", standingBy, current: current)
         section("Other models", others, current: current)
         guardianSection(config, current: current)
         if session != nil, let current, current != config.activeRoute, usable.contains(where: { $0.routeID == current }) {
-            Button("Make This the Primary (for new projects and the fleet)") {
+            Button("Make This the Primary (for new chats)") {
                 config.makeMain(current)
                 model.transport.resetRouteCache()
             }
         }
-        if usable.count > 1 {
+        let enlistable = usable + config.guardianModelRoutes
+        if enlistable.count > 1 {
             Menu("Use for Subagents") {
-                ForEach(usable.filter { $0.routeID != config.activeRoute && $0.runsVisionEngine }, id: \.routeID) { provider in
+                ForEach(enlistable, id: \.routeID) { provider in
                     Toggle(isOn: Binding(get: { provider.isSubagentWorker },
                                          set: { config.setSubagentWorker(provider.routeID, $0) })) {
-                        Text(provider.displayName)
+                        Text(provider.kind == .guardian && config.isGuardianModel(provider.routeID)
+                             ? "Guardian · " + config.guardianMenuLabel(provider.routeID) : provider.displayName)
                     }
                 }
             }
@@ -93,9 +94,7 @@ struct RouteMenuSections: View {
                             model.transport.setRoute(route.routeID, for: session)
                         } else {
                             // The primary is a configured route: keep this one, on the sign-in's token.
-                            config.store(route)
-                            config.setAPIKey(config.guardianToken ?? "", for: route)
-                            config.makeMain(route.routeID)
+                            config.makeGuardianModelMain(route)
                             model.transport.resetRouteCache()
                         }
                     } label: {

@@ -162,7 +162,7 @@ struct PlanPanel: View {
                                         .font(.caption).foregroundStyle(.secondary).monospacedDigit()
                                 }
                             }
-                            Text([run.server ?? (model.transport.fleet.servers.count > 1 ? "waiting for a server" : nil), run.activity]
+                            Text([run.server ?? (model.transport.fleet.servers.isEmpty ? nil : "waiting for a server"), run.activity]
                                 .compactMap { $0 }.joined(separator: " · "))
                                 .font(.caption).foregroundStyle(.secondary)
                                 .lineLimit(1).truncationMode(.tail)

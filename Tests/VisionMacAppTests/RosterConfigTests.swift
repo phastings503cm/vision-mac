@@ -34,7 +34,7 @@ final class RosterConfigTests: XCTestCase {
     func testARouteThatIsSwitchedOffServesNothing() {
         let c = config([route("Main", host: "a.local"), route("Off", host: "b.local", worker: true, backup: true, enabled: false),
                         route("On", host: "c.local", worker: true, backup: true)])
-        XCTAssertEqual(c.workerRoutes.map(\.name), ["On"])
+        XCTAssertEqual(c.enlistedRoutes.map(\.name), ["On"])
         XCTAssertEqual(c.backupRoutes.map(\.name), ["On"])
     }
 

@@ -323,6 +323,8 @@ public final class GuardianService: ObservableObject {
         if config.guardianModels != shown { config.guardianModels = shown }
         // Chats on these models build their client again with what changed (a new token, another organization).
         transport?.resetRouteCache()
+        // Guardian models ticked "Use for subagents" come and go with the sign-in and the list.
+        transport?.refreshFleet()
     }
 
     /// Read the list now — a launch already signed in has only the list kept from last time, if any — and again every
