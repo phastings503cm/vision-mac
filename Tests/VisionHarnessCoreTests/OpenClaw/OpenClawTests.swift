@@ -483,6 +483,24 @@ final class OpenClawTransferTests: XCTestCase {
         XCTAssertEqual(result.memoryAdded, 0)
     }
 
+    /// A Guardian secret held for this run only (memory) never reaches OpenClaw's .env, even when it is asked for.
+    func testSessionOnlySecretsAreNeverExported() throws {
+        try vault.add(name: "SPARK_TOKEN", value: "spark-Token-ABC123456789", kind: .token)
+        try vault.addSessionOnly(name: "FRESHDESK_API_KEY", value: "fd-secret-123456", kind: .apiKey,
+                                 description: "From Guardian — this run of Vision only.", tags: ["guardian"], access: .ask)
+        XCTAssertEqual(vault.all.filter { !vault.isSessionOnly($0) }.map(\.name), ["SPARK_TOKEN"], "what the export offers")
+        var selection = OpenClawExportSelection()
+        selection.vault = ["SPARK_TOKEN", "FRESHDESK_API_KEY"]
+        selection.vaultConfirmed = true
+        let result = OpenClawExporter.export(selection, to: fx.install, home: fx.home, skills: [], vault: vault)
+        XCTAssertEqual(result.secrets, ["SPARK_TOKEN"])
+        XCTAssertEqual(result.secretsSkipped["FRESHDESK_API_KEY"], "It came from Guardian for this run only, so it stays in memory.")
+        let env = try String(contentsOf: fx.state.appendingPathComponent(".env"), encoding: .utf8)
+        XCTAssertTrue(env.contains("SPARK_TOKEN="))
+        XCTAssertFalse(env.contains("fd-secret-123456"))
+        XCTAssertFalse(env.contains("FRESHDESK_API_KEY"))
+    }
+
     func testSecretValuesWithQuotesRoundTripThroughTheEnvFile() throws {
         try vault.add(name: "ODD_PASSWORD", value: "pa\"ss\\wo rd#1", kind: .password)
         var selection = OpenClawExportSelection()

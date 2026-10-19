@@ -622,6 +622,11 @@ public enum OpenClawExporter {
                 result.secretsSkipped[name] = "It isn't in the vault any more."
                 continue
             }
+            // A Guardian secret used for this run only lives in memory: it is never written anywhere, OpenClaw included.
+            if vault.isSessionOnly(entry) {
+                result.secretsSkipped[name] = "It came from Guardian for this run only, so it stays in memory."
+                continue
+            }
             let envName = OpenClawReader.sanitize(name).replacingOccurrences(of: "-", with: "_").replacingOccurrences(of: ".", with: "_")
             let line = "\(envName)=\(quoted(value))"
             if let found = existing[envName] {

@@ -267,7 +267,9 @@ struct ImportExportSettings: View {
 
     private var vaultNames: [String] {
         _ = model.transport.vaultRevision
-        return model.transport.vault.all.map(\.name)
+        // Guardian's "Usable in Vision" secrets are held for this run only (memory, never disk): they never go out.
+        let vault = model.transport.vault
+        return vault.all.filter { !vault.isSessionOnly($0) }.map(\.name)
     }
 
     private var envPath: String {
