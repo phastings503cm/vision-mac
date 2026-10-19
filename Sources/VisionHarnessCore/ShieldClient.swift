@@ -158,6 +158,19 @@ public struct PlaceholderRestorer: Sendable {
 }
 
 public enum Shield {
+    /// Several texts masked together, as they would be on their way to a model that isn't private: one set of
+    /// placeholders across them (the same value is the same placeholder in each), numbered in order of first
+    /// appearance — so the same texts always mask the same way. For copies that leave the Mac outside a model
+    /// request (Guardian's prompt notebook). Nil entries stay nil.
+    public static func maskTexts(_ texts: [String?], detector: SensitiveDetector) -> [String?] {
+        let present = texts.compactMap { $0 }
+        guard !present.isEmpty else { return texts }
+        let request = LLMRequest(systemPrompt: "", messages: present.map { LLMMessage.user($0) }, tools: [], model: "")
+        let masked = mask(request, detector: detector).request.messages.map { $0.content ?? "" }
+        var next = masked.makeIterator()
+        return texts.map { $0 == nil ? nil : next.next() }
+    }
+
     /// What the model is told about the placeholders.
     public static let note = "Privacy: some values in this conversation were replaced with placeholders such as ⟦EMAIL_1⟧ or ⟦SECRET_1⟧ before they reached you. Use a placeholder exactly as written wherever you need that value — in replies, code or tool calls — and the app puts the real value back on the user's computer. Don't ask for the real values and don't guess them."
 

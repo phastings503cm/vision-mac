@@ -107,6 +107,7 @@ final class AppModel {
         // A prompt sent while signed into Guardian lands in the account's
         // prompt history (the service deduplicates).
         let transportRef = transport
+        let configRef = config
         transport.guardianSync = { record, chatID in
             // Sent when the prompt starts and again with its outcome when it ends (Guardian keys prompts by
             // user + text + time, so the second send carries the outcome onto the same notebook row).
@@ -122,15 +123,17 @@ final class AppModel {
                 }
             }()
             Task { @MainActor in
+                // The person can keep their prompts off Guardian (Settings ▸ Guardian ▸ Prompt notebook).
+                guard configRef.guardianPromptSync else { return }
                 // The chat's name, project and model ride along (Guardian's Prompt Notebook shows them). The service
                 // sends each (prompt, outcome) pair once, so the start and the end land on the same notebook row.
                 let vm = transportRef.sessions.first { $0.id == chatID }
-                await guardian.syncPrompts([
-                    .init(id: record.id, text: record.text, at: record.at, outcome: outcome, chatID: chatID,
-                          chatTitle: vm?.title, project: vm?.projectName,
-                          model: record.model ?? transportRef.modelID(for: vm),
-                          durationSeconds: outcome == nil ? nil : record.durationSeconds, runID: record.turnID),
-                ])
+                let prompt = GuardianService.SessionVMPrompt(
+                    id: record.id, text: record.text, at: record.at, outcome: outcome, chatID: chatID,
+                    chatTitle: vm?.title, project: vm?.projectName,
+                    model: record.model ?? transportRef.modelID(for: vm),
+                    durationSeconds: outcome == nil ? nil : record.durationSeconds, runID: record.turnID)
+                await guardian.syncPrompts([prompt.masked(by: ProviderClients.shield?.detector())])
             }
         }
         // Guardian's structured refusals (a missing module, a spent budget) become a dialog, wherever they came from.

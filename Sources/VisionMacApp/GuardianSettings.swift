@@ -43,6 +43,7 @@ struct GuardianSettingsForm: View {
             if guardian.isSignedIn {
                 limitsSection
                 vaultSection
+                notebookSection
             }
 
             Section("Skills") {
@@ -106,6 +107,22 @@ struct GuardianSettingsForm: View {
         var id: String { "chats" }
     }
 
+    // MARK: Prompt notebook
+
+    /// Guardian's prompt notebook: on by default; what goes up is masked (the same words as Windows).
+    @ViewBuilder
+    private var notebookSection: some View {
+        @Bindable var config = model.config
+        Section("Prompt notebook") {
+            Text("Every prompt you send in a chat goes to your Guardian notebook, with how the turn ended — completed, needs you, failed or stopped.")
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Before a prompt goes up, the keys and passwords in your vault are masked, and — with the sensitive-data shield on (Settings ▸ AI Models ▸ Sensitive data) — whatever it masks for models that aren't private.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Toggle("Send my prompts to the notebook", isOn: $config.guardianPromptSync)
+        }
+    }
+
     // MARK: Account
 
     @ViewBuilder
@@ -116,7 +133,9 @@ struct GuardianSettingsForm: View {
                     Image(systemName: "checkmark.seal.fill").foregroundStyle(Theme.successTint)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Signed in as \(guardian.account?.name.map { "\($0) (\(guardian.accountEmail ?? ""))" } ?? guardian.accountEmail ?? "")")
-                        Text("Prompts you send in chats sync to Guardian's history automatically, with how each turn ended.")
+                        Text(model.config.guardianPromptSync
+                             ? "Prompts you send in chats go to your Guardian notebook automatically, with how each turn ended."
+                             : "Your prompts stay on this Mac (Prompt notebook below).")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()

@@ -114,6 +114,49 @@ final class GuardianServiceTests: XCTestCase {
         XCTAssertEqual(prompt["chatTitle"] as? String, "Build")
     }
 
+    /// Guardian isn't a private model: the notebook copy is masked (the vault's secrets always, the shield's kinds
+    /// when it is on), the same way at the start and the end so Guardian keeps one row — the same rule as Windows.
+    func testTheNotebookCopyIsMaskedTheSameWayEachTime() async throws {
+        try await signIn()
+        var off = ShieldSettings()
+        off.enabled = false
+        let vaultOnly = SensitiveDetector(settings: off, vaultValues: ["rk-9f8e7d6c5b4a"])
+        let at = Date()
+        let start = GuardianService.SessionVMPrompt(id: "p9", text: "Rotate rk-9f8e7d6c5b4a in the billing service, mail ops@example.com",
+                                                    at: at, outcome: nil, chatID: "c1", chatTitle: "rk-9f8e7d6c5b4a rotation",
+                                                    project: "billing")
+        var end = start
+        end.outcome = "completed"
+        let a = start.masked(by: vaultOnly), b = end.masked(by: vaultOnly)
+        XCTAssertEqual(a.text, "Rotate ⟦SECRET_1⟧ in the billing service, mail ops@example.com", "with the shield off only the vault's values go")
+        XCTAssertEqual(a.text, b.text)
+        XCTAssertEqual(a.chatTitle, "⟦SECRET_1⟧ rotation", "one placeholder across the text, title and project")
+        XCTAssertEqual(a.project, "billing")
+        let shield = SensitiveDetector(settings: ShieldSettings(), vaultValues: ["rk-9f8e7d6c5b4a"])
+        XCTAssertFalse(start.masked(by: shield).text.contains("ops@example.com"), "the shield's kinds when it is on")
+        XCTAssertEqual(start.masked(by: nil).text, start.text, "nothing to mask")
+        await service.syncPrompts([a])
+        await service.syncPrompts([b])
+        let bodies = wire.requests.filter { $0.url?.path == "/api/harness/prompts" }.compactMap { $0.httpBody }
+        XCTAssertEqual(bodies.count, 2)
+        for body in bodies {
+            let text = String(decoding: body, as: UTF8.self)
+            XCTAssertFalse(text.contains("rk-9f8e7d6c5b4a"), text)
+            XCTAssertTrue(text.contains("SECRET_1"), text)
+        }
+    }
+
+    func testTheNotebookSwitchIsKeptOnlyWhenOff() {
+        let defaults = UserDefaults(suiteName: suite + "-sync")!
+        defer { defaults.removePersistentDomain(forName: suite + "-sync") }
+        let config = AppConfig(defaults: defaults, secrets: MemorySecretStore())
+        XCTAssertTrue(config.guardianPromptSync, "on by default")
+        config.guardianPromptSync = false
+        XCTAssertFalse(AppConfig(defaults: defaults, secrets: MemorySecretStore()).guardianPromptSync)
+        config.guardianPromptSync = true
+        XCTAssertNil(defaults.object(forKey: "guardian.promptSync.v1"))
+    }
+
     func testAnExpiredSignInIsDroppedWithAPlainMessage() async throws {
         try await signIn()
         wire.routes["GET /api/harness/me"] = (401, #"{"error":"unauthorized","message":"revoked"}"#)

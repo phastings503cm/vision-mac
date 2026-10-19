@@ -430,6 +430,20 @@ public final class GuardianService: ObservableObject {
         /// What "already sent" is keyed on: the prompt, and the outcome it was sent with (a bare id = on submit,
         /// the key earlier builds wrote).
         var pushKey: String { outcome.map { "\(id)|\($0)" } ?? id }
+
+        /// The copy that goes up: Guardian isn't a private model, so the text, the chat's title and the project are
+        /// masked like a request to a model that isn't private — the vault's secrets always, and what the
+        /// sensitive-data shield masks when it is on (`detector` nil: nothing to mask). The same text masks the same
+        /// way each time, so the start and the end still land on one notebook row. The same rule as Windows.
+        public func masked(by detector: SensitiveDetector?) -> SessionVMPrompt {
+            guard let detector else { return self }
+            let out = Shield.maskTexts([text, chatTitle, project], detector: detector)
+            var copy = self
+            copy.text = out[0] ?? text
+            copy.chatTitle = out[1]
+            copy.project = out[2]
+            return copy
+        }
     }
 
     private func persistPushed() {
