@@ -328,7 +328,7 @@ struct ChatView: View {
                         if let usage = session.lastUsage {
                             // A Claude Code chat also shows Claude Code's estimate of the last turn at API prices.
                             let cost = model.transport.chatRoute(session)?.kind == .claudeCode
-                                ? session.lastCostUSD.map { " · " + ClaudeCodeTurn.formatCost($0) } ?? "" : ""
+                                ? session.lastCostUSD.map { " · " + ClaudeCodeTurn.costWords($0) } ?? "" : ""
                             Text("\(usage.promptTokens.formatted()) in · \(usage.completionTokens.formatted()) out" + cost)
                                 .foregroundStyle(.secondary)
                                 .monospacedDigit()

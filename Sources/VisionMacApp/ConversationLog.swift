@@ -49,8 +49,12 @@ public struct LogSession: Identifiable, Hashable, Codable, Sendable {
     /// primary when it next sends).
     public var route: String?
     public var thinking: String?
-    /// The chat's Claude Code session (when it has run on Claude Code): resumed on its next Claude Code turn.
-    public var claudeCode: ClaudeCodeLink?
+    /// The chat's Claude Code session (once a turn has run on Claude Code): carried on with --resume. Absent until then.
+    public var claudeSession: String?
+    /// Claude Code's running cost total for that session at its last turn (it adds up across --resume).
+    public var claudeCost: Double?
+    /// When the session last spoke: messages after this (turns on other models) go to it as a recap.
+    public var claudeSyncedAt: Date?
 }
 
 private struct StoredItem: Codable {
@@ -217,16 +221,22 @@ public final class ConversationLog {
         persist(id)
     }
 
-    /// Store the chat's Claude Code session link (nil forgets it).
-    public func setClaudeCode(id: String, link: ClaudeCodeLink?) {
-        guard var row = rows[id], row.claudeCode != link else { return }
-        row.claudeCode = link
+    /// Store the chat's Claude Code session, its cost total, and (when the turn got somewhere) when it spoke.
+    public func setClaudeSession(id: String, session: String?, cost: Double?, syncedAt: Date? = nil) {
+        guard var row = rows[id] else { return }
+        let synced = syncedAt ?? (session == row.claudeSession ? row.claudeSyncedAt : nil)
+        guard row.claudeSession != session || row.claudeCost != cost || row.claudeSyncedAt != synced else { return }
+        row.claudeSession = session
+        row.claudeCost = cost
+        row.claudeSyncedAt = synced
         rows[id] = row
         persist(id)
     }
 
-    /// The chat's stored Claude Code session link.
-    public func claudeCode(_ id: String) -> ClaudeCodeLink? { rows[id]?.claudeCode }
+    /// The chat's stored Claude Code session.
+    public func claudeSession(_ id: String) -> (session: String?, cost: Double?, syncedAt: Date?) {
+        (rows[id]?.claudeSession, rows[id]?.claudeCost, rows[id]?.claudeSyncedAt)
+    }
 
     public func touch(_ id: String) {
         guard var row = rows[id] else { return }

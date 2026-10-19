@@ -22,6 +22,10 @@ public final class ClaudeCodeHost {
     /// Tests: this install, without searching or asking it anything.
     @ObservationIgnored var installOverride: ClaudeCodeInstall?
     @ObservationIgnored private var inFlight: Task<ClaudeCodeStatus, Never>?
+    /// Chats told this launch that they now use Claude Code.
+    @ObservationIgnored var announced: Set<String> = []
+    /// Chats told this launch that an API key pays instead of the Claude plan.
+    @ObservationIgnored var keyNoted: Set<String> = []
 
     public init() {}
 
@@ -50,15 +54,16 @@ public final class ClaudeCodeHost {
         return result
     }
 
-    /// The CLI a turn should run, with the status that explains a nil: the cached check while it is usable and the
-    /// file is still there, else a fresh one.
+    /// The CLI a turn should run, with the status that explains a nil: the cached check while the CLI can run and
+    /// the file is still there, else a fresh one. A signed-out CLI still runs: the turn says so in Claude Code's own
+    /// words, and works the moment the person signs in.
     public func usableInstall() async -> (install: ClaudeCodeInstall?, status: ClaudeCodeStatus) {
-        if let status, status.isUsable, let install = status.install,
+        if let status, status.canRun, let install = status.install,
            installOverride != nil || FileManager.default.isExecutableFile(atPath: install.path) {
             return (install, status)
         }
         let fresh = await refresh()
-        return (fresh.isUsable ? fresh.install : nil, fresh)
+        return (fresh.canRun ? fresh.install : nil, fresh)
     }
 
     /// Show this status without checking (the screenshot mode's scenes).
@@ -72,14 +77,9 @@ public final class ClaudeCodeHost {
         status = nil
     }
 
-    /// Why a turn can't start, with the steps — the words the chat shows.
+    /// Why a turn can't start — the words the chat shows.
     public static func notReadyMessage(_ status: ClaudeCodeStatus) -> String {
-        var lines = [status.summary]
-        for step in status.steps {
-            lines.append(step.command.map { "\(step.text) `\($0)`" } ?? step.text)
-        }
-        lines.append("Settings ▸ Models ▸ Add ▸ Claude Code… shows this and checks again.")
-        return lines.joined(separator: "\n")
+        status.summary + " The Claude Code card (Settings ▸ AI Models ▸ Add ▸ Claude Code…) shows how to install it and sign in."
     }
 }
 

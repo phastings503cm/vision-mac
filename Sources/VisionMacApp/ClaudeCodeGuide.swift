@@ -14,7 +14,7 @@ struct ClaudeCodeGuideRequest: Identifiable {
 struct ClaudeCodeGuideView: View {
     let appModel: AppModel
     @Environment(\.dismiss) private var dismiss
-    @State private var chosen: Set<String> = ["sonnet", "opus"]
+    @State private var chosen: Set<String> = [ClaudeCodeModels.defaultModel]
     @State private var useInChat = true
     @State private var added: String?
 
@@ -26,12 +26,12 @@ struct ClaudeCodeGuideView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     GuideIcon(systemName: "terminal")
                     GuideHeading("Claude Code — your Claude Pro or Max plan")
-                    GuideLead("Chats you put on Claude Code run the official claude command on this Mac, signed in with your own Claude plan. Vision shows its replies, thinking, tool calls, files changed and cost, keeps the chat's conversation going from turn to turn, and runs /goal and the task queue on it. Vision never sees or touches your Claude sign-in — the claude command does the talking.")
+                    GuideLead(ClaudeCodeWords.explanation)
                     statusSection
-                    if host.status?.isUsable == true { modelsSection }
-                    GuideNote(.info, "Claude Code reads your files and runs commands itself and sends what it reads to Anthropic, so Vision's shield can't mask it: Sensitive chats can't use Claude Code. Your plan's usage limits apply; each turn shows Claude Code's own estimate of what it would cost at API prices.",
+                    if host.status?.canRun == true { modelsSection }
+                    GuideNote(.info, ClaudeCodeWords.sensitiveReason + " Sensitive chats can't use it. Your plan's usage limits apply; each turn shows Claude Code's own estimate of what it would cost at API prices.",
                               title: "Good to know")
-                    GuideAside("Permissions follow the chat's setting: Plan only → Claude Code's plan mode (reads, changes nothing); Workspace write → file edits in the chat's folder and commands, except ones that delete, move, install or commit; Full access → every command. Nobody can approve a request mid-turn, so anything else is refused and Claude says so.")
+                    GuideAside("Permissions follow the chat's setting: Plan only → Claude Code's plan mode (it reads and plans, and changes nothing); Workspace write → reads, edits inside the chat's folder and read-only commands go ahead, and anything else asks you on the usual permission card; Full access → everything goes ahead.")
                 }
                 .padding(28)
                 .frame(maxWidth: 640, alignment: .leading)
@@ -86,7 +86,7 @@ struct ClaudeCodeGuideView: View {
         VStack(alignment: .leading, spacing: 8) {
             GuideSubheading("Models to add")
             ForEach(ClaudeCodeModels.choices, id: \.alias) { choice in
-                GuideChoice(systemImage: "sparkle", title: choice.name, detail: choice.detail,
+                GuideChoice(systemImage: "sparkle", title: choice.name, detail: choice.detail.prefix(1).uppercased() + choice.detail.dropFirst(),
                             selected: chosen.contains(choice.alias)) {
                     if chosen.contains(choice.alias) { chosen.remove(choice.alias) } else { chosen.insert(choice.alias) }
                 }
@@ -112,7 +112,7 @@ struct ClaudeCodeGuideView: View {
             Button("Add to Vision") { add() }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
-                .disabled(host.status?.isUsable != true || chosen.isEmpty)
+                .disabled(host.status?.canRun != true || chosen.isEmpty)
         }
         .padding(14)
     }

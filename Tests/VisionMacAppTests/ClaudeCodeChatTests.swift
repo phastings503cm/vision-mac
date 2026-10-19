@@ -3,8 +3,9 @@ import XCTest
 @testable import VisionHarnessCore
 
 /// A chat on Claude Code end to end: the turn goes to a stand-in `claude` (a real process that records what it was
-/// given and prints stream-json), and everything around it — the timeline, the session it resumes, the recap when
-/// the chat moves between models, /goal, Stop, a Sensitive chat — is the real harness.
+/// given — arguments, the prompt, its permission answers, a Stop — and prints stream-json), and everything around it —
+/// the timeline, the session it carries on, the permission card, the recap when the chat moves between models, /goal,
+/// Stop, a Sensitive chat — is the real harness.
 @MainActor
 final class ClaudeCodeChatTests: XCTestCase {
     private var dir: URL!
@@ -14,8 +15,8 @@ final class ClaudeCodeChatTests: XCTestCase {
 
     private static let flags: Set<String> = [
         "--print", "--output-format", "--input-format", "--verbose", "--include-partial-messages", "--model", "--effort",
-        "--permission-mode", "--permission-prompts", "--allowedTools", "--disallowedTools", "--session-id", "--resume",
-        "--append-system-prompt", "--add-dir", "--system-prompt", "--tools", "--no-session-persistence",
+        "--permission-mode", "--session-id", "--resume", "--append-system-prompt", "--add-dir", "--system-prompt", "--tools",
+        "--no-session-persistence",
     ]
 
     override func setUp() async throws {
@@ -63,12 +64,20 @@ final class ClaudeCodeChatTests: XCTestCase {
         d="$(cd "$(dirname "$0")" && pwd)"
         n=$(cat "$d/count" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$d/count"
         : > "$d/args-$n"; for a in "$@"; do printf '%s\\n' "$a" >> "$d/args-$n"; done
-        cat > "$d/stdin-$n"
+        IFS= read -r first; printf '%s\\n' "$first" > "$d/stdin-$n"
+        if [ -f "$d/ask" ]; then
+          cat "$d/ask"
+          IFS= read -r answer; printf '%s\\n' "$answer" > "$d/answer-$n"
+        fi
         if [ -f "$d/hang" ]; then
-          trap 'exit 130' INT
           echo '{"type":"system","subtype":"init","session_id":"S","model":"claude-sonnet-5-5"}'
-          sleep 30 >/dev/null 2>&1 &
-          wait
+          while IFS= read -r line; do
+            case "$line" in *interrupt*)
+              printf '%s\\n' "$line" > "$d/interrupt-$n"
+              echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"","session_id":"S","num_turns":1,"terminal_reason":"aborted_streaming"}'
+              exit 0;;
+            esac
+          done
           exit 0
         fi
         cat "$d/out-$n" 2>/dev/null || cat "$d/out"
@@ -87,7 +96,7 @@ final class ClaudeCodeChatTests: XCTestCase {
         }
         let lines: [JSONValue] = [
             ["type": "system", "subtype": "init", "session_id": .string(session), "model": "claude-sonnet-5-5", "apiKeySource": "none",
-             "claude_code_version": "2.1.299", "cwd": .string(root), "tools": ["Edit"], "permissionMode": "acceptEdits"],
+             "claude_code_version": "2.1.299", "cwd": .string(root), "tools": ["Edit"], "permissionMode": "default"],
             assistant("m1", ["type": "text", "text": "On it."]),
             assistant("m1", ["type": "tool_use", "id": "t1", "name": "Edit",
                              "input": ["file_path": .string(root + "/hello.txt"), "old_string": "helo", "new_string": "hello"]]),
@@ -98,6 +107,7 @@ final class ClaudeCodeChatTests: XCTestCase {
             ["type": "result", "subtype": "success", "is_error": false, "num_turns": 2, "duration_ms": 3_000,
              "result": .string(reply), "session_id": .string(session), "total_cost_usd": .number(cost),
              "usage": ["input_tokens": 6, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 1_800, "output_tokens": 40],
+             "modelUsage": ["claude-sonnet-5-5": ["contextWindow": 1_000_000, "costUSD": .number(cost)]],
              "permission_denials": []],
         ]
         return lines.map { $0.serialized() }.joined(separator: "\n") + "\n"
@@ -107,28 +117,32 @@ final class ClaudeCodeChatTests: XCTestCase {
         try text.write(to: cli.appendingPathComponent("out"), atomically: true, encoding: .utf8)
     }
 
-    private func args(_ n: Int) throws -> [String] {
-        try String(contentsOf: cli.appendingPathComponent("args-\(n)"), encoding: .utf8).split(separator: "\n").map(String.init)
+    private func read(_ name: String) throws -> String {
+        try String(contentsOf: cli.appendingPathComponent(name), encoding: .utf8)
     }
 
+    private func args(_ n: Int) throws -> [String] { try read("args-\(n)").split(separator: "\n").map(String.init) }
+
     private func prompt(_ n: Int) throws -> String {
-        let data = try Data(contentsOf: cli.appendingPathComponent("stdin-\(n)"))
-        return JSONValue(parsing: data)?["message"]?["content"]?.array?.last?["text"]?.string ?? ""
+        JSONValue(parsing: try read("stdin-\(n)"))?["message"]?["content"]?.array?.first?["text"]?.string ?? ""
     }
 
     private func runs() -> Int {
-        Int((try? String(contentsOf: cli.appendingPathComponent("count"), encoding: .utf8))?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "0") ?? 0
+        Int(((try? read("count")) ?? "0").trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
     }
 
-    private func send(_ text: String, to vm: SessionVM) async throws {
-        transport.send(text, sessionID: vm.id)
-        let deadline = Date().addingTimeInterval(20)
+    private func waitWhileRunning(_ vm: SessionVM, seconds: TimeInterval = 20) async throws {
+        let deadline = Date().addingTimeInterval(seconds)
         try await Task.sleep(nanoseconds: 50_000_000)
         while vm.running {
             if Date() > deadline { return XCTFail("the turn never ended") }
             try await Task.sleep(nanoseconds: 20_000_000)
         }
+    }
+
+    private func send(_ text: String, to vm: SessionVM) async throws {
+        transport.send(text, sessionID: vm.id)
+        try await waitWhileRunning(vm)
     }
 
     private func texts(_ vm: SessionVM, _ role: MessageBody.Role) -> [String] {
@@ -145,35 +159,78 @@ final class ClaudeCodeChatTests: XCTestCase {
         XCTAssertEqual(texts(vm, .assistant), ["On it.", "Done — fixed it."])
         XCTAssertEqual(vm.entries.compactMap { $0.tool?.name }, ["edit"])
         XCTAssertEqual(vm.entries.compactMap { $0.tool?.summary }, ["Edited hello.txt"])
-        XCTAssertTrue(texts(vm, .notice).contains("Claude Code · claude-sonnet-5-5 · 2 steps · 1,906 in · 40 out · 3s · ≈ $0.04 at API prices (your Claude plan covers it)"),
+        XCTAssertTrue(texts(vm, .notice).contains("Claude Code: 2 steps · 1,906 tokens in (1,800 cached) · 40 out · about $0.04 at API prices — covered by your Claude plan."),
                       "\(texts(vm, .notice))")
         XCTAssertTrue(texts(vm, .error).isEmpty, "\(texts(vm, .error))")
-        XCTAssertEqual(vm.claudeCode?.sessionID, "S1")
-        XCTAssertEqual(vm.claudeCode?.started, true)
-        XCTAssertEqual(vm.claudeCode?.lastTotalCostUSD, 0.04)
-        XCTAssertEqual(transport.log.claudeCode(vm.id), vm.claudeCode, "stored with the chat")
+        let stored = transport.log.claudeSession(vm.id)
+        XCTAssertEqual(stored.session, "S1", "stored with the chat")
+        XCTAssertEqual(stored.cost, 0.04)
+        XCTAssertNotNil(stored.syncedAt)
         XCTAssertEqual(vm.contextUsed, 3 + 100 + 900)
+        XCTAssertEqual(transport.contextLimit(for: vm), 1_000_000, "the window the result reported")
+        XCTAssertEqual(transport.turnRoute[vm.id]?.model, "claude-sonnet-5-5")
         XCTAssertEqual(vm.promptHistory.last?.outcome, .completed)
         XCTAssertEqual(vm.promptHistory.last?.route, "Claude Code")
 
         let first = try args(1)
-        XCTAssertEqual(Array(first.prefix(9)), ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
-                                                "--include-partial-messages", "--model", "sonnet"])
+        XCTAssertEqual(Array(first.prefix(13)), ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+                                                 "--include-partial-messages", "--model", "sonnet", "--permission-mode", "default",
+                                                 "--permission-prompt-tool", "stdio"])
         let sessionFlag = try XCTUnwrap(first.firstIndex(of: "--session-id"))
         XCTAssertNotNil(UUID(uuidString: first[sessionFlag + 1]), "a new session under an id Vision made")
-        XCTAssertTrue(first.joined(separator: " ").contains("--permission-mode acceptEdits"))
+        XCTAssertEqual(first[first.firstIndex(of: "--append-system-prompt")! + 1], ClaudeCodeTurn.systemNote)
         XCTAssertEqual(try prompt(1), "fix the greeting", "a new chat has nothing to recap")
 
-        // The next message continues the same Claude Code session; the cost shown is this turn's share.
+        // The next message carries on the same Claude Code session; the cost shown is this turn's share.
         try setOutput(turn("And the farewell too.", cost: 0.07))
         try await send("and the farewell", to: vm)
         let second = try args(2)
-        let resume = try XCTUnwrap(second.firstIndex(of: "--resume"))
-        XCTAssertEqual(second[resume + 1], "S1")
+        XCTAssertEqual(second[try XCTUnwrap(second.firstIndex(of: "--resume")) + 1], "S1")
         XCTAssertFalse(second.contains("--session-id"))
         XCTAssertEqual(try prompt(2), "and the farewell", "the session has seen everything: no recap")
-        XCTAssertTrue(texts(vm, .notice).last?.hasSuffix("≈ $0.03 at API prices (your Claude plan covers it)") == true,
+        XCTAssertTrue(texts(vm, .notice).last?.hasSuffix("about $0.03 at API prices — covered by your Claude plan.") == true,
                       "\(texts(vm, .notice).last ?? "")")
+    }
+
+    func testAPermissionQuestionIsAskedOnTheChatsCard() async throws {
+        let vm = transport.newSession(cwd: dir.path)
+        try (#"{"type":"control_request","request_id":"req-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"rm -rf build"},"tool_use_id":"toolu_q"}}"#
+             + "\n").write(to: cli.appendingPathComponent("ask"), atomically: true, encoding: .utf8)
+        try setOutput(turn("Cleaned."))
+        transport.send("clean the build", sessionID: vm.id)
+        let deadline = Date().addingTimeInterval(10)
+        while vm.pendingGates.isEmpty {
+            if Date() > deadline { return XCTFail("no permission card") }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let gate = try XCTUnwrap(vm.pendingGates.first)
+        XCTAssertEqual(gate.name, "run_shell_command")
+        XCTAssertEqual(gate.detail, "Run command: rm -rf build")
+        transport.answerGate(sessionID: vm.id, gateID: gate.id, allow: true)
+        try await waitWhileRunning(vm)
+        XCTAssertEqual(JSONValue(parsing: try read("answer-1")),
+                       ["type": "control_response", "response": ["subtype": "success", "request_id": "req-1",
+                        "response": ["behavior": "allow", "updatedInput": ["command": "rm -rf build"], "toolUseID": "toolu_q"]]])
+        XCTAssertEqual(texts(vm, .assistant).last, "Cleaned.")
+
+        // A read-only command goes ahead without a card; a declined one tells Claude so.
+        try (#"{"type":"control_request","request_id":"req-2","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"},"tool_use_id":"toolu_r"}}"#
+             + "\n").write(to: cli.appendingPathComponent("ask"), atomically: true, encoding: .utf8)
+        try await send("list it", to: vm)
+        XCTAssertEqual(JSONValue(parsing: try read("answer-2"))?["response"]?["response"]?["behavior"], "allow")
+
+        try (#"{"type":"control_request","request_id":"req-3","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"/etc/hosts"},"tool_use_id":"toolu_s"}}"#
+             + "\n").write(to: cli.appendingPathComponent("ask"), atomically: true, encoding: .utf8)
+        transport.send("edit hosts", sessionID: vm.id)
+        while vm.pendingGates.isEmpty {
+            if Date() > deadline.addingTimeInterval(10) { return XCTFail("no permission card") }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(vm.pendingGates.first?.detail, "Write outside the project: /etc/hosts")
+        transport.answerGate(sessionID: vm.id, gateID: vm.pendingGates[0].id, allow: false)
+        try await waitWhileRunning(vm)
+        XCTAssertEqual(JSONValue(parsing: try read("answer-3"))?["response"]?["response"],
+                       ["behavior": "deny", "message": .string(ClaudeCodePermissions.declined), "toolUseID": "toolu_s"])
     }
 
     func testMovingBetweenClaudeCodeAndAnotherModelKeepsTheConversation() async throws {
@@ -181,25 +238,27 @@ final class ClaudeCodeChatTests: XCTestCase {
         try setOutput(turn("Done — fixed it."))
         try await send("fix the greeting", to: vm)
 
-        // On another model, the conversation includes Claude Code's turn and what its tools did.
+        // On another model, the conversation is rebuilt from the rows, Claude Code's turn and its tool work included.
         transport.setRoute(transport.config.providers[1].routeID, for: vm)
         try await send("what did you change?", to: vm)
         let toSpark = try XCTUnwrap(FakeModelServer.seen.last?.messages)
-        XCTAssertTrue(toSpark.contains { $0["role"] == "user" && $0["content"] == "fix the greeting" })
-        XCTAssertTrue(toSpark.contains { $0["role"] == "assistant"
-            && $0["content"] == "Done — fixed it.\n\n[Claude Code's tool work this turn: Edit hello.txt]" }, "\(toSpark)")
+        XCTAssertTrue(toSpark.contains { $0["role"] == "user" && $0["content"] == "fix the greeting" }, "\(toSpark)")
+        XCTAssertTrue(toSpark.contains { $0["role"] == "assistant" && $0["content"] == "Done — fixed it." }, "\(toSpark)")
+        XCTAssertTrue(toSpark.contains { $0["role"] == "assistant" && ($0["content"] ?? "").contains("[earlier tool activity]") }, "\(toSpark)")
         XCTAssertEqual(texts(vm, .assistant).last, "Spark says hi.")
 
-        // Back on Claude Code: the session resumes, and what it missed goes along first.
+        // Back on Claude Code: the session carries on, and what it missed goes along first.
         transport.setRoute(transport.config.providers[0].routeID, for: vm)
         try setOutput(turn("You're welcome."))
         try await send("thanks", to: vm)
         XCTAssertTrue(try args(2).joined(separator: " ").contains("--resume S1"))
         let recap = try prompt(2)
-        XCTAssertTrue(recap.hasPrefix("[Earlier in this Vision chat — messages you haven't seen"), recap)
+        XCTAssertTrue(recap.hasPrefix(ClaudeCodeRecap.header), recap)
         XCTAssertTrue(recap.contains("Person: what did you change?\n\nAssistant: Spark says hi."), recap)
-        XCTAssertFalse(recap.contains("Person: fix the greeting"), "it saw that one itself")
-        XCTAssertTrue(recap.hasSuffix("[End of earlier messages. The new message:]\n\nthanks"), recap)
+        XCTAssertFalse(recap.contains("fix the greeting"), "it saw that one itself")
+        XCTAssertTrue(recap.hasSuffix(ClaudeCodeRecap.footer + "\n\nthanks"), recap)
+        XCTAssertTrue(texts(vm, .notice).contains("This chat now uses Claude Code — Sonnet, on your Claude plan through the claude app on this computer."),
+                      "\(texts(vm, .notice))")
     }
 
     func testASensitiveChatCantUseClaudeCode() async throws {
@@ -223,18 +282,37 @@ final class ClaudeCodeChatTests: XCTestCase {
 
             """)
         try await send("hello", to: vm)
-        XCTAssertTrue(texts(vm, .error).contains { $0.hasPrefix("Claude Code isn't signed in on this Mac. In Terminal, run `claude auth login`") },
-                      "\(texts(vm, .error))")
-        XCTAssertEqual(vm.claudeCode?.started, false, "nothing to resume")
+        XCTAssertTrue(texts(vm, .error).contains(ClaudeCodeError.notSignedIn.errorDescription!), "\(texts(vm, .error))")
         XCTAssertTrue(texts(vm, .notice).contains("Not delivered to the model: hello"))
-        let firstID = try args(1)[try XCTUnwrap(try args(1).firstIndex(of: "--session-id")) + 1]
+        XCTAssertEqual(transport.log.claudeSession(vm.id).session, "75eaed3b", "the session it opened is the one to carry on")
 
         try setOutput(turn("Hi!"))
         try await send("hello again", to: vm)
-        let second = try args(2)
-        let secondID = second[try XCTUnwrap(second.firstIndex(of: "--session-id")) + 1]
-        XCTAssertNotEqual(firstID, secondID, "a fresh session id, so Claude Code never says it is already in use")
+        XCTAssertTrue(try args(2).joined(separator: " ").contains("--resume 75eaed3b"))
         XCTAssertEqual(texts(vm, .assistant).last, "Hi!")
+    }
+
+    func testALostSessionStartsANewOneWithARecap() async throws {
+        let vm = transport.newSession(cwd: dir.path)
+        try setOutput(turn("First."))
+        try await send("first message", to: vm)
+        // Claude Code lost the session: --resume finds nothing, so the turn starts over with the chat so far.
+        try """
+            {"type":"result","subtype":"error_during_execution","is_error":true,"result":"","session_id":"S1","num_turns":0,"errors":["No conversation found with session ID: S1"]}
+
+            """.write(to: cli.appendingPathComponent("out-2"), atomically: true, encoding: .utf8)
+        try setOutput(turn("Second.", session: "S2"))
+        try await send("second message", to: vm)
+        XCTAssertEqual(runs(), 3)
+        XCTAssertTrue(try args(2).joined(separator: " ").contains("--resume S1"))
+        XCTAssertTrue(try args(3).contains("--session-id"))
+        let recap = try prompt(3)
+        XCTAssertTrue(recap.hasPrefix(ClaudeCodeRecap.header), recap)
+        XCTAssertTrue(recap.contains("Person: first message"), recap)
+        XCTAssertTrue(recap.hasSuffix("second message"), recap)
+        XCTAssertTrue(texts(vm, .notice).contains("Claude Code no longer had this chat's session, so a new one starts here, with a recap of the chat so far."))
+        XCTAssertEqual(transport.log.claudeSession(vm.id).session, "S2")
+        XCTAssertEqual(texts(vm, .assistant).last, "Second.")
     }
 
     func testAGoalRunsOneClaudeCodeTurnPerRound() async throws {
@@ -244,13 +322,14 @@ final class ClaudeCodeChatTests: XCTestCase {
         try await send("/goal fix every greeting", to: vm)
         XCTAssertEqual(runs(), 2, "two rounds, each one claude -p")
         XCTAssertTrue(try prompt(1).contains("fix every greeting"))
-        XCTAssertTrue(try args(2).joined(separator: " ").contains("--resume S1"), "round 2 continues round 1's session")
+        XCTAssertTrue(try prompt(1).hasSuffix(ClaudeCodeTurn.goalNote), "a goal round says how to end it on Claude Code")
+        XCTAssertTrue(try args(2).joined(separator: " ").contains("--resume S1"), "round 2 carries on round 1's session")
         XCTAssertTrue(texts(vm, .notice).contains { $0.hasPrefix("✅ Goal complete after 2 rounds") }, "\(texts(vm, .notice))")
         XCTAssertEqual(vm.promptHistory.last?.source, .goal)
         XCTAssertEqual(vm.promptHistory.last?.outcome, .completed)
     }
 
-    func testStopEndsAClaudeCodeTurn() async throws {
+    func testStopInterruptsAClaudeCodeTurn() async throws {
         let vm = transport.newSession(cwd: dir.path)
         try Data().write(to: cli.appendingPathComponent("hang"))
         transport.send("take your time", sessionID: vm.id)
@@ -265,9 +344,11 @@ final class ClaudeCodeChatTests: XCTestCase {
             if Date().timeIntervalSince(started) > 10 { return XCTFail("Stop didn't stop it") }
             try await Task.sleep(nanoseconds: 20_000_000)
         }
-        XCTAssertLessThan(Date().timeIntervalSince(started), 5, "SIGINT was enough")
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5, "Claude Code's own interrupt was enough")
+        XCTAssertEqual(JSONValue(parsing: try read("interrupt-1"))?["request"]?["subtype"], "interrupt")
         XCTAssertTrue(texts(vm, .notice).contains("Stopped."), "\(texts(vm, .notice))")
         XCTAssertEqual(vm.promptHistory.last?.outcome, .stopped)
+        XCTAssertEqual(transport.log.claudeSession(vm.id).session, "S", "the session it opened is kept")
     }
 
     func testAddingClaudeCodeFromTheCard() {

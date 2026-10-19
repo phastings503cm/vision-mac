@@ -3,37 +3,71 @@ import Foundation
 // MARK: - Reading `claude -p --output-format stream-json`
 //
 // One JSON object per line (Claude Code's headless "stream-json" output, the Agent SDK's message types):
-//   {"type":"system","subtype":"init", session_id, model, tools, permissionMode, claude_code_version, apiKeySource …}
+//   {"type":"system","subtype":"init", session_id, model, permissionMode, claude_code_version, apiKeySource …}
 //   {"type":"stream_event","event":{…the Messages API stream event…}, parent_tool_use_id}   (--include-partial-messages)
 //   {"type":"assistant","message":{id, model, content:[one text | thinking | tool_use block], usage}, parent_tool_use_id, error?}
-//   {"type":"user","message":{content:[{type:"tool_result", tool_use_id, content, is_error}]}, tool_use_result, parent_tool_use_id}
-//   {"type":"system","subtype":"api_retry" | "compact_boundary" | "permission_denied" | "informational" …}
+//   {"type":"user","message":{content:[{type:"tool_result", tool_use_id, content, is_error}]}, tool_use_result}
+//   {"type":"system","subtype":"api_retry" | "compact_boundary" | "status" | "informational" | "permission_denied" …}
+//   {"type":"rate_limit_event","rate_limit_info":{status, rateLimitType, utilization, resetsAt}}
+//   {"type":"control_request","request_id","request":{"subtype":"can_use_tool", tool_name, input, tool_use_id …}}
 //   {"type":"result","subtype":"success" | "error_max_turns" | "error_during_execution" | …, is_error, result,
-//    total_cost_usd, usage, num_turns, session_id, permission_denials …}
-// The parser turns them into the events Vision's own engine emits (`EngineEvent`), so a Claude Code turn draws
-// exactly like any other: streamed text and thinking, a row per tool call with its result, files changed, todos,
-// retries. Messages from Claude Code's subagents (a non-null `parent_tool_use_id`) show as tool rows named after
-// the subagent's task; their text stays inside the subagent, as it does in Claude Code. Unknown lines and
-// unknown fields are ignored, so a newer CLI never breaks a turn.
+//    total_cost_usd, usage, modelUsage, num_turns, session_id, permission_denials …}
+// The parser turns them into the events Vision's own engine emits (`EngineEvent`), so a Claude Code turn draws exactly
+// like any other: streamed text and thinking, a row per tool call with its result, files changed, the plan, retries.
+// Only the main conversation becomes rows; a subagent's steps show on the working line. Permission questions and
+// other control requests go back to the caller to answer. Unknown lines and fields are ignored. The same reading as
+// Vision for Windows (ClaudeCodeStream.cs).
 
 /// What a turn emits besides the engine's own events.
 public enum ClaudeCodeEvent: Sendable {
     case engine(EngineEvent)
-    /// A one-line note for the chat ("Claude Code compacted its conversation …").
+    /// A one-line note for the chat ("Claude Code compacted the conversation …").
     case notice(String)
+    /// The chat's working line ("Claude Code is compacting the conversation…", a subagent's step); nil clears it.
+    case activity(String?)
+    /// Claude Code asks whether a tool call may run: the caller answers on stdin.
+    case permission(ClaudeCodePermissionRequest)
+    /// Another control request: the caller refuses it on stdin so the CLI never waits.
+    case unhandledControl(requestID: String, subtype: String)
 }
 
-/// A tool call Claude Code was refused (the permission setting, or nobody to ask).
-public struct ClaudeCodeDenial: Sendable, Equatable {
-    public var toolName: String
-    public var toolUseID: String
-    public var detail: String
+/// A subscription limit Claude Code reported (`rate_limit_event`).
+public struct ClaudeCodeRateLimit: Sendable, Equatable {
+    public var status: String
+    public var type: String?
+    public var utilization: Double?
+    public var resetsAt: Date?
 
-    public init(toolName: String, toolUseID: String, detail: String) {
-        self.toolName = toolName
-        self.toolUseID = toolUseID
-        self.detail = detail
+    public init(status: String, type: String?, utilization: Double?, resetsAt: Date?) {
+        self.status = status
+        self.type = type
+        self.utilization = utilization
+        self.resetsAt = resetsAt
     }
+
+    public var typeWords: String {
+        switch type {
+        case "five_hour": "five-hour"
+        case "seven_day": "weekly"
+        case "seven_day_opus": "weekly Opus"
+        case "seven_day_sonnet": "weekly Sonnet"
+        case "overage": "extra-usage"
+        default: "usage"
+        }
+    }
+
+    /// " — it resets at 16:40" (today), " — it resets Tue 21 Oct, 09:00" (later), "" (unknown).
+    public func resetWords(now: Date = Date(), calendar: Calendar = .current) -> String {
+        guard let resetsAt else { return "" }
+        let today = calendar.isDate(resetsAt, inSameDayAs: now)
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_GB")
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = today ? "HH:mm" : "EEE d MMM, HH:mm"
+        return today ? " — it resets at \(formatter.string(from: resetsAt))" : " — it resets \(formatter.string(from: resetsAt))"
+    }
+
+    public var percent: Int? { utilization.map { Int(($0 <= 1 ? $0 * 100 : $0).rounded()) } }
 }
 
 /// The `result` line: how the turn ended, what it cost, what it used.
@@ -45,19 +79,22 @@ public struct ClaudeCodeResult: Sendable, Equatable {
     public var sessionID: String?
     public var numTurns: Int
     public var durationMs: Int?
-    /// Claude Code's own estimate at API prices; on a resumed session (Claude Code 2.1.277+) the session's
-    /// running total, earlier turns included.
+    /// Claude Code's own estimate at API prices for the whole conversation so far (it adds up across --resume).
     public var totalCostUSD: Double?
     /// This turn's tokens (the main loop's: input + cache reads + cache writes as prompt, output as completion).
     public var usage: LLMUsage?
-    public var denials: [ClaudeCodeDenial]
+    public var denials: Int
     /// An error result's messages.
     public var errors: [String]
     public var terminalReason: String?
+    /// The model's context window, as `modelUsage` reports it.
+    public var contextWindow: Int?
+    /// A command the CLI ran itself (/compact) instead of a model turn.
+    public var localCommand: String?
 
     public init(subtype: String, isError: Bool, text: String, sessionID: String? = nil, numTurns: Int = 0,
-                durationMs: Int? = nil, totalCostUSD: Double? = nil, usage: LLMUsage? = nil,
-                denials: [ClaudeCodeDenial] = [], errors: [String] = [], terminalReason: String? = nil) {
+                durationMs: Int? = nil, totalCostUSD: Double? = nil, usage: LLMUsage? = nil, denials: Int = 0,
+                errors: [String] = [], terminalReason: String? = nil, contextWindow: Int? = nil, localCommand: String? = nil) {
         self.subtype = subtype
         self.isError = isError
         self.text = text
@@ -69,10 +106,9 @@ public struct ClaudeCodeResult: Sendable, Equatable {
         self.denials = denials
         self.errors = errors
         self.terminalReason = terminalReason
+        self.contextWindow = contextWindow
+        self.localCommand = localCommand
     }
-
-    /// The turn stopped at its step limit while Claude still had work to do.
-    public var hitTurnLimit: Bool { subtype == "error_max_turns" }
 }
 
 /// Reads one turn's stream-json, line by line. Not thread-safe: feed it from one queue.
@@ -81,44 +117,49 @@ public final class ClaudeCodeStreamParser {
     public let workspace: URL
 
     public private(set) var sessionID: String?
+    /// The model the alias resolved to ("claude-sonnet-5-5").
     public private(set) var model: String?
     public private(set) var version: String?
-    /// "none" for a Claude plan sign-in; "ANTHROPIC_API_KEY", "apiKeyHelper" … when a key pays.
+    /// Where the CLI's credential came from: "none" for a claude.ai sign-in, "ANTHROPIC_API_KEY" for a key in the
+    /// environment (billed to that key, not the subscription).
     public private(set) var apiKeySource: String?
     public private(set) var permissionMode: String?
+    /// The last result (background work can bring more than one; `usage` adds them up).
     public private(set) var result: ClaudeCodeResult?
-    /// The last non-empty text the main loop wrote.
+    public private(set) var results = 0
+    /// Every result's tokens, added up.
+    public private(set) var usage: LLMUsage?
+    /// The last thing the main conversation said (what /goal reads its end marker from).
     public private(set) var lastReplyText = ""
-    /// How full the context is: the last main-loop request's input + cache tokens.
+    /// How full the context was on the last model call (its input, cached and new).
     public private(set) var contextTokens: Int?
     /// An API error Claude Code reported as a synthetic assistant message ("authentication_failed", "rate_limit" …)
     /// and its text ("Not logged in · Please run /login").
     public private(set) var apiError: (category: String, text: String)?
-    /// The model actually answered (a real message, not a synthetic error): the session exists from now on.
-    public private(set) var reachedModel = false
-    public private(set) var denials: [ClaudeCodeDenial] = []
-    /// One line per finished main-loop tool call ("Edited Sources/App.swift"), for the conversation other models
-    /// are given — Claude Code's tool work itself stays in its session.
-    public private(set) var toolLog: [String] = []
+    public private(set) var rateLimit: ClaudeCodeRateLimit?
+    /// Something happened beyond the prompt: a reply, a tool call (the session holds this turn now).
+    public private(set) var progressed = false
+    /// Lines that weren't JSON (a crash's stack trace on stdout) — kept for the error message.
+    public private(set) var unparsed = ""
 
     private struct Tool {
         var name: String
-        var visionName: String
-        var input: JSONValue
-        var preview: String
+        var input: JSONValue?
     }
     private var tools: [String: Tool] = [:]
-    /// Subagent runs by the id of the tool call that started them: what to call their rows.
-    private var subagents: [String: String] = [:]
+    private var toolOrder: [String] = []
+    private var finished: Set<String> = []
+    private var tasks: [TodoItem] = []
+    private var taskCreates: [String: String] = [:]
+    private var limitWarnings: Set<String> = []
     /// Text of the current model message not yet handed over with `.assistantMessage`.
     private var pendingText = ""
     private var pendingMessageID: String?
-    /// Messages whose text arrived as deltas (their full text block must not be drawn again).
+    /// Messages whose text or thinking arrived as deltas (their whole blocks must not be drawn again).
     private var streamed: Set<String> = []
     private var currentStreamID: String?
     private var streamedTextInCurrent = false
-    private var countedUsage: Set<String> = []
-    private var retrying = 0
+    private var retries = 0
 
     public init(workspace: URL) {
         self.workspace = workspace.standardizedFileURL
@@ -129,14 +170,23 @@ public final class ClaudeCodeStreamParser {
     /// Read one line; the events it makes, in order.
     public func consume(_ line: String) -> [ClaudeCodeEvent] {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix("{"), let json = JSONValue(parsing: trimmed), let type = json["type"]?.string else { return [] }
-        if sessionID == nil, let id = json["session_id"]?.string, !id.isEmpty { sessionID = id }
-        switch type {
+        guard !trimmed.isEmpty else { return [] }
+        guard let json = JSONValue(parsing: trimmed), json.object != nil else {
+            if unparsed.count < 4_000 { unparsed += trimmed + "\n" }
+            return []
+        }
+        let parent = json["parent_tool_use_id"]?.string
+        switch json["type"]?.string {
         case "system": return system(json)
-        case "stream_event": return streamEvent(json)
-        case "assistant": return assistant(json)
-        case "user": return user(json)
+        case "stream_event": return parent == nil ? streamEvent(json["event"]) : []
+        case "assistant": return parent == nil ? assistant(json) : subagent(json)
+        case "user": return parent == nil ? user(json) : []
+        case "rate_limit_event": return rateLimitEvent(json["rate_limit_info"])
         case "result": return resultLine(json)
+        case "control_request":
+            if let request = ClaudeCodePermissionRequest.from(json) { return [.permission(request)] }
+            return [.unhandledControl(requestID: json["request_id"]?.string ?? "",
+                                      subtype: json["request"]?["subtype"]?.string ?? "unknown")]
         default: return []
         }
     }
@@ -144,60 +194,67 @@ public final class ClaudeCodeStreamParser {
     /// The stream ended: hand over the last text.
     public func finish() -> [ClaudeCodeEvent] { flushText() }
 
+    /// Tool calls that never got a result (the turn was stopped, or the CLI died): close their rows.
+    public func closeDangling(_ why: String) -> [ClaudeCodeEvent] {
+        var out: [ClaudeCodeEvent] = []
+        for id in toolOrder where !finished.contains(id) {
+            finished.insert(id)
+            out.append(.engine(.toolFinished(id: id, name: ClaudeCodeTools.visionName(tools[id]?.name ?? "tool"), ok: false,
+                                             summary: why, output: why)))
+        }
+        return out
+    }
+
     // MARK: system
 
     private func system(_ json: JSONValue) -> [ClaudeCodeEvent] {
         switch json["subtype"]?.string {
         case "init":
-            if let id = json["session_id"]?.string, !id.isEmpty { sessionID = id }
+            sessionID = json["session_id"]?.string ?? sessionID
             model = json["model"]?.string ?? model
             version = json["claude_code_version"]?.string ?? version
             apiKeySource = json["apiKeySource"]?.string ?? apiKeySource
             permissionMode = json["permissionMode"]?.string ?? permissionMode
             return []
-        case "api_retry":
-            let attempt = json["attempt"]?.int ?? (retrying + 1)
-            retrying = max(retrying, attempt)
-            let delay = Double(json["retry_delay_ms"]?.int ?? 0) / 1000
-            return [.engine(.retrying(attempt: attempt, delay: delay,
-                                      reason: Self.retryReason(json["error"]?.string, status: json["error_status"]?.int)))]
-        case "compact_boundary":
-            let before = json["compact_metadata"]?["pre_tokens"]?.int
-            return [.notice("Claude Code compacted its conversation" + (before.map { " (it was about \($0.formatted()) tokens)" } ?? "") + ".")]
-        case "permission_denied":
-            let id = json["tool_use_id"]?.string ?? ""
-            let name = json["tool_name"]?.string ?? "a tool"
-            if !denials.contains(where: { $0.toolUseID == id && !id.isEmpty }) {
-                denials.append(ClaudeCodeDenial(toolName: name, toolUseID: id, detail: tools[id]?.preview ?? (json["message"]?.string ?? "")))
+        case "status":
+            switch json["status"]?.string {
+            case "compacting": return [.activity("Claude Code is compacting the conversation…")]
+            case "requesting": return [.activity("Waiting for Claude…")]
+            default: return [.activity(nil)]
             }
-            return []
+        case "api_retry":
+            retries += 1
+            let attempt = json["attempt"]?.int ?? retries
+            let delay = Double(max(0, json["retry_delay_ms"]?.int ?? 0)) / 1000
+            let reason = (json["error"]?.string ?? "error").replacingOccurrences(of: "_", with: " ")
+                + (json["error_status"]?.int.map { ", HTTP \($0)" } ?? "")
+            return [.engine(.retrying(attempt: attempt, delay: delay, reason: "Claude Code: \(reason)"))]
+        case "compact_boundary":
+            let meta = json["compact_metadata"]
+            let how = meta?["trigger"]?.string == "auto"
+                ? "Claude Code compacted the conversation to make room" : "Claude Code compacted the conversation"
+            if let before = meta?["pre_tokens"]?.int, let after = meta?["post_tokens"]?.int {
+                return [.notice("\(how): ~\(before.formatted()) → ~\(after.formatted()) tokens.")]
+            }
+            return [.notice(how + ".")]
         case "informational":
-            guard let content = json["content"]?.string, !content.isEmpty,
-                  ["warning", "notice"].contains(json["level"]?.string ?? "") else { return [] }
-            return [.notice("Claude Code: \(content)")]
+            guard ["warning", "error"].contains(json["level"]?.string ?? ""), let content = json["content"]?.string else { return [] }
+            return [.notice("Claude Code: " + ClaudeCodeTools.prefix(content, 400))]
         default:
             return []
         }
     }
 
-    static func retryReason(_ category: String?, status: Int?) -> String {
-        let words: String
-        switch category {
-        case "rate_limit": words = "rate limited"
-        case "overloaded": words = "overloaded"
-        case "server_error": words = "server error"
-        case "authentication_failed": words = "sign-in refused"
-        case "billing_error": words = "billing problem"
-        case .some(let other) where !other.isEmpty && other != "unknown": words = other.replacingOccurrences(of: "_", with: " ")
-        default: words = status == nil ? "no response" : "error"
-        }
-        return "Claude Code: " + words + (status.map { " (\($0))" } ?? "")
+    private func recovered() -> [ClaudeCodeEvent] {
+        guard retries > 0 else { return [] }
+        defer { retries = 0 }
+        return [.engine(.recovered(attempts: retries))]
     }
 
     // MARK: stream_event (partial messages)
 
-    private func streamEvent(_ json: JSONValue) -> [ClaudeCodeEvent] {
-        guard json["parent_tool_use_id"]?.isNull ?? true, let event = json["event"] else { return [] }
+    private func streamEvent(_ event: JSONValue?) -> [ClaudeCodeEvent] {
+        guard let event else { return [] }
         var out: [ClaudeCodeEvent] = []
         switch event["type"]?.string {
         case "message_start":
@@ -217,13 +274,11 @@ public final class ClaudeCodeStreamParser {
                 if let text = delta?["text"]?.string, !text.isEmpty {
                     if let id = currentStreamID { streamed.insert(id) }
                     streamedTextInCurrent = true
-                    reachedModel = true
                     out.append(.engine(.textDelta(text)))
                 }
             case "thinking_delta":
                 if let thinking = delta?["thinking"]?.string, !thinking.isEmpty {
                     if let id = currentStreamID { streamed.insert(id) }
-                    reachedModel = true
                     out.append(.engine(.reasoningDelta(thinking)))
                 }
             default: break
@@ -233,30 +288,18 @@ public final class ClaudeCodeStreamParser {
         return out
     }
 
-    private func recovered() -> [ClaudeCodeEvent] {
-        guard retrying > 0 else { return [] }
-        defer { retrying = 0 }
-        return [.engine(.recovered(attempts: retrying))]
-    }
-
     // MARK: assistant
 
     private func assistant(_ json: JSONValue) -> [ClaudeCodeEvent] {
         guard let message = json["message"] else { return [] }
-        let parent = json["parent_tool_use_id"]?.string
         let blocks = message["content"]?.array ?? []
-        // An API failure arrives as a synthetic message with `error` set ("Not logged in · Please run /login").
-        let category = json["error"]?.string ?? ""
-        if !category.isEmpty || json["is_api_error_message"]?.bool == true {
-            if parent == nil {
-                let text = blocks.compactMap { $0["text"]?.string }.joined(separator: "\n")
-                apiError = (category.isEmpty ? "unknown" : category, text)
-            }
+        // Not the model speaking: the CLI telling us its call failed ("Not logged in · Please run /login").
+        if let error = json["error"]?.string, !error.isEmpty,
+           json["is_api_error_message"]?.bool == true || message["model"]?.string == "<synthetic>" {
+            apiError = (error, ClaudeCodeTools.contentText(message["content"]))
             return []
         }
-        // Other synthetic messages (Claude Code's own stand-ins) are not the model speaking.
         if message["model"]?.string == "<synthetic>" { return [] }
-        guard parent == nil else { return subagentAssistant(blocks, parent: parent!) }
 
         var out: [ClaudeCodeEvent] = []
         let id = message["id"]?.string ?? json["uuid"]?.string ?? UUID().uuidString
@@ -264,40 +307,27 @@ public final class ClaudeCodeStreamParser {
             out += flushText()
             pendingMessageID = id
         }
-        if currentStreamID != id { out += recovered() }
-        reachedModel = true
-        if !countedUsage.contains(id), let usage = message["usage"] {
-            countedUsage.insert(id)
-            contextTokens = (usage["input_tokens"]?.int ?? 0) + (usage["cache_creation_input_tokens"]?.int ?? 0)
-                + (usage["cache_read_input_tokens"]?.int ?? 0)
+        out += recovered()
+        if let usage = message["usage"], let input = usage["input_tokens"]?.int {
+            contextTokens = input + (usage["cache_read_input_tokens"]?.int ?? 0) + (usage["cache_creation_input_tokens"]?.int ?? 0)
         }
         for block in blocks {
             switch block["type"]?.string {
             case "text":
                 guard let text = block["text"]?.string, !text.isEmpty else { continue }
+                progressed = true
                 if !streamed.contains(id) {
                     out.append(.engine(.textDelta(pendingText.isEmpty ? text : "\n\n" + text)))
                 }
                 pendingText += pendingText.isEmpty ? text : "\n\n" + text
-                if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { lastReplyText = text }
+                lastReplyText = text
             case "thinking":
                 if !streamed.contains(id), let thinking = block["thinking"]?.string, !thinking.isEmpty {
                     out.append(.engine(.reasoningDelta(thinking)))
                 }
             case "tool_use":
-                guard let callID = block["id"]?.string, let name = block["name"]?.string else { continue }
-                let input = block["input"] ?? [:]
-                let tool = Tool(name: name, visionName: Self.visionName(name), input: input,
-                                preview: Self.preview(name, input, workspace: workspace))
-                tools[callID] = tool
-                if Self.isSubagentTool(name) {
-                    subagents[callID] = input["description"]?.string ?? input["subagent_type"]?.string ?? "Subagent"
-                }
-                let call = ToolCall(id: callID, name: tool.visionName, arguments: input.serialized())
-                out.append(.engine(.assistantMessage(id: id, text: pendingText, calls: [call])))
-                pendingText = ""
-                out.append(.engine(.toolStarted(id: callID, name: tool.visionName, preview: tool.preview)))
-                if name == "TodoWrite", let todos = Self.todos(input) { out.append(.engine(.todos(todos))) }
+                guard let callID = block["id"]?.string else { continue }
+                out += toolUse(callID, name: block["name"]?.string ?? "tool", input: block["input"], messageID: id)
             default:
                 break
             }
@@ -305,20 +335,52 @@ public final class ClaudeCodeStreamParser {
         return out
     }
 
-    private func subagentAssistant(_ blocks: [JSONValue], parent: String) -> [ClaudeCodeEvent] {
-        var out: [ClaudeCodeEvent] = []
-        let owner = subagents[parent] ?? "Subagent"
-        for block in blocks where block["type"]?.string == "tool_use" {
-            guard let callID = block["id"]?.string, let name = block["name"]?.string else { continue }
-            let input = block["input"] ?? [:]
-            let preview = "\(owner) › " + Self.preview(name, input, workspace: workspace)
-            tools[callID] = Tool(name: name, visionName: Self.visionName(name), input: input, preview: preview)
-            if Self.isSubagentTool(name) {
-                subagents[callID] = input["description"]?.string ?? input["subagent_type"]?.string ?? "Subagent"
+    private func toolUse(_ callID: String, name: String, input: JSONValue?, messageID: String) -> [ClaudeCodeEvent] {
+        progressed = true
+        tools[callID] = Tool(name: name, input: input)
+        toolOrder.append(callID)
+        let visionName = ClaudeCodeTools.visionName(name)
+        // The text written before the call closes with it (an ExitPlanMode call carries its plan to the plan panel).
+        var out: [ClaudeCodeEvent] = [
+            .engine(.assistantMessage(id: messageID, text: pendingText,
+                                      calls: [ToolCall(id: callID, name: visionName, arguments: (input ?? [:]).serialized())])),
+            .engine(.toolStarted(id: callID, name: visionName, preview: ClaudeCodeTools.preview(name, input, workspace: workspace))),
+        ]
+        pendingText = ""
+        switch name {
+        case "TodoWrite":
+            if let todos = ClaudeCodeTools.todos(input) { out.append(.engine(.todos(todos))) }
+        case "TaskCreate":
+            taskCreates[callID] = input?["subject"]?.string ?? input?["description"]?.string ?? "Task"
+        case "TaskUpdate":
+            guard let taskID = input?["taskId"]?.string else { break }
+            let status = input?["status"]?.string
+            if let index = tasks.firstIndex(where: { $0.id == taskID }) {
+                if status == "deleted" {
+                    tasks.remove(at: index)
+                } else {
+                    if let subject = input?["subject"]?.string { tasks[index].content = subject }
+                    if let status { tasks[index].status = ClaudeCodeTools.status(status) }
+                }
+            } else if status != "deleted" {
+                tasks.append(TodoItem(id: taskID, content: input?["subject"]?.string ?? "Task \(taskID)",
+                                      status: ClaudeCodeTools.status(status)))
             }
-            out.append(.engine(.toolStarted(id: callID, name: Self.visionName(name), preview: preview)))
+            out.append(.engine(.todos(tasks)))
+        default:
+            break
         }
         return out
+    }
+
+    /// A subagent's step: the working line, not a row.
+    private func subagent(_ json: JSONValue) -> [ClaudeCodeEvent] {
+        (json["message"]?["content"]?.array ?? []).compactMap { block -> ClaudeCodeEvent? in
+            guard block["type"]?.string == "tool_use" else { return nil }
+            let name = block["name"]?.string ?? "tool"
+            let line = "Subagent: \(ClaudeCodeTools.label(name)) \(ClaudeCodeTools.preview(name, block["input"], workspace: workspace))"
+            return .activity(line.trimmingCharacters(in: .whitespaces))
+        }
     }
 
     /// Hand over the text written since the last tool call (it closes the bubble and goes into the log).
@@ -332,194 +394,77 @@ public final class ClaudeCodeStreamParser {
 
     private func user(_ json: JSONValue) -> [ClaudeCodeEvent] {
         guard let blocks = json["message"]?["content"]?.array else { return [] }
+        let structured: JSONValue? = json["tool_use_result"]?.object != nil ? json["tool_use_result"] : nil
         var out: [ClaudeCodeEvent] = []
-        let detail = json["tool_use_result"] ?? json["toolUseResult"]
         for block in blocks where block["type"]?.string == "tool_result" {
-            guard let callID = block["tool_use_id"]?.string else { continue }
-            let tool = tools[callID]
-            let name = tool?.name ?? "tool"
-            let visionName = tool?.visionName ?? name
-            let ok = !(block["is_error"]?.bool ?? false)
-            let (text, images) = Self.resultContent(block["content"])
-            if !images.isEmpty { out.append(.engine(.toolImages(id: callID, images: images))) }
-            let output = Self.cap(text)
-            out.append(.engine(.toolFinished(id: callID, name: visionName, ok: ok,
-                                             summary: Self.summary(name, tool?.input ?? [:], ok: ok, output: text, workspace: workspace),
-                                             output: output)))
-            if ok, let tool, let change = Self.fileChange(tool.name, tool.input, detail: detail, workspace: workspace) {
-                out.append(.engine(.filesChanged([change])))
+            let id = block["tool_use_id"]?.string ?? ""
+            let tool = tools[id] ?? Tool(name: "tool", input: nil)
+            let isError = block["is_error"]?.bool ?? false
+            let content = ClaudeCodeTools.contentText(block["content"])
+            if !isError, tool.name == "TaskCreate", let taskID = structured?["task"]?["id"]?.string {
+                tasks.append(TodoItem(id: taskID, content: structured?["task"]?["subject"]?.string ?? taskCreates[id] ?? "Task"))
+                out.append(.engine(.todos(tasks)))
             }
-            if json["parent_tool_use_id"]?.isNull ?? true, let tool {
-                toolLog.append("\(tool.name) \(tool.preview)".trimmingCharacters(in: .whitespaces) + (ok ? "" : " (failed)"))
+            guard finished.insert(id).inserted else { continue }
+            out.append(.engine(.toolFinished(id: id, name: ClaudeCodeTools.visionName(tool.name), ok: !isError,
+                                             summary: ClaudeCodeTools.summary(tool.name, input: tool.input, result: structured,
+                                                                              content: content, isError: isError),
+                                             output: ClaudeCodeTools.prefix(content, 20_000))))
+            let images = ClaudeCodeTools.images(block["content"])
+            if !images.isEmpty { out.append(.engine(.toolImages(id: id, images: images))) }
+            if !isError, let change = ClaudeCodeTools.change(tool.name, input: tool.input, result: structured, workspace: workspace) {
+                out.append(.engine(.filesChanged([change])))
             }
         }
         return out
+    }
+
+    // MARK: rate limits
+
+    private func rateLimitEvent(_ info: JSONValue?) -> [ClaudeCodeEvent] {
+        guard let status = info?["status"]?.string, status != "allowed" else { return [] }
+        let resets = info?["resetsAt"]?.double.flatMap { $0 > 0 ? Date(timeIntervalSince1970: $0) : nil }
+        let limit = ClaudeCodeRateLimit(status: status, type: info?["rateLimitType"]?.string,
+                                        utilization: info?["utilization"]?.double, resetsAt: resets)
+        if status == "rejected" {
+            rateLimit = limit
+            return []
+        }
+        guard limitWarnings.insert(limit.typeWords).inserted else { return [] }
+        let used = limit.percent.map { "\($0)% of" } ?? "close to"
+        return [.notice("Your Claude plan: \(used) your \(limit.typeWords) limit used\(limit.resetWords()).")]
     }
 
     // MARK: result
 
     private func resultLine(_ json: JSONValue) -> [ClaudeCodeEvent] {
         var out = flushText()
-        let usage = json["usage"].map { u -> LLMUsage in
+        sessionID = json["session_id"]?.string ?? sessionID
+        var turnUsage: LLMUsage?
+        if let u = json["usage"], let input = u["input_tokens"]?.int {
             let cacheRead = u["cache_read_input_tokens"]?.int ?? 0
-            let prompt = (u["input_tokens"]?.int ?? 0) + (u["cache_creation_input_tokens"]?.int ?? 0) + cacheRead
-            return LLMUsage(promptTokens: prompt, completionTokens: u["output_tokens"]?.int ?? 0,
-                            cachedTokens: cacheRead > 0 ? cacheRead : nil)
+            let cacheWrite = u["cache_creation_input_tokens"]?.int ?? 0
+            turnUsage = LLMUsage(promptTokens: input + cacheRead + cacheWrite, completionTokens: u["output_tokens"]?.int ?? 0,
+                                 cachedTokens: cacheRead)
         }
-        var resultDenials = denials
-        for denial in json["permission_denials"]?.array ?? [] {
-            let id = denial["tool_use_id"]?.string ?? ""
-            guard !resultDenials.contains(where: { $0.toolUseID == id && !id.isEmpty }) else { continue }
-            let name = denial["tool_name"]?.string ?? "tool"
-            resultDenials.append(ClaudeCodeDenial(toolName: name, toolUseID: id,
-                                                  detail: Self.preview(name, denial["tool_input"] ?? [:], workspace: workspace)))
+        var window: Int?
+        if let models = json["modelUsage"]?.object {
+            if let model, let own = models[model]?["contextWindow"]?.int { window = own }
+            else { window = models.values.compactMap { $0["contextWindow"]?.int }.max() }
+            if let w = window, w <= 0 { window = nil }
         }
-        denials = resultDenials
-        let subtype = json["subtype"]?.string ?? "success"
-        let isError = json["is_error"]?.bool ?? (subtype != "success")
-        let text = json["result"]?.string ?? ""
-        result = ClaudeCodeResult(subtype: subtype, isError: isError, text: text,
-                                  sessionID: json["session_id"]?.string, numTurns: json["num_turns"]?.int ?? 0,
-                                  durationMs: json["duration_ms"]?.int, totalCostUSD: json["total_cost_usd"]?.double,
-                                  usage: usage, denials: resultDenials,
-                                  errors: (json["errors"]?.array ?? []).compactMap(\.string),
-                                  terminalReason: json["terminal_reason"]?.string)
-        if let id = json["session_id"]?.string, !id.isEmpty { sessionID = id }
-        if !isError, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { lastReplyText = text }
-        if !isError || subtype == "error_max_turns" { out.append(.engine(.finished(usage: usage))) }
+        let parsed = ClaudeCodeResult(
+            subtype: json["subtype"]?.string ?? "", isError: json["is_error"]?.bool ?? false, text: json["result"]?.string ?? "",
+            sessionID: json["session_id"]?.string, numTurns: json["num_turns"]?.int ?? 0, durationMs: json["duration_ms"]?.int,
+            totalCostUSD: json["total_cost_usd"]?.double, usage: turnUsage, denials: json["permission_denials"]?.array?.count ?? 0,
+            errors: (json["errors"]?.array ?? []).compactMap { $0.string.flatMap { $0.isEmpty ? nil : $0 } },
+            terminalReason: json["terminal_reason"]?.string, contextWindow: window, localCommand: json["local_command"]?.string)
+        result = parsed
+        results += 1
+        usage = LLMUsage.sum(usage, turnUsage)
+        if !parsed.isError, !parsed.text.isEmpty, lastReplyText.isEmpty { lastReplyText = parsed.text }
+        out.append(.activity(nil))
+        if !parsed.isError { out.append(.engine(.finished(usage: turnUsage))) }
         return out
-    }
-
-    // MARK: Claude Code's tools, the way Vision draws them
-
-    /// Claude Code's tool names as the Vision tools that do the same (their labels and icons); others as they are.
-    public static func visionName(_ name: String) -> String {
-        switch name {
-        case "Read": "read_file"
-        case "Write": "write_file"
-        case "Edit", "MultiEdit", "NotebookEdit": "edit"
-        case "Bash": "run_shell_command"
-        case "Glob": "glob"
-        case "Grep": "grep"
-        case "LS": "list_directory"
-        case "WebFetch": "web_fetch"
-        case "TodoWrite": "todo_write"
-        case "Agent", "Task": "agent"
-        case "ExitPlanMode": ExitPlanModeTool.name
-        case "Skill": "use_skill"
-        default: name
-        }
-    }
-
-    static func isSubagentTool(_ name: String) -> Bool { name == "Agent" || name == "Task" }
-
-    /// One line saying what a call does ("swift build", "Sources/App.swift", "TODO in *.swift").
-    public static func preview(_ name: String, _ input: JSONValue, workspace: URL) -> String {
-        func path(_ key: String) -> String? { input[key]?.string.map { shortPath($0, workspace: workspace) } }
-        func line(_ text: String?) -> String {
-            let first = (text ?? "").split(separator: "\n", omittingEmptySubsequences: true).first.map(String.init) ?? ""
-            return first.count > 200 ? String(first.prefix(199)) + "…" : first
-        }
-        switch name {
-        case "Bash": return line(input["command"]?.string)
-        case "Read", "Write", "Edit", "MultiEdit": return path("file_path") ?? ""
-        case "NotebookEdit": return path("notebook_path") ?? path("file_path") ?? ""
-        case "Glob", "Grep":
-            let pattern = input["pattern"]?.string ?? ""
-            return path("path").map { "\(pattern) in \($0)" } ?? pattern
-        case "LS": return path("path") ?? ""
-        case "WebFetch": return input["url"]?.string ?? ""
-        case "WebSearch": return input["query"]?.string ?? ""
-        case "Agent", "Task": return input["description"]?.string ?? input["subagent_type"]?.string ?? ""
-        case "TodoWrite":
-            let count = input["todos"]?.array?.count ?? 0
-            return "\(count) item\(count == 1 ? "" : "s")"
-        case "ExitPlanMode": return "plan"
-        case "Skill": return input["skill"]?.string ?? ""
-        default:
-            for key in ["file_path", "path", "command", "query", "url", "description", "name"] {
-                if let value = input[key]?.string, !value.isEmpty { return line(value) }
-            }
-            let json = input.serialized()
-            return json == "{}" ? "" : (json.count > 120 ? String(json.prefix(119)) + "…" : json)
-        }
-    }
-
-    /// A path inside the chat's folder relative to it; others as they are.
-    static func shortPath(_ raw: String, workspace: URL) -> String {
-        let root = workspace.path.hasSuffix("/") ? workspace.path : workspace.path + "/"
-        return raw.hasPrefix(root) ? String(raw.dropFirst(root.count)) : raw
-    }
-
-    /// A tool result's text (string content, or its text blocks) and its pictures.
-    static func resultContent(_ content: JSONValue?) -> (String, [MessageAttachment]) {
-        if let text = content?.string { return (text, []) }
-        var texts: [String] = []
-        var images: [MessageAttachment] = []
-        for block in content?.array ?? [] {
-            switch block["type"]?.string {
-            case "text": if let text = block["text"]?.string { texts.append(text) }
-            case "image":
-                if let data = block["source"]?["data"]?.string.flatMap({ Data(base64Encoded: $0) }) {
-                    images.append(MessageAttachment(kind: .image, name: "image-\(images.count + 1)", data: data))
-                }
-            default: break
-            }
-        }
-        return (texts.joined(separator: "\n"), images)
-    }
-
-    static func cap(_ text: String, limit: Int = 16_000) -> String {
-        text.count > limit ? String(text.prefix(limit)) + "\n… (\(text.count - limit) more characters)" : text
-    }
-
-    /// The row's one-line headline.
-    static func summary(_ name: String, _ input: JSONValue, ok: Bool, output: String, workspace: URL) -> String {
-        func firstLine(_ text: String) -> String {
-            let cleaned = text.replacingOccurrences(of: "<tool_use_error>", with: "")
-                .replacingOccurrences(of: "</tool_use_error>", with: "")
-            let first = cleaned.split(separator: "\n", omittingEmptySubsequences: true).first.map(String.init) ?? ""
-            let trimmed = first.trimmingCharacters(in: .whitespaces)
-            return trimmed.count > 160 ? String(trimmed.prefix(159)) + "…" : trimmed
-        }
-        guard ok else { return firstLine(output).isEmpty ? "Failed" : firstLine(output) }
-        let file = input["file_path"]?.string.map { shortPath($0, workspace: workspace) }
-        switch name {
-        case "Edit", "MultiEdit", "NotebookEdit": return "Edited \(file ?? "the file")"
-        case "Write": return "Wrote \(file ?? "the file")"
-        case "Read": return "Read \(file ?? "the file")"
-        case "TodoWrite": return "Updated the plan"
-        default:
-            let line = firstLine(output)
-            return line.isEmpty ? "Done" : line
-        }
-    }
-
-    /// The file a successful edit tool touched. `Write` says in its result whether it created the file.
-    static func fileChange(_ name: String, _ input: JSONValue, detail: JSONValue?, workspace: URL) -> FileChange? {
-        let kind: FileChange.Kind
-        switch name {
-        case "Write": kind = detail?["type"]?.string == "create" ? .created : .modified
-        case "Edit", "MultiEdit", "NotebookEdit": kind = .modified
-        default: return nil
-        }
-        guard let raw = input["file_path"]?.string ?? input["notebook_path"]?.string, !raw.isEmpty else { return nil }
-        let url = raw.hasPrefix("/") ? URL(fileURLWithPath: raw) : workspace.appendingPathComponent(raw)
-        return FileChange(url.standardizedFileURL, kind)
-    }
-
-    /// `TodoWrite`'s list as Vision's todos.
-    static func todos(_ input: JSONValue) -> [TodoItem]? {
-        guard let items = input["todos"]?.array else { return nil }
-        return items.enumerated().compactMap { index, item in
-            guard let content = item["content"]?.string ?? item["activeForm"]?.string else { return nil }
-            let status: TodoItem.Status
-            switch item["status"]?.string {
-            case "in_progress": status = .inProgress
-            case "completed": status = .completed
-            default: status = .pending
-            }
-            return TodoItem(id: item["id"]?.string ?? "\(index + 1)", content: content, status: status)
-        }
     }
 }

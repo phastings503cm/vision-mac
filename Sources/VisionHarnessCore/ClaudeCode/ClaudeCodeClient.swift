@@ -47,9 +47,12 @@ public struct ClaudeCodeClient: ProviderClient {
                         oneShotSystemPrompt: request.systemPrompt.isEmpty ? "You are a helpful assistant." : request.systemPrompt)
                     let workspace = FileManager.default.temporaryDirectory
                     let outcome = try await ClaudeCodeTurn.run(
-                        install: install, invocation: invocation, prompt: Self.prompt(request.messages), workspace: workspace,
+                        install: install, invocation: invocation, message: ClaudeCodeInput.line(text: Self.prompt(request.messages)),
+                        workspace: workspace,
                         environment: ClaudeCodeEnvironment.environment(for: install.path, base: ProcessInfo.processInfo.environment),
-                        launcher: Self.launcher) { event in
+                        launcher: Self.launcher,
+                        // No tools, so nothing should ask; anything that does is refused.
+                        decide: { _ in .deny(ClaudeCodePermissions.declined) }) { event in
                         switch event {
                         case .engine(.textDelta(let text)): continuation.yield(.text(text))
                         case .engine(.reasoningDelta(let text)): continuation.yield(.reasoning(text))
@@ -61,7 +64,7 @@ public struct ClaudeCodeClient: ProviderClient {
                     continuation.yield(.done(calls: [], finish: "stop", usage: outcome.result?.usage))
                     continuation.finish()
                 } catch let error as ClaudeCodeError {
-                    let permanent = error == .notSignedIn || { if case .usageLimit = error { return true } else { return false } }()
+                    let permanent = error.isPermanent
                     continuation.finish(throwing: LLMError.rejected(status: error == .notSignedIn ? 401 : 500,
                                                                     message: error.errorDescription ?? "Claude Code failed.",
                                                                     body: "", permanent: permanent))

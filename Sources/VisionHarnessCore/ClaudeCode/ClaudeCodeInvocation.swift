@@ -1,16 +1,18 @@
 import Foundation
 
-// MARK: - One `claude -p` turn: its command line and what goes into it
+// MARK: - One `claude -p` turn: its command line and what goes down stdin
 //
 // Each Vision turn on Claude Code is one headless run in the chat's folder:
 //
 //   claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages
-//          --model <alias> [--effort <level>] <permissions> (--session-id <uuid> | --resume <id>)
-//          --append-system-prompt <Vision's note> [--add-dir <attachments>] [--permission-prompts none]
+//          --model <alias> [--effort <level>] --permission-mode <plan|default|acceptEdits> --permission-prompt-tool stdio
+//          (--resume <id> | --session-id <uuid>) --append-system-prompt <Vision's note> [--add-dir <attachments>]
 //
-// The prompt goes in on standard input as one stream-json user message (no argument-length limit, pictures as
-// image blocks), and the session id carries the conversation from turn to turn. Only options the installed CLI's
-// own help lists are passed (`ClaudeCodeInstall.flags`).
+// The prompt goes in on standard input as one stream-json user message (pictures and PDFs as content blocks), and
+// standard input stays open: Claude Code asks Vision before each tool call that needs permission (`can_use_tool`
+// control requests — see `ClaudeCodePermissions`), and a Stop is an `interrupt` control request. It is closed once the
+// turn's result arrives. Optional options are passed only when the installed CLI's help lists them. Vision for
+// Windows sends the same (ClaudeCodeCommand.cs).
 
 /// Which Claude Code conversation a turn continues.
 public enum ClaudeCodeSessionChoice: Sendable, Equatable {
@@ -26,7 +28,7 @@ public enum ClaudeCodeSessionChoice: Sendable, Equatable {
     }
 }
 
-/// The models a Claude Code route offers: Claude Code's own aliases, which it maps to the newest of each.
+/// The models a Claude Code route offers: Claude Code's own aliases, which always mean the newest of each family.
 public enum ClaudeCodeModels {
     public struct Choice: Sendable, Equatable, Hashable {
         public var alias: String
@@ -34,26 +36,41 @@ public enum ClaudeCodeModels {
         public var detail: String
     }
 
+    /// Most capable first (the same titles and words as Vision for Windows).
     public static let choices: [Choice] = [
-        Choice(alias: "opus", name: "Opus", detail: "The most capable — best for hard, long work. Uses your plan's limits fastest."),
-        Choice(alias: "sonnet", name: "Sonnet", detail: "Fast and strong — the everyday choice."),
-        Choice(alias: "haiku", name: "Haiku", detail: "The quickest and lightest on your plan's limits."),
-        Choice(alias: "default", name: "Claude Code's default", detail: "Whatever Claude Code itself picks for your plan."),
+        Choice(alias: "opus", name: "Opus", detail: "the most capable — long, hard work"),
+        Choice(alias: "sonnet", name: "Sonnet", detail: "fast and capable — the everyday choice"),
+        Choice(alias: "haiku", name: "Haiku", detail: "the quickest — small jobs"),
     ]
 
-    /// How a route's model is named in menus ("Opus"); an id Vision doesn't know is shown as it is.
+    /// The model a new Claude Code chat starts on.
+    public static let defaultModel = "sonnet"
+
+    /// How a route's model is named in menus ("Sonnet"); an id Vision doesn't know is shown as it is.
     public static func name(_ alias: String) -> String {
         choices.first { $0.alias == alias.lowercased() }?.name ?? alias
     }
 
-    /// The context window Vision budgets for a Claude Code model: 1M for a "[1m]" model, else 200K.
+    /// The context window Vision budgets for a Claude Code model until a turn's result says (1M for a "[1m]" model).
     public static func contextWindow(_ model: String) -> Int {
-        model.lowercased().contains("[1m]") ? 1_000_000 : 200_000
+        if let learned = learnedWindow(model) { return learned }
+        return model.lowercased().contains("[1m]") ? 1_000_000 : 200_000
+    }
+
+    nonisolated(unsafe) private static var learned: [String: Int] = [:]
+    private static let lock = NSLock()
+
+    /// The window a turn's result reported for the model behind `alias` (`modelUsage.<model>.contextWindow`).
+    public static func learnedWindow(_ alias: String) -> Int? { lock.withLock { learned[alias.lowercased()] } }
+
+    public static func learnWindow(_ alias: String, _ window: Int) {
+        guard window > 0 else { return }
+        lock.withLock { learned[alias.lowercased()] = window }
     }
 }
 
 public struct ClaudeCodeInvocation: Sendable, Equatable {
-    /// A Claude Code model alias or id; nil or "default" = let Claude Code choose.
+    /// A Claude Code model alias or id; empty or "default" = let Claude Code choose.
     public var model: String?
     /// `--effort` (low, medium, high, max); nil = Claude Code's default.
     public var effort: String?
@@ -61,24 +78,21 @@ public struct ClaudeCodeInvocation: Sendable, Equatable {
     public var session: ClaudeCodeSessionChoice?
     /// Added after Claude Code's own system prompt.
     public var appendSystemPrompt: String?
-    /// Folders besides the working directory that Claude Code may read (a turn's attachments).
+    /// Folders besides the working directory that Claude Code may read (where a long attachment's text is saved).
     public var addDirs: [String]
-    /// Most agentic steps in this turn (nil = no cap). Passed only when the CLI lists `--max-turns`.
-    public var maxTurns: Int?
     /// One-shot side tasks (a summary, a skill draft): Claude Code's system prompt replaced by this, no tools, and
     /// nothing saved as a session.
     public var oneShotSystemPrompt: String?
 
     public init(model: String? = nil, effort: String? = nil, preset: PermissionPreset = .workspaceWrite,
                 session: ClaudeCodeSessionChoice? = nil, appendSystemPrompt: String? = nil, addDirs: [String] = [],
-                maxTurns: Int? = nil, oneShotSystemPrompt: String? = nil) {
+                oneShotSystemPrompt: String? = nil) {
         self.model = model
         self.effort = effort
         self.preset = preset
         self.session = session
         self.appendSystemPrompt = appendSystemPrompt
         self.addDirs = addDirs
-        self.maxTurns = maxTurns
         self.oneShotSystemPrompt = oneShotSystemPrompt
     }
 
@@ -96,132 +110,100 @@ public struct ClaudeCodeInvocation: Sendable, Equatable {
             if install.supports("--no-session-persistence") { args.append("--no-session-persistence") }
             return args
         }
-        args += Self.permissionArguments(preset)
-        // Nobody can answer a permission question in a headless run; this tells Claude so, and not to retry.
-        if install.supports("--permission-prompts") { args += ["--permission-prompts", "none"] }
+        // Permission questions come to Vision over the control protocol (a hidden option, so not in the help).
+        args += ["--permission-mode", Self.permissionMode(preset), "--permission-prompt-tool", "stdio"]
         switch session {
-        case .new(let id) where install.supports("--session-id"): args += ["--session-id", id]
         case .resume(let id): args += ["--resume", id]
+        case .new(let id) where install.supports("--session-id"): args += ["--session-id", id]
         default: break
         }
         if let note = appendSystemPrompt, !note.isEmpty, install.supports("--append-system-prompt") {
             args += ["--append-system-prompt", note]
         }
-        for dir in addDirs where install.supports("--add-dir") { args += ["--add-dir", dir] }
-        if let maxTurns, maxTurns > 0, install.supports("--max-turns") { args += ["--max-turns", String(maxTurns)] }
+        for dir in addDirs where !dir.isEmpty && install.supports("--add-dir") { args += ["--add-dir", dir] }
         return args
     }
 
-    // MARK: Permissions
-
-    /// Shell commands that change things, as Claude Code deny rules — the same list Vision's own engine asks
-    /// about under "Workspace write" (`PermissionPolicy.checkShell`). A headless run can't ask, so they are
-    /// refused, and Claude reports what it couldn't do.
-    public static let askingCommands = ["rm", "sudo", "mv", "cp", "mkdir", "chmod", "chown", "dd", "git push",
-                                        "git commit", "git checkout", "git reset", "git rebase", "git merge",
-                                        "git branch -d", "brew install", "pip install", "npm install"]
-
-    /// Vision's permission preset as Claude Code's permission mode and tool rules:
-    /// - Plan only → `plan` mode: Claude reads and plans, changes nothing, runs nothing that changes anything.
-    /// - Workspace write → `acceptEdits` (file edits inside the chat's folder go through, outside it they are
-    ///   refused), shell commands and web fetches allowed, except the commands Vision would ask about.
-    /// - Full access → `acceptEdits` with every shell command and web fetch allowed (file edits still stay in
-    ///   the chat's folder, as with Vision's own engine).
-    public static func permissionArguments(_ preset: PermissionPreset) -> [String] {
+    /// Claude Code's permission mode for a chat's preset. Plan only → plan (Claude Code itself changes nothing);
+    /// Workspace write → default (every tool call that needs permission is asked of Vision, which decides with the
+    /// chat's own policy — `ClaudeCodePermissions.decide`); Full access → acceptEdits (edits go ahead without a round
+    /// trip; Vision answers the rest, all yes).
+    public static func permissionMode(_ preset: PermissionPreset) -> String {
         switch preset {
-        case .plan:
-            return ["--permission-mode", "plan"]
-        case .workspaceWrite:
-            return ["--permission-mode", "acceptEdits",
-                    "--allowedTools", "Bash,WebFetch,WebSearch",
-                    "--disallowedTools", askingCommands.map { "Bash(\($0) *)" }.joined(separator: ",")]
-        case .fullAccess:
-            return ["--permission-mode", "acceptEdits", "--allowedTools", "Bash,WebFetch,WebSearch"]
+        case .plan: "plan"
+        case .workspaceWrite: "default"
+        case .fullAccess: "acceptEdits"
         }
     }
 }
 
-// MARK: - The prompt on standard input
-
-/// A picture sent with the prompt as an image block.
-public struct ClaudeCodeImage: Sendable, Equatable {
-    public var mediaType: String
-    public var data: Data
-
-    public init(mediaType: String, data: Data) {
-        self.mediaType = mediaType
-        self.data = data
-    }
-}
+// MARK: - What goes down stdin
 
 public enum ClaudeCodeInput {
-    /// The user message as one stream-json line: `{"type":"user","message":{"role":"user","content":[…]},
-    /// "parent_tool_use_id":null}` followed by a newline.
-    public static func line(text: String, images: [ClaudeCodeImage] = []) -> Data {
+    /// How Claude Code takes attachments: pictures (PNG, JPEG, GIF, WebP) up to 5 MB and PDFs up to 32 MB as
+    /// themselves, everything else as the text Vision read out of it.
+    public static let attachmentRoute = AttachmentRoute(vision: true, documents: true,
+                                                        imageTypes: ["image/png", "image/jpeg", "image/gif", "image/webp"],
+                                                        maxImageBytes: 5 * 1024 * 1024, maxDocumentBytes: 32 * 1024 * 1024)
+
+    /// The user message that starts a turn, as one stream-json line: its text, then pictures and PDFs as content
+    /// blocks — `{"type":"user","message":{"role":"user","content":[…]},"parent_tool_use_id":null,"session_id":""}`.
+    public static func line(text: String, parts: [AttachmentWirePart] = []) -> String {
         var content: [JSONValue] = []
-        for image in images {
-            content.append(["type": "image",
-                            "source": ["type": "base64", "media_type": .string(image.mediaType),
-                                       "data": .string(image.data.base64EncodedString())]])
+        if !text.isEmpty { content.append(["type": "text", "text": .string(text)]) }
+        for part in parts {
+            switch part {
+            case .text(let value):
+                content.append(["type": "text", "text": .string(value)])
+            case .image(let mime, let data):
+                content.append(["type": "image",
+                                "source": ["type": "base64", "media_type": .string(mime), "data": .string(data.base64EncodedString())]])
+            case .document(let name, let data):
+                content.append(["type": "document",
+                                "source": ["type": "base64", "media_type": "application/pdf", "data": .string(data.base64EncodedString())],
+                                "title": .string(name)])
+            }
         }
-        content.append(["type": "text", "text": .string(text)])
+        if content.isEmpty { content.append(["type": "text", "text": "(empty message)"]) }
         let message: JSONValue = ["type": "user",
                                   "message": ["role": "user", "content": .array(content)],
-                                  "parent_tool_use_id": nil]
-        return Data((message.serialized() + "\n").utf8)
+                                  "parent_tool_use_id": nil,
+                                  "session_id": ""]
+        return message.serialized()
     }
 
-    /// Pictures Claude takes inline (the API's limit is 5 MB per picture, after base64).
-    static let inlineImageTypes: Set<String> = ["image/png", "image/jpeg", "image/gif", "image/webp"]
-    static let maxInlineImageBytes = 3_700_000
-    /// Text up to this many characters goes in the prompt; a longer file is saved for Claude to Read.
-    static let maxInlineTextCharacters = 40_000
-
-    /// A turn's attachments, the way Claude Code takes them best: small text files inline in the prompt, small
-    /// pictures as image blocks, and everything else (a PDF, a long file, a big picture) saved in `folder` for
-    /// Claude to open with its Read tool, which reads PDFs and pictures itself.
-    public static func prepare(_ attachments: [MessageAttachment], folder: URL) -> (text: String, images: [ClaudeCodeImage], saved: Bool) {
-        var lines: [String] = []
-        var images: [ClaudeCodeImage] = []
-        var saved = false
-        var usedNames = Set<String>()
-        for attachment in attachments {
-            if attachment.kind == .image, inlineImageTypes.contains(attachment.mime), attachment.data.count <= maxInlineImageBytes {
-                images.append(ClaudeCodeImage(mediaType: attachment.mime, data: attachment.data))
-                lines.append("[Picture attached: \(attachment.name)]")
-                continue
-            }
-            if attachment.kind == .file, attachment.mime != "application/pdf",
-               let text = String(data: attachment.data, encoding: .utf8), !text.contains("\u{0}"),
-               text.count <= maxInlineTextCharacters {
-                lines.append("--- \(attachment.name) ---\n\(text)\n--- end of \(attachment.name) ---")
-                continue
-            }
-            var name = safeName(attachment.name)
-            var n = 2
-            while usedNames.contains(name) {
-                name = "\(n)-" + safeName(attachment.name)
-                n += 1
-            }
-            usedNames.insert(name)
-            let url = folder.appendingPathComponent(name)
-            do {
-                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-                try attachment.data.write(to: url, options: .atomic)
-                saved = true
-                lines.append("[Attached file \(attachment.name) is saved at \(url.path) — open it with your Read tool.]")
-            } catch {
-                lines.append("[Attached file \(attachment.name) could not be saved for you: \(error.localizedDescription)]")
-            }
-        }
-        return (lines.joined(separator: "\n\n"), images, saved)
+    /// Stop the turn: Claude Code ends it cleanly, keeping what was done, and says so in its result.
+    public static func interrupt(requestID: String) -> String {
+        JSONValue(["type": "control_request", "request_id": .string(requestID), "request": ["subtype": "interrupt"]]).serialized()
     }
 
-    /// A file name with no folders, no leading dot and nothing odd ("../x" → "x"; "" → "attachment").
-    static func safeName(_ raw: String) -> String {
-        let last = (raw as NSString).lastPathComponent
-        let cleaned = String(last.map { $0 == "/" || $0 == ":" || $0.isNewline ? "_" : $0 })
-            .trimmingCharacters(in: CharacterSet(charactersIn: ". ").union(.whitespaces))
-        return cleaned.isEmpty ? "attachment" : String(cleaned.prefix(120))
+    /// Yes to a permission question: the tool runs with its input as asked.
+    public static func allow(requestID: String, input: JSONValue?, toolUseID: String?) -> String {
+        var payload: [String: JSONValue] = ["behavior": "allow", "updatedInput": input ?? [:]]
+        if let toolUseID { payload["toolUseID"] = .string(toolUseID) }
+        return response(requestID, payload)
     }
+
+    /// No to a permission question: Claude Code tells the model `message` instead of running it.
+    public static func deny(requestID: String, message: String, toolUseID: String?) -> String {
+        var payload: [String: JSONValue] = ["behavior": "deny", "message": .string(message)]
+        if let toolUseID { payload["toolUseID"] = .string(toolUseID) }
+        return response(requestID, payload)
+    }
+
+    /// A control request Vision doesn't handle: an error answer, so the CLI never waits on it.
+    public static func unhandled(requestID: String, subtype: String) -> String {
+        JSONValue(["type": "control_response",
+                   "response": ["subtype": "error", "request_id": .string(requestID),
+                                "error": .string("Vision doesn't handle \(subtype) requests.")]]).serialized()
+    }
+
+    private static func response(_ requestID: String, _ payload: [String: JSONValue]) -> String {
+        JSONValue(["type": "control_response",
+                   "response": ["subtype": "success", "request_id": .string(requestID), "response": .object(payload)]]).serialized()
+    }
+}
+
+private extension JSONValue {
+    init(_ object: [String: JSONValue]) { self = .object(object) }
 }

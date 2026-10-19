@@ -337,20 +337,24 @@ plan. Vision never sees, copies or reuses that sign-in: the CLI does the talking
 **Settings ▸ AI Models ▸ Add ▸ Claude Code (your Claude plan)…** or the model menu's *Claude Code* section opens a
 card that finds `claude` (PATH, `~/.local/bin`, `~/.claude/local`, Homebrew, npm, bun, Volta, nvm, and last the copy
 the Claude desktop app keeps), says its version and whether it is signed in (`claude auth status` — no model call),
-shows the install and `claude auth login` steps when something is missing, and adds Opus, Sonnet, Haiku or Claude
-Code's default to the model menu.
+shows the install and `claude auth login` steps when something is missing, and adds Opus, Sonnet or Haiku to the
+model menu.
 
-- Each turn is one `claude -p` in the chat's folder, stream-json in and out, resuming the chat's own Claude Code
+- Each turn is one `claude -p` in the chat's folder, stream-json in and out, carrying on the chat's own Claude Code
   session (`--session-id` the first time, `--resume` after). Text, thinking, tool calls and their results, files
-  changed and the plan show as for any model; a line under each turn gives the steps, tokens, time and Claude
-  Code's own estimate at API prices ("your Claude plan covers it"). The composer's thinking menu sets `--effort`.
-- The chat's permission setting maps to Claude Code's: *Plan only* → plan mode; *Workspace write* → file edits in
-  the chat's folder and shell commands, except ones that delete, move, install, commit or push (refused, and
-  Claude says so); *Full access* → every command. Nobody can approve a request mid-turn.
-- Stop sends SIGINT, Claude Code's own "end the turn" (then SIGTERM if it doesn't go). Run phases, the Prompts
-  timeline, `/goal` (one `claude -p` per round), the task queue and `/compact` (Claude Code's own) all work.
-- A chat can move between Claude Code and any other model: the other model gets Claude Code's replies and a line
-  of what its tools did, and Claude Code gets what it missed as a short recap on its next turn.
+  changed and the plan show as for any model; a subagent's steps show on the working line; a line under each turn
+  gives the steps, tokens and Claude Code's own estimate at API prices ("covered by your Claude plan"). The thinking
+  menu sets `--effort`; Claude Code's window comes from its own report.
+- Permissions: Claude Code asks Vision before each tool call that needs permission (`--permission-prompt-tool
+  stdio`), and Vision answers with the chat's setting — *Plan only* → Claude Code's plan mode; *Workspace write* →
+  reads, edits inside the chat's folder and read-only commands go ahead, anything else asks you on the usual
+  permission card; *Full access* → everything goes ahead.
+- Stop sends Claude Code's own interrupt (then ends the process if it doesn't stop). Run phases, the Prompts
+  timeline, `/goal` (one `claude -p` per round), the task queue and `/compact` (Claude Code's own) all work. Your
+  plan's limits show as they get close, and a used-up limit says when it resets.
+- A chat can move between Claude Code and any other model: the other model gets the conversation rebuilt from the
+  chat (Claude Code's tool work included), and Claude Code gets what it missed as a recap on its next turn. A lost
+  Claude Code session starts again with a recap of the chat so far.
 - Sensitive chats can't use Claude Code: it reads files itself, so the shield can't mask them. It is never a
   subagent server or a backup (it runs its own agent and subagents).
 

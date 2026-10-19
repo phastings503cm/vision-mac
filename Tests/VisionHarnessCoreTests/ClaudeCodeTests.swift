@@ -1,7 +1,8 @@
 import XCTest
 @testable import VisionHarnessCore
 
-/// Claude Code as an engine: finding and checking the CLI, its command line, reading its stream-json, the turn.
+/// Claude Code as an engine: finding and checking the CLI, its command line, reading its stream-json, answering its
+/// permission questions, the turn.
 final class ClaudeCodeTests: XCTestCase {
     private let workspace = URL(fileURLWithPath: "/tmp/project")
 
@@ -23,19 +24,30 @@ final class ClaudeCodeTests: XCTestCase {
         engineEvents(events).compactMap { if case .textDelta(let t) = $0 { t } else { nil } }.joined()
     }
 
+    private func notices(_ events: [ClaudeCodeEvent]) -> [String] {
+        events.compactMap { if case .notice(let t) = $0 { t } else { nil } }
+    }
+
+    private func failure(_ parser: ClaudeCodeStreamParser, exit: ClaudeCodeExit = ClaudeCodeExit(exitCode: 1)) -> ClaudeCodeError? {
+        ClaudeCodeTurn.failure(ClaudeCodeTurn.LockedParser.Snapshot(
+            sessionID: parser.sessionID, progressed: parser.progressed, result: parser.result, usage: parser.usage,
+            lastReplyText: parser.lastReplyText, contextTokens: parser.contextTokens, model: parser.model,
+            apiKeySource: parser.apiKeySource, apiError: parser.apiError, rateLimit: parser.rateLimit, unparsed: parser.unparsed),
+            exit: exit)
+    }
+
     func testAFullTurnBecomesVisionsEvents() {
         let (parser, events) = parse(ClaudeCodeFixtures.toolTurn)
         let engine = engineEvents(events)
         XCTAssertEqual(parser.sessionID, ClaudeCodeFixtures.sessionID)
         XCTAssertEqual(parser.model, "claude-sonnet-5-5")
         XCTAssertEqual(parser.apiKeySource, "none")
-        XCTAssertTrue(parser.reachedModel)
+        XCTAssertTrue(parser.progressed)
         XCTAssertNil(parser.apiError)
 
         // Streamed text arrives once — the whole assistant messages that follow the deltas don't repeat it.
         XCTAssertEqual(streamedText(events), "I'll fix the greeting.Done — fixed the typo.")
-        let reasoning = engine.compactMap { if case .reasoningDelta(let t) = $0 { t } else { nil } }
-        XCTAssertEqual(reasoning, ["The greeting has a typo."])
+        XCTAssertEqual(engine.compactMap { if case .reasoningDelta(let t) = $0 { t } else { nil } }, ["The greeting has a typo."])
 
         // The text before a tool call goes with it; the closing text on its own.
         let messages = engine.compactMap { e -> (String, [ToolCall])? in
@@ -47,12 +59,12 @@ final class ClaudeCodeTests: XCTestCase {
         let started = engine.compactMap { e -> String? in
             if case .toolStarted(_, let name, let preview) = e { "\(name): \(preview)" } else { nil }
         }
-        XCTAssertEqual(started, ["edit: hello.txt", "run_shell_command: cat hello.txt", "write_file: NOTES.md", "todo_write: 2 items"])
+        XCTAssertEqual(started, ["edit: hello.txt", "run_shell_command: cat hello.txt", "write_file: NOTES.md", "todo_write: 2 steps"])
         let finished = engine.compactMap { e -> String? in
             if case .toolFinished(_, let name, let ok, let summary, _) = e { "\(name) \(ok) \(summary)" } else { nil }
         }
-        XCTAssertEqual(finished, ["edit true Edited hello.txt", "run_shell_command true hello world",
-                                  "write_file true Wrote NOTES.md", "todo_write true Updated the plan"])
+        XCTAssertEqual(finished, ["edit true Edited hello.txt (+1 −1)", "run_shell_command true hello world",
+                                  "write_file true Created NOTES.md", "todo_write true Plan updated"])
 
         let changes = engine.flatMap { e -> [FileChange] in if case .filesChanged(let c) = e { c } else { [] } }
         XCTAssertEqual(changes, [FileChange(URL(fileURLWithPath: "/tmp/project/hello.txt"), .modified),
@@ -63,13 +75,14 @@ final class ClaudeCodeTests: XCTestCase {
 
         // How it ended: success, the result's usage (input + both cache counts as the prompt), the last request's
         // context, the closing text.
-        guard case .finished(let usage)? = engine.last else { return XCTFail("the turn didn't finish: \(engine.last.map { "\($0)" } ?? "nothing")") }
+        guard case .finished(let usage)? = engine.last else { return XCTFail("the turn didn't finish") }
         XCTAssertEqual(usage, LLMUsage(promptTokens: 31_512, completionTokens: 420, cachedTokens: 30_000))
+        XCTAssertEqual(parser.usage, usage)
         XCTAssertEqual(parser.result?.numTurns, 4)
         XCTAssertEqual(parser.result?.totalCostUSD, 0.0421)
         XCTAssertEqual(parser.contextTokens, 4 + 150 + 10_900)
         XCTAssertEqual(parser.lastReplyText, "Done — fixed the typo.")
-        XCTAssertEqual(parser.toolLog, ["Edit hello.txt", "Bash cat hello.txt", "Write NOTES.md", "TodoWrite 2 items"])
+        XCTAssertNil(failure(parser, exit: ClaudeCodeExit(exitCode: 0)))
     }
 
     func testWithoutPartialMessagesTheWholeMessagesAreDrawn() {
@@ -79,79 +92,86 @@ final class ClaudeCodeTests: XCTestCase {
             if case .assistantMessage(_, let text, _) = e { text } else { nil }
         }
         XCTAssertEqual(messages, ["Looking at it.", "It says hello world."])
+        let summaries = engineEvents(events).compactMap { e -> String? in
+            if case .toolFinished(_, _, _, let summary, _) = e { summary } else { nil }
+        }
+        XCTAssertEqual(summaries, ["Read 1 line of hello.txt"])
         XCTAssertEqual(parser.lastReplyText, "It says hello world.")
     }
 
     func testTheRealNotSignedInStream() {
         let (parser, events) = parse(ClaudeCodeFixtures.notLoggedIn)
-        XCTAssertFalse(parser.reachedModel, "a synthetic error message is not the model answering")
+        XCTAssertFalse(parser.progressed, "a synthetic error message is not the model answering")
         XCTAssertEqual(parser.sessionID, "75eaed3b-8da5-4492-8a96-9893fcfccdac")
         XCTAssertEqual(parser.version, "2.1.299")
         XCTAssertEqual(parser.apiError?.category, "authentication_failed")
         XCTAssertEqual(parser.apiError?.text, "Not logged in · Please run /login")
         XCTAssertTrue(streamedText(events).isEmpty, "the error is not drawn as a reply")
-        XCTAssertEqual(parser.result?.isError, true)
-        XCTAssertEqual(ClaudeCodeTurn.failure(result: parser.result, apiError: parser.apiError, exit: ClaudeCodeExit(exitCode: 1)),
-                       .notSignedIn)
+        XCTAssertEqual(failure(parser), .notSignedIn)
+        XCTAssertEqual(ClaudeCodeError.notSignedIn.errorDescription,
+                       "Claude Code isn't signed in on this computer. Open a terminal, run  claude auth login  (choose your Claude account), then send again.")
     }
 
-    func testARefusedCommandIsCountedAndExplained() {
+    func testARefusedCommandCountsAsADenial() {
         let (parser, events) = parse(ClaudeCodeFixtures.deniedTurn)
         let finished = engineEvents(events).compactMap { e -> String? in
             if case .toolFinished(_, _, let ok, let summary, _) = e { "\(ok) \(summary)" } else { nil }
         }
         XCTAssertEqual(finished, ["false Permission to use Bash with command rm -rf build has been denied."])
-        XCTAssertEqual(parser.result?.denials.map(\.toolName), ["Bash"], "the event and the result's list are one denial")
-        XCTAssertEqual(parser.result?.denials.first?.detail, "rm -rf build")
-        XCTAssertEqual(ClaudeCodeTurn.denialNote(parser.result!.denials, preset: .workspaceWrite),
-                       "Claude Code was refused 1 tool call (Bash) — this chat's permission setting doesn't let it run that unattended. Switch the chat to Full access to let it.")
-        XCTAssertEqual(ClaudeCodeTurn.denialNote(parser.result!.denials + parser.result!.denials, preset: .plan),
-                       "Claude Code was refused 2 tool calls (Bash ×2) — this chat is Plan only, so it can read and plan but not change anything.")
-        XCTAssertNil(ClaudeCodeTurn.denialNote([], preset: .fullAccess))
+        XCTAssertEqual(parser.result?.denials, 1)
     }
 
-    func testASubagentsWorkShowsUnderItsTask() {
-        let (parser, events) = parse(ClaudeCodeFixtures.subagentTurn)
+    func testASubagentsStepsAreTheWorkingLine() {
+        let (_, events) = parse(ClaudeCodeFixtures.subagentTurn)
         let started = engineEvents(events).compactMap { e -> String? in
             if case .toolStarted(_, let name, let preview) = e { "\(name): \(preview)" } else { nil }
         }
-        XCTAssertEqual(started, ["agent: Find the greeting", "grep: Find the greeting › greeting in src"])
-        // Its text stays inside it; only the main loop's reply is drawn.
-        XCTAssertEqual(streamedText(events), "The greeting lives in src/app.js.")
-        XCTAssertEqual(parser.toolLog, ["Agent Find the greeting"], "the subagent's own calls stay out of the summary")
+        XCTAssertEqual(started, ["agent: Find the greeting"], "only the main conversation becomes rows")
+        let activity = events.compactMap { e -> String? in if case .activity(let t?) = e { t } else { nil } }
+        XCTAssertEqual(activity, ["Subagent: Search greeting  in src"])
+        XCTAssertEqual(streamedText(events), "The greeting lives in src/app.js.", "its text stays inside it")
     }
 
-    func testRetriesAndCompactionAreAnnounced() {
+    func testRetriesCompactionAndStatus() {
         let (_, events) = parse(ClaudeCodeFixtures.retryTurn)
         var retries: [String] = []
         var recovered: [Int] = []
-        var notices: [String] = []
-        for event in events {
-            switch event {
-            case .engine(.retrying(let attempt, let delay, let reason)): retries.append("\(attempt) \(delay) \(reason)")
-            case .engine(.recovered(let attempts)): recovered.append(attempts)
-            case .notice(let text): notices.append(text)
-            default: break
-            }
+        for case .engine(let e) in events {
+            if case .retrying(let attempt, let delay, let reason) = e { retries.append("\(attempt) \(delay) \(reason)") }
+            if case .recovered(let attempts) = e { recovered.append(attempts) }
         }
-        XCTAssertEqual(retries, ["1 2.0 Claude Code: overloaded (529)", "2 4.0 Claude Code: overloaded (529)"])
+        XCTAssertEqual(retries, ["1 2.0 Claude Code: overloaded, HTTP 529", "2 4.0 Claude Code: overloaded, HTTP 529"])
         XCTAssertEqual(recovered, [2])
-        XCTAssertEqual(notices, ["Claude Code compacted its conversation (it was about 180,000 tokens)."])
+        XCTAssertEqual(notices(events), ["Claude Code compacted the conversation to make room: ~180,000 → ~21,000 tokens.",
+                                         "Claude Code: The model is slow right now."])
+        let activity = events.compactMap { e -> String?? in if case .activity(let t) = e { t } else { nil } }
+        XCTAssertEqual(activity, ["Claude Code is compacting the conversation…", nil], "the result clears the working line")
     }
 
-    func testTheStepLimitIsNotAFailure() {
-        let (parser, events) = parse(ClaudeCodeFixtures.maxTurnsTurn)
-        XCTAssertEqual(parser.result?.hitTurnLimit, true)
-        guard case .finished? = engineEvents(events).last else { return XCTFail("a turn at its step limit still finishes") }
-        XCTAssertNil(ClaudeCodeTurn.failure(result: parser.result, apiError: parser.apiError, exit: ClaudeCodeExit(exitCode: 1)))
-    }
+    func testTheStepLimitAndThePlansLimits() {
+        let (maxTurns, _) = parse(ClaudeCodeFixtures.maxTurnsTurn)
+        XCTAssertEqual(failure(maxTurns), .failed("Claude Code stopped: it reached its limit of steps for one turn. Send “keep going” to carry on."))
 
-    func testThePlansUsageLimitIsNamed() {
-        let (parser, _) = parse(ClaudeCodeFixtures.usageLimitTurn)
-        let failure = ClaudeCodeTurn.failure(result: parser.result, apiError: parser.apiError, exit: ClaudeCodeExit(exitCode: 1))
-        XCTAssertEqual(failure, .usageLimit("You've hit your limit · resets 3pm (America/Los_Angeles)"))
-        XCTAssertEqual(failure?.errorDescription,
-                       "Claude Code stopped: your Claude plan's usage limit is reached (You've hit your limit · resets 3pm (America/Los_Angeles)). It resets on your plan's schedule — or pick another model for this chat.")
+        let (limit, _) = parse(ClaudeCodeFixtures.usageLimitTurn)
+        XCTAssertEqual(failure(limit), .rateLimited("You've reached your Claude plan's usage limit. Pick another model for this chat from the model menu, or send again once it resets."))
+        XCTAssertTrue(ClaudeCodeError.rateLimited("x").isPermanent)
+
+        let (rejected, _) = parse(ClaudeCodeFixtures.rejectedTurn)
+        XCTAssertEqual(rejected.rateLimit?.typeWords, "weekly")
+        guard case .rateLimited(let words)? = failure(rejected) else { return XCTFail("\(String(describing: failure(rejected)))") }
+        XCTAssertTrue(words.hasPrefix("You've reached your Claude plan's weekly limit — it resets "), words)
+        XCTAssertTrue(words.hasSuffix(". Pick another model for this chat from the model menu, or send again once it resets."))
+
+        let (warned, events) = parse(ClaudeCodeFixtures.warningTurn)
+        XCTAssertNil(failure(warned, exit: ClaudeCodeExit(exitCode: 0)))
+        XCTAssertEqual(notices(events).count, 1, "one warning per kind of limit")
+        XCTAssertTrue(notices(events)[0].hasPrefix("Your Claude plan: 82% of your five-hour limit used — it resets "), notices(events)[0])
+        let reset = ClaudeCodeRateLimit(status: "allowed_warning", type: "five_hour", utilization: 0.5,
+                                        resetsAt: Date(timeIntervalSince1970: 1_792_000_000))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        XCTAssertEqual(reset.resetWords(now: Date(timeIntervalSince1970: 1_791_990_000), calendar: calendar), " — it resets at 17:46")
+        XCTAssertEqual(reset.resetWords(now: Date(timeIntervalSince1970: 1_791_800_000), calendar: calendar), " — it resets Wed 14 Oct, 17:46")
     }
 
     func testAPlanGoesToThePlanPanel() {
@@ -161,18 +181,82 @@ final class ClaudeCodeTests: XCTestCase {
         XCTAssertEqual(JSONArgs.string(calls[0].arguments, "plan"), "1. Fix the typo\n2. Run the tests")
     }
 
-    func testFailuresWithoutAResult() {
-        XCTAssertEqual(ClaudeCodeTurn.failure(result: nil, apiError: nil,
-                                              exit: ClaudeCodeExit(exitCode: 1, stderr: "Error: No conversation found with session ID: abc")),
-                       .sessionNotFound)
-        XCTAssertEqual(ClaudeCodeTurn.failure(result: nil, apiError: nil,
-                                              exit: ClaudeCodeExit(exitCode: 1, stderr: "Error: Session ID abc is already in use.")),
-                       .sessionInUse)
-        XCTAssertEqual(ClaudeCodeTurn.failure(result: nil, apiError: nil, exit: ClaudeCodeExit(exitCode: 2, stderr: "error: unknown option '--frobnicate'\n")),
-                       .failed("Claude Code stopped without finishing (exit code 2): error: unknown option '--frobnicate'"))
+    func testControlRequestsComeBackToTheCaller() throws {
+        let (_, events) = parse(ClaudeCodeFixtures.permissionTurn)
+        let requests = events.compactMap { e -> ClaudeCodePermissionRequest? in if case .permission(let r) = e { r } else { nil } }
+        let request = try XCTUnwrap(requests.first)
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(request.requestID, "req-1")
+        XCTAssertEqual(request.toolName, "Bash")
+        XCTAssertEqual(request.toolUseID, "toolu_q")
+        XCTAssertEqual(request.input?["command"], "rm -rf build")
+        XCTAssertEqual(request.decisionReasonType, "safetyCheck")
+        XCTAssertEqual(request.classifierApprovable, false)
+        let unhandled = events.compactMap { e -> String? in
+            if case .unhandledControl(let id, let subtype) = e { "\(id) \(subtype)" } else { nil }
+        }
+        XCTAssertEqual(unhandled, ["req-2 hook_callback"])
     }
 
-    // MARK: - The command line
+    func testFailuresWithoutAResult() {
+        let parser = ClaudeCodeStreamParser(workspace: workspace)
+        _ = parser.consume("Error: something exploded")
+        XCTAssertEqual(failure(parser, exit: ClaudeCodeExit(exitCode: 1, stderr: "Error: No conversation found with session ID: abc")),
+                       .sessionNotFound)
+        XCTAssertEqual(failure(parser, exit: ClaudeCodeExit(exitCode: 1, stderr: "Error: Session ID abc is already in use.")), .sessionInUse)
+        XCTAssertEqual(failure(parser, exit: ClaudeCodeExit(exitCode: 2, stderr: "error: unknown option '--frobnicate'\n")),
+                       .failed("Claude Code stopped without answering: error: unknown option '--frobnicate'"))
+        XCTAssertEqual(failure(parser, exit: ClaudeCodeExit(exitCode: 3)),
+                       .failed("Claude Code stopped without answering: Error: something exploded"), "a line that wasn't JSON says why")
+        XCTAssertEqual(failure(ClaudeCodeStreamParser(workspace: workspace), exit: ClaudeCodeExit(exitCode: 3)),
+                       .failed("Claude Code stopped without answering (exit code 3)."))
+    }
+
+    func testDanglingCallsAreClosed() {
+        let parser = ClaudeCodeStreamParser(workspace: workspace)
+        _ = parser.consume(ClaudeCodeFixtures.lines(ClaudeCodeFixtures.permissionTurn)[1])
+        let closed = parser.closeDangling("Stopped before it finished").compactMap { e -> String? in
+            if case .engine(.toolFinished(let id, _, let ok, let summary, _)) = e { "\(id) \(ok) \(summary)" } else { nil }
+        }
+        XCTAssertEqual(closed, ["toolu_q false Stopped before it finished"])
+        XCTAssertTrue(parser.closeDangling("again").isEmpty)
+    }
+
+    // MARK: - Permission questions
+
+    private func ask(_ tool: String, _ input: JSONValue, preset: PermissionPreset = .workspaceWrite,
+                     reasonType: String? = nil, reason: String? = nil) -> ClaudeCodePermissionDecision {
+        ClaudeCodePermissions.decide(ClaudeCodePermissionRequest(requestID: "r", toolName: tool, input: input, toolUseID: "t",
+                                                                 decisionReason: reason, decisionReasonType: reasonType),
+                                     policy: PermissionPolicy(preset: preset, workspaceRoot: workspace))
+    }
+
+    func testPermissionQuestionsAreDecidedLikeVisionsOwnEngine() {
+        // Workspace write: reads, edits inside, read-only commands go ahead; the rest asks.
+        XCTAssertEqual(ask("Read", ["file_path": "/etc/hosts"]), .allow)
+        XCTAssertEqual(ask("Edit", ["file_path": "/tmp/project/a.swift"]), .allow)
+        XCTAssertEqual(ask("Write", ["file_path": "/Users/me/elsewhere.txt"]),
+                       .ask(name: "write_file", detail: "Write outside the project: /Users/me/elsewhere.txt"))
+        XCTAssertEqual(ask("Bash", ["command": "ls -la"]), .allow)
+        XCTAssertEqual(ask("Bash", ["command": "rm -rf build"]), .ask(name: "run_shell_command", detail: "Run command: rm -rf build"))
+        XCTAssertEqual(ask("mcp__github__create_issue", ["title": "x"]),
+                       .ask(name: "mcp__github__create_issue", detail: "Use MCP github · create_issue: {\"title\":\"x\"}"))
+        XCTAssertEqual(ask("WebFetch", ["url": "https://example.com"]), .allow)
+        // A safety check always asks, with Claude Code's reason (escape codes stripped).
+        XCTAssertEqual(ask("Bash", ["command": "ls"], reasonType: "safetyCheck", reason: "\u{1B}[1mls\u{1B}[0m outside the folder"),
+                       .ask(name: "run_shell_command", detail: "Run command: ls — Claude Code says: ls outside the folder"))
+        // Full access: everything goes ahead.
+        XCTAssertEqual(ask("Bash", ["command": "rm -rf build"], preset: .fullAccess), .allow)
+        XCTAssertEqual(ask("mcp__github__create_issue", [:], preset: .fullAccess), .allow)
+        // Plan only: writes ask; the plan is shown and Claude stops.
+        XCTAssertEqual(ask("Edit", ["file_path": "/tmp/project/a.swift"], preset: .plan),
+                       .ask(name: "edit", detail: "Write: /tmp/project/a.swift"))
+        XCTAssertEqual(ask("ExitPlanMode", ["plan": "x"], preset: .plan), .deny(ClaudeCodePermissions.planShown))
+        XCTAssertEqual(ask("ExitPlanMode", ["plan": "x"]), .allow)
+        XCTAssertEqual(ask("AskUserQuestion", [:]), .deny(ClaudeCodePermissions.askInReply))
+    }
+
+    // MARK: - The command line and stdin
 
     private let everything = ClaudeCodeInstall(path: "/usr/local/bin/claude", version: "2.1.299",
                                                flags: ClaudeCodeInstall.parseHelp(ClaudeCodeFixtures.help).flags,
@@ -181,12 +265,10 @@ final class ClaudeCodeTests: XCTestCase {
     func testTheRealHelpListsWhatVisionUses() {
         let parsed = ClaudeCodeInstall.parseHelp(ClaudeCodeFixtures.help)
         for flag in ["--print", "--output-format", "--input-format", "--include-partial-messages", "--verbose", "--model",
-                     "--effort", "--permission-mode", "--permission-prompts", "--allowedTools", "--allowed-tools",
-                     "--disallowedTools", "--session-id", "--resume", "--append-system-prompt", "--add-dir", "--system-prompt",
-                     "--tools", "--no-session-persistence", "--mcp-config"] {
+                     "--effort", "--permission-mode", "--session-id", "--resume", "--append-system-prompt", "--add-dir",
+                     "--system-prompt", "--tools", "--no-session-persistence"] {
             XCTAssertTrue(parsed.flags.contains(flag), flag)
         }
-        XCTAssertFalse(parsed.flags.contains("--max-turns"), "2.1.299's help doesn't list it, so Vision doesn't pass it")
         XCTAssertTrue(parsed.commands.isSuperset(of: ["auth", "mcp", "update", "upgrade", "plugin", "plugins", "doctor"]))
         XCTAssertFalse(parsed.commands.contains { !$0.allSatisfy { $0.isLetter || $0 == "-" } }, "\(parsed.commands.sorted())")
         XCTAssertTrue(everything.canRunHeadless)
@@ -194,80 +276,65 @@ final class ClaudeCodeTests: XCTestCase {
         XCTAssertNil(ClaudeCodeInstall.parseVersion("command not found"))
     }
 
-    func testANewWorkspaceWriteTurn() {
-        let invocation = ClaudeCodeInvocation(model: "sonnet", effort: "high", preset: .workspaceWrite,
-                                              session: .new("1111"), appendSystemPrompt: "NOTE", addDirs: ["/tmp/att"])
-        XCTAssertEqual(invocation.arguments(for: everything), [
+    func testTheCommandLine() {
+        XCTAssertEqual(ClaudeCodeInvocation(model: "sonnet", effort: "high", preset: .workspaceWrite, session: .new("1111"),
+                                            appendSystemPrompt: "NOTE", addDirs: ["/tmp/att"]).arguments(for: everything), [
             "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-            "--model", "sonnet", "--effort", "high",
-            "--permission-mode", "acceptEdits", "--allowedTools", "Bash,WebFetch,WebSearch",
-            "--disallowedTools", "Bash(rm *),Bash(sudo *),Bash(mv *),Bash(cp *),Bash(mkdir *),Bash(chmod *),Bash(chown *),Bash(dd *),Bash(git push *),Bash(git commit *),Bash(git checkout *),Bash(git reset *),Bash(git rebase *),Bash(git merge *),Bash(git branch -d *),Bash(brew install *),Bash(pip install *),Bash(npm install *)",
-            "--permission-prompts", "none",
+            "--model", "sonnet", "--effort", "high", "--permission-mode", "default", "--permission-prompt-tool", "stdio",
             "--session-id", "1111", "--append-system-prompt", "NOTE", "--add-dir", "/tmp/att",
         ])
+        let plan = ClaudeCodeInvocation(model: "opus", preset: .plan, session: .resume("abc")).arguments(for: everything)
+        XCTAssertTrue(plan.joined(separator: " ").hasSuffix("--model opus --permission-mode plan --permission-prompt-tool stdio --resume abc"),
+                      plan.joined(separator: " "))
+        XCTAssertTrue(ClaudeCodeInvocation(model: "haiku", preset: .fullAccess).arguments(for: everything)
+            .joined(separator: " ").contains("--permission-mode acceptEdits --permission-prompt-tool stdio"))
+        XCTAssertFalse(ClaudeCodeInvocation(model: "default").arguments(for: everything).contains("--model"))
     }
 
-    func testPresetsAndResume() {
-        let plan = ClaudeCodeInvocation(model: "default", preset: .plan, session: .resume("abc")).arguments(for: everything)
-        XCTAssertFalse(plan.contains("--model"), "default lets Claude Code choose")
-        XCTAssertTrue(plan.joined(separator: " ").contains("--permission-mode plan --permission-prompts none --resume abc"), plan.joined(separator: " "))
-        let full = ClaudeCodeInvocation(model: "opus", preset: .fullAccess).arguments(for: everything)
-        XCTAssertTrue(full.joined(separator: " ").contains("--permission-mode acceptEdits --allowedTools Bash,WebFetch,WebSearch --permission-prompts none"))
-        XCTAssertFalse(full.contains("--disallowedTools"))
-    }
-
-    func testAnOlderCLIGetsOnlyWhatItKnows() {
+    func testAnOlderCLIGetsOnlyTheOptionalOptionsItKnows() {
         let old = ClaudeCodeInstall(path: "/x/claude", version: "1.0.80",
-                                    flags: ["--print", "--output-format", "--input-format", "--verbose", "--model", "--resume",
-                                            "--permission-mode", "--allowedTools", "--disallowedTools"])
+                                    flags: ["--print", "--output-format", "--input-format", "--verbose", "--model", "--resume"])
         let args = ClaudeCodeInvocation(model: "sonnet", effort: "max", preset: .fullAccess, session: .new("u"),
                                         appendSystemPrompt: "NOTE", addDirs: ["/a"]).arguments(for: old)
         XCTAssertEqual(args, ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
-                              "--model", "sonnet", "--permission-mode", "acceptEdits", "--allowedTools", "Bash,WebFetch,WebSearch"])
+                              "--model", "sonnet", "--permission-mode", "acceptEdits", "--permission-prompt-tool", "stdio"])
     }
 
     func testAOneShotSideTask() {
         let args = ClaudeCodeInvocation(model: "haiku", oneShotSystemPrompt: "Summarize.").arguments(for: everything)
         XCTAssertEqual(Array(args.suffix(5)), ["--system-prompt", "Summarize.", "--tools", "", "--no-session-persistence"])
-        XCTAssertFalse(args.contains("--permission-mode"))
+        XCTAssertFalse(args.contains("--permission-prompt-tool"))
     }
 
-    func testThePromptGoesInAsOneStreamJSONMessage() throws {
+    func testWhatGoesDownStdin() throws {
         let png = Data([0x89, 0x50, 0x4E, 0x47, 1, 2, 3])
-        let line = ClaudeCodeInput.line(text: "fix it\nplease", images: [ClaudeCodeImage(mediaType: "image/png", data: png)])
-        XCTAssertEqual(line.last, 0x0A)
-        XCTAssertEqual(line.filter { $0 == 0x0A }.count, 1, "one line: newlines in the text are escaped")
+        let pdf = Data("%PDF-1.4".utf8)
+        let line = ClaudeCodeInput.line(text: "fix it\nplease", parts: [.image(mime: "image/png", data: png), .document(name: "spec.pdf", data: pdf),
+                                                                       .text("--- notes.md ---\nhi")])
+        XCTAssertFalse(line.contains("\n"), "one line: newlines in the text are escaped")
         let json = try XCTUnwrap(JSONValue(parsing: line))
         XCTAssertEqual(json["type"], "user")
+        XCTAssertEqual(json["session_id"], "")
         XCTAssertEqual(json["parent_tool_use_id"], .null)
-        XCTAssertEqual(json["message"]?["role"], "user")
         let content = try XCTUnwrap(json["message"]?["content"]?.array)
-        XCTAssertEqual(content.map { $0["type"]?.string }, ["image", "text"])
-        XCTAssertEqual(content[0]["source"]?["media_type"], "image/png")
-        XCTAssertEqual(content[0]["source"]?["data"]?.string, png.base64EncodedString())
-        XCTAssertEqual(content[1]["text"], "fix it\nplease")
-    }
+        XCTAssertEqual(content.map { $0["type"]?.string }, ["text", "image", "document", "text"])
+        XCTAssertEqual(content[0]["text"], "fix it\nplease")
+        XCTAssertEqual(content[1]["source"]?["data"]?.string, png.base64EncodedString())
+        XCTAssertEqual(content[2]["source"]?["media_type"], "application/pdf")
+        XCTAssertEqual(content[2]["title"], "spec.pdf")
+        XCTAssertEqual(JSONValue(parsing: ClaudeCodeInput.line(text: ""))?["message"]?["content"]?[0]?["text"], "(empty message)")
 
-    func testAttachmentsGoTheWayClaudeCodeReadsThem() throws {
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("cc-att-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: folder) }
-        let png = Data([0x89, 0x50, 0x4E, 0x47, 0, 0, 0, 0])
-        let pdf = Data("%PDF-1.4 fake".utf8)
-        let long = String(repeating: "x", count: 40_001)
-        let prepared = ClaudeCodeInput.prepare([
-            MessageAttachment(kind: .file, name: "notes.md", data: Data("# Notes\nhi".utf8)),
-            MessageAttachment(kind: .image, name: "shot.png", data: png),
-            MessageAttachment(kind: .file, name: "../report.pdf", data: pdf),
-            MessageAttachment(kind: .file, name: "big.txt", data: Data(long.utf8)),
-        ], folder: folder)
-        XCTAssertEqual(prepared.images, [ClaudeCodeImage(mediaType: "image/png", data: png)])
-        XCTAssertTrue(prepared.saved)
-        XCTAssertTrue(prepared.text.contains("--- notes.md ---\n# Notes\nhi\n--- end of notes.md ---"))
-        XCTAssertTrue(prepared.text.contains("[Picture attached: shot.png]"))
-        XCTAssertTrue(prepared.text.contains("[Attached file ../report.pdf is saved at \(folder.appendingPathComponent("report.pdf").path) — open it with your Read tool.]"))
-        XCTAssertEqual(try Data(contentsOf: folder.appendingPathComponent("report.pdf")), pdf)
-        XCTAssertEqual(try String(contentsOf: folder.appendingPathComponent("big.txt"), encoding: .utf8).count, 40_001)
-        XCTAssertEqual(ClaudeCodeInput.safeName(".."), "attachment")
+        let allow = try XCTUnwrap(JSONValue(parsing: ClaudeCodeInput.allow(requestID: "r1", input: ["command": "ls"], toolUseID: "t1")))
+        XCTAssertEqual(allow, ["type": "control_response", "response": ["subtype": "success", "request_id": "r1",
+                               "response": ["behavior": "allow", "updatedInput": ["command": "ls"], "toolUseID": "t1"]]])
+        let deny = try XCTUnwrap(JSONValue(parsing: ClaudeCodeInput.deny(requestID: "r2", message: "no", toolUseID: nil)))
+        XCTAssertEqual(deny, ["type": "control_response", "response": ["subtype": "success", "request_id": "r2",
+                              "response": ["behavior": "deny", "message": "no"]]])
+        XCTAssertEqual(JSONValue(parsing: ClaudeCodeInput.unhandled(requestID: "r3", subtype: "hook_callback")),
+                       ["type": "control_response", "response": ["subtype": "error", "request_id": "r3",
+                                                                 "error": "Vision doesn't handle hook_callback requests."]])
+        XCTAssertEqual(JSONValue(parsing: ClaudeCodeInput.interrupt(requestID: "vision-stop-1")),
+                       ["type": "control_request", "request_id": "vision-stop-1", "request": ["subtype": "interrupt"]])
     }
 
     // MARK: - Finding it and asking whether it is signed in
@@ -297,7 +364,7 @@ final class ClaudeCodeTests: XCTestCase {
         XCTAssertEqual(install.path, "/a/claude")
         XCTAssertEqual(install.version, "2.1.299")
         XCTAssertTrue(auth.usesSubscription)
-        XCTAssertEqual(status.summary, "Claude Code 2.1.299 — Signed in with your Claude Max plan as pat@example.com.")
+        XCTAssertEqual(status.summary, "Claude Code 2.1.299 is ready — signed in as pat@example.com, using your Claude Max plan.")
         XCTAssertTrue(status.steps.isEmpty)
     }
 
@@ -323,8 +390,10 @@ final class ClaudeCodeTests: XCTestCase {
         })
         guard case .signedOut = status else { return XCTFail("\(status)") }
         XCTAssertEqual(asked.all, ["--version", "--help", "auth status"])
-        XCTAssertEqual(status.summary, "Claude Code 2.1.299 is installed but not signed in.")
+        XCTAssertEqual(status.summary, "Claude Code 2.1.299 is installed but not signed in. Sign in once in a terminal: claude auth login")
         XCTAssertEqual(status.steps.compactMap(\.command), ["claude auth login"])
+        XCTAssertTrue(status.canRun, "a turn still runs and says so in Claude Code's words")
+        XCTAssertFalse(status.isUsable)
     }
 
     func testAnOldCLIIsNeverAskedAuthStatus() async {
@@ -336,25 +405,28 @@ final class ClaudeCodeTests: XCTestCase {
         })
         guard case .unknownSignIn = status else { return XCTFail("\(status)") }
         XCTAssertEqual(asked.all, ["--version", "--help"], "without an auth command, 'auth status' would be a prompt")
-        XCTAssertTrue(status.isUsable)
+        XCTAssertEqual(status.summary, "Claude Code 1.0.20 is installed. (This version can't say whether it's signed in — your first message will.)")
     }
 
     func testMissingBrokenAndTooOld() async {
         let missing = await ClaudeCodeDetector.check(search: search([]), runner: Scripted { _, _ in AWSCLIResult(exitCode: 0) })
         XCTAssertEqual(missing, .missing)
-        XCTAssertEqual(missing.steps.first?.command, "curl -fsSL https://claude.ai/install.sh | bash")
-        XCTAssertEqual(missing.steps.compactMap(\.command).last, "claude auth login")
+        XCTAssertEqual(missing.summary, "Claude Code isn't installed on this computer (Vision looked on PATH and where its installers put it).")
+        XCTAssertEqual(missing.steps.compactMap(\.command), ["curl -fsSL https://claude.ai/install.sh | bash",
+                                                             "npm install -g @anthropic-ai/claude-code", "claude auth login"])
+        XCTAssertFalse(missing.canRun)
 
         let broken = await ClaudeCodeDetector.check(search: search(["/a/claude"]), runner: Scripted { _, _ in
             AWSCLIResult(exitCode: 127, stderr: "env: node: No such file or directory\n")
         })
         XCTAssertEqual(broken, .broken(path: "/a/claude", problem: "env: node: No such file or directory"))
+        XCTAssertEqual(broken.summary, "Claude Code at /a/claude didn't start properly (env: node: No such file or directory).")
 
         let tooOld = await ClaudeCodeDetector.check(search: search(["/a/claude"]), runner: Scripted { _, args in
             args.first == "--version" ? AWSCLIResult(exitCode: 0, stdout: "0.2.9") : AWSCLIResult(exitCode: 0, stdout: "Options:\n  -p, --print\n")
         })
         guard case .tooOld = tooOld else { return XCTFail("\(tooOld)") }
-        XCTAssertEqual(tooOld.steps.map(\.command), ["claude update"])
+        XCTAssertEqual(tooOld.steps.compactMap(\.command), ["claude update"])
     }
 
     func testABrokenCandidateDoesntHideAWorkingOne() async {
@@ -370,11 +442,11 @@ final class ClaudeCodeTests: XCTestCase {
     }
 
     func testWhoPays() {
-        XCTAssertEqual(ClaudeCodeAuth(loggedIn: true, authMethod: "api_key", apiProvider: "firstParty").summary,
-                       "Signed in with an Anthropic API key — Claude Code bills that key's account, not a Claude plan.")
-        XCTAssertEqual(ClaudeCodeAuth(loggedIn: true, authMethod: "none", apiProvider: "bedrock").summary,
-                       "Signed in, but Claude Code is set to use Amazon Bedrock — it bills that account, not a Claude plan.")
-        XCTAssertEqual(ClaudeCodeAuth(loggedIn: true, authMethod: "oauth_token").summary, "Signed in with your Claude plan.")
+        XCTAssertEqual(ClaudeCodeAuth(loggedIn: true, authMethod: "api_key", apiProvider: "firstParty").describe,
+                       "an Anthropic API key — billed to that key, not your subscription")
+        XCTAssertEqual(ClaudeCodeAuth(loggedIn: true, authMethod: "none", apiProvider: "bedrock").describe,
+                       "Amazon Bedrock (the CLI's own AWS settings)")
+        XCTAssertEqual(ClaudeCodeAuth(loggedIn: true, authMethod: "oauth_token").describe, "your Claude subscription")
         XCTAssertEqual(ClaudeCodeAuth.parse("Logged in as pat")?.loggedIn, true)
         XCTAssertEqual(ClaudeCodeAuth.parse("Not logged in. Run claude auth login")?.loggedIn, false)
         XCTAssertNil(ClaudeCodeAuth.parse("usage: claude"))
@@ -400,69 +472,48 @@ final class ClaudeCodeTests: XCTestCase {
         XCTAssertEqual(ClaudeCodeLocator.source(of: home + "/bin/claude", explicitPath: home + "/bin/claude", home: home), .chosen)
     }
 
-    func testTheEnvironmentNeverCarriesAnAPIKeyOrAnotherSession() {
+    func testTheEnvironmentDropsAParentSessionAndKeepsCredentials() {
         let env = ClaudeCodeEnvironment.environment(for: "/Users/me/.nvm/versions/node/v22.1.0/bin/claude", base: [
             "PATH": "/usr/bin:/bin", "HOME": "/Users/me", "ANTHROPIC_API_KEY": "sk-ant-x", "CLAUDECODE": "1",
-            "CLAUDE_CODE_SIMPLE": "1", "CLAUDE_CODE_OAUTH_TOKEN": "kept", "LANG": "en_US.UTF-8",
+            "CLAUDE_CODE_SIMPLE": "1", "CLAUDE_CODE_SSE_PORT": "9", "CLAUDE_CODE_OAUTH_TOKEN": "kept", "LANG": "en_US.UTF-8",
         ], home: "/Users/me")
-        XCTAssertNil(env["ANTHROPIC_API_KEY"])
         XCTAssertNil(env["CLAUDECODE"])
         XCTAssertNil(env["CLAUDE_CODE_SIMPLE"])
+        XCTAssertNil(env["CLAUDE_CODE_SSE_PORT"])
         XCTAssertNil(env["AWS_PAGER"])
-        XCTAssertEqual(env["CLAUDE_CODE_OAUTH_TOKEN"], "kept", "the person's own long-lived Claude token is theirs to use")
+        XCTAssertEqual(env["ANTHROPIC_API_KEY"], "sk-ant-x", "credentials pass through untouched — a turn says when a key pays")
+        XCTAssertEqual(env["CLAUDE_CODE_OAUTH_TOKEN"], "kept")
         XCTAssertEqual(env["LANG"], "en_US.UTF-8")
         XCTAssertEqual(env["PATH"], "/Users/me/.nvm/versions/node/v22.1.0/bin:/usr/bin:/bin:/Users/me/.local/bin:/opt/homebrew/bin:/usr/local/bin:/opt/homebrew/sbin")
         XCTAssertNotNil(env["SHELL"])
     }
 
-    // MARK: - Cost, recap, session
+    // MARK: - Cost, recap
 
-    func testCostPerTurn() {
-        XCTAssertEqual(ClaudeCodeTurn.turnCost(total: 0.30, previousTotal: 0.20, resumed: true, version: "2.1.299")!, 0.10, accuracy: 1e-9)
-        XCTAssertEqual(ClaudeCodeTurn.turnCost(total: 0.30, previousTotal: 0.20, resumed: true, version: "2.1.200"), 0.30,
-                       "before 2.1.277 a resumed run reported only itself")
-        XCTAssertEqual(ClaudeCodeTurn.turnCost(total: 0.05, previousTotal: nil, resumed: false, version: "2.1.299"), 0.05)
-        XCTAssertEqual(ClaudeCodeTurn.turnCost(total: 0.05, previousTotal: 0.20, resumed: true, version: "2.1.299"), 0.05,
-                       "a smaller total means a reset: it is this turn's own")
-        XCTAssertEqual(ClaudeCodeTurn.formatCost(0.0421), "≈ $0.04")
-        XCTAssertEqual(ClaudeCodeTurn.formatCost(0.0042), "≈ $0.0042")
-        let result = ClaudeCodeResult(subtype: "success", isError: false, text: "x", numTurns: 4, durationMs: 8_123, totalCostUSD: 0.0421,
-                                      usage: LLMUsage(promptTokens: 31_512, completionTokens: 420))
-        XCTAssertEqual(ClaudeCodeTurn.usageLine(model: "claude-sonnet-5-5", result: result, cost: 0.0421, apiKeySource: "none"),
-                       "Claude Code · claude-sonnet-5-5 · 4 steps · 31,512 in · 420 out · 8s · ≈ $0.04 at API prices (your Claude plan covers it)")
-        XCTAssertTrue(ClaudeCodeTurn.usageLine(model: nil, result: result, cost: 1.5, apiKeySource: "ANTHROPIC_API_KEY")
-            .hasSuffix("≈ $1.50 at API prices (billed to your API key)"))
+    func testTheLineUnderATurn() {
+        let result = ClaudeCodeResult(subtype: "success", isError: false, text: "x", numTurns: 3, totalCostUSD: 0.3)
+        let usage = LLMUsage(promptTokens: 12_400, completionTokens: 84, cachedTokens: 8_000)
+        XCTAssertEqual(ClaudeCodeTurn.usageLine(result: result, usage: usage, previousTotal: 0.28, apiKeySource: "none"),
+                       "Claude Code: 3 steps · 12,400 tokens in (8,000 cached) · 84 out · about $0.02 at API prices — covered by your Claude plan.")
+        XCTAssertEqual(ClaudeCodeTurn.usageLine(result: result, usage: LLMUsage(promptTokens: 5, completionTokens: 1), previousTotal: nil,
+                                                apiKeySource: "ANTHROPIC_API_KEY"),
+                       "Claude Code: 3 steps · 5 tokens in · 1 out · about $0.30 at API prices — billed to the API key.")
+        XCTAssertEqual(ClaudeCodeTurn.costWords(0.004), "under $0.01")
+        XCTAssertEqual(ClaudeCodeTurn.costWords(1.54), "about $1.5")
+        XCTAssertEqual(ClaudeCodeTurn.turnCost(total: 0.05, previousTotal: 0.20), 0.05, "a smaller total means the session started over")
     }
 
-    func testTheRecapOfMessagesTheSessionHasntSeen() throws {
-        XCTAssertNil(ClaudeCodeRecap.preface([]))
-        let text = try XCTUnwrap(ClaudeCodeRecap.preface([
-            ClaudeCodeRecapItem(role: .person, text: "What is 2+2?"),
-            ClaudeCodeRecapItem(role: .assistant, text: "4"),
-            ClaudeCodeRecapItem(role: .tool, text: "Run swift build — Build complete"),
-        ]))
-        XCTAssertEqual(text, "[Earlier in this Vision chat — messages you haven't seen (they ran on another model). Read them as context, then answer the new message below.]\n\nPerson: What is 2+2?\n\nAssistant: 4\n\nTool activity: Run swift build — Build complete\n\n[End of earlier messages. The new message:]\n\n")
-        let many = (1...40).map { ClaudeCodeRecapItem(role: .person, text: "message \($0) " + String(repeating: "y", count: 990)) }
-        let capped = try XCTUnwrap(ClaudeCodeRecap.preface(many))
+    func testTheRecapOfTheChatSoFar() throws {
+        XCTAssertNil(ClaudeCodeRecap.build([]))
+        let text = try XCTUnwrap(ClaudeCodeRecap.build([.user("What is 2+2?"), .assistant("4"), .system("Earlier: hello")]))
+        XCTAssertEqual(text, ClaudeCodeRecap.header + "\n\nPerson: What is 2+2?\n\nAssistant: 4\n\nSummary: Earlier: hello\n\n" + ClaudeCodeRecap.footer)
+        XCTAssertEqual(ClaudeCodeRecap.header, "[Earlier in this chat — before this Claude Code session. Another model (or an earlier session) answered these; carry on from here rather than starting over.]")
+        let long = (1...40).map { LLMMessage.user("message \($0) " + String(repeating: "y", count: 990)) }
+        let capped = try XCTUnwrap(ClaudeCodeRecap.build(long))
         XCTAssertTrue(capped.contains("message 40 "), "the newest are kept")
         XCTAssertFalse(capped.contains("message 1 "))
-        XCTAssertTrue(capped.contains("older messages were left out."))
-        XCTAssertLessThan(capped.count, ClaudeCodeRecap.maxCharacters + 600)
-    }
-
-    func testTheReplyOtherModelsAreGiven() {
-        XCTAssertEqual(ClaudeCodeTurn.transcriptReply("Done.", toolLog: []), "Done.")
-        XCTAssertEqual(ClaudeCodeTurn.transcriptReply("", toolLog: ["Edit a.swift", "Bash swift test (failed)"]),
-                       "(Claude Code worked on this without a written reply.)\n\n[Claude Code's tool work this turn: Edit a.swift; Bash swift test (failed)]")
-        let long = ClaudeCodeTurn.transcriptReply("ok", toolLog: (1...100).map { "Read file\($0).swift" }, limit: 100)
-        XCTAssertTrue(long.contains("… and "), long)
-    }
-
-    func testWhichSessionATurnUses() {
-        XCTAssertEqual(ClaudeCodeLink.choice(for: nil, newID: { "fresh" }), .new("fresh"))
-        XCTAssertEqual(ClaudeCodeLink.choice(for: ClaudeCodeLink(sessionID: "s", started: false), newID: { "fresh" }), .new("fresh"),
-                       "a session that never reached the model may not exist: start a new one")
-        XCTAssertEqual(ClaudeCodeLink.choice(for: ClaudeCodeLink(sessionID: "s", started: true), newID: { "fresh" }), .resume("s"))
+        XCTAssertTrue(capped.contains("Person: …"), "the oldest one that fits is cut from the front")
+        XCTAssertLessThan(capped.count, ClaudeCodeRecap.defaultBudget + 400)
     }
 
     func testClaudeCodeRoutesAreNeverPrivateOrHelpers() {
@@ -477,13 +528,16 @@ final class ClaudeCodeTests: XCTestCase {
         XCTAssertEqual(rules.effortWord(.off), "low")
         XCTAssertEqual(rules.effortWord(.max), "max")
         XCTAssertEqual(ClaudeCodeModels.contextWindow("opus[1m]"), 1_000_000)
-        XCTAssertEqual(ClaudeCodeModels.contextWindow("sonnet"), 200_000)
+        XCTAssertEqual(ClaudeCodeModels.choices.map { "\($0.name): \($0.detail)" },
+                       ["Opus: the most capable — long, hard work", "Sonnet: fast and capable — the everyday choice",
+                        "Haiku: the quickest — small jobs"])
     }
 
     // MARK: - The real process
 
-    /// A stand-in `claude`: records its arguments (one per line) and standard input, prints `out`, or — with a
-    /// `hang` file — waits until SIGINT and then prints a result for the interrupted turn.
+    /// A stand-in `claude`: records its arguments (one per line) and the first stdin line, then — with an `ask` file —
+    /// prints that control request and records the answer line; with a `hang` file waits for the interrupt request
+    /// and answers it with an interrupted result; otherwise prints `out`.
     static func fakeCLI(in dir: URL) throws -> URL {
         let script = dir.appendingPathComponent("claude")
         try """
@@ -491,65 +545,85 @@ final class ClaudeCodeTests: XCTestCase {
         d="$(cd "$(dirname "$0")" && pwd)"
         n=$(cat "$d/count" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$d/count"
         : > "$d/args-$n"; for a in "$@"; do printf '%s\\n' "$a" >> "$d/args-$n"; done
-        cat > "$d/stdin-$n"
+        IFS= read -r first; printf '%s\\n' "$first" > "$d/stdin-$n"
+        if [ -f "$d/ask" ]; then
+          cat "$d/ask"
+          IFS= read -r answer; printf '%s\\n' "$answer" > "$d/answer-$n"
+        fi
         if [ -f "$d/hang" ]; then
-          trap 'echo "{\\"type\\":\\"result\\",\\"subtype\\":\\"error_during_execution\\",\\"is_error\\":true,\\"result\\":\\"\\",\\"session_id\\":\\"S\\",\\"num_turns\\":1,\\"errors\\":[\\"interrupted\\"]}"; exit 130' INT
           echo '{"type":"system","subtype":"init","session_id":"S","model":"claude-sonnet-5-5"}'
-          sleep 30 >/dev/null 2>&1 &
-          wait
+          while IFS= read -r line; do
+            case "$line" in *interrupt*)
+              printf '%s\\n' "$line" > "$d/interrupt-$n"
+              echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"","session_id":"S","num_turns":1,"terminal_reason":"aborted_streaming"}'
+              exit 0;;
+            esac
+          done
           exit 0
         fi
-        cat "$d/out"
+        cat "$d/out-$n" 2>/dev/null || cat "$d/out"
         """.write(to: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
         return script
     }
 
-    func testTheRealLauncherPipesArgumentsInputAndLines() async throws {
+    private func tempDir() throws -> URL {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cc-cli-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    func testTheRealLauncherAnswersPermissionQuestionsOnStdin() async throws {
+        let dir = try tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let script = try Self.fakeCLI(in: dir)
+        let lines = ClaudeCodeFixtures.lines(ClaudeCodeFixtures.permissionTurn)
+        try (lines[2] + "\n").write(to: dir.appendingPathComponent("ask"), atomically: true, encoding: .utf8)
         try (ClaudeCodeFixtures.toolTurn + "\n").write(to: dir.appendingPathComponent("out"), atomically: true, encoding: .utf8)
         let install = ClaudeCodeInstall(path: script.path, version: "2.1.299", flags: everything.flags, commands: ["auth"])
         let invocation = ClaudeCodeInvocation(model: "sonnet", preset: .workspaceWrite, session: .new("u-1"),
-                                              appendSystemPrompt: ClaudeCodeTurn.visionNote)
-        let events = TextRecorder()
-        let outcome = try await ClaudeCodeTurn.run(install: install, invocation: invocation, prompt: "fix the greeting",
-                                                   workspace: dir, environment: ClaudeCodeEnvironment.environment(for: script.path, base: ProcessInfo.processInfo.environment),
-                                                   launcher: ProcessClaudeCodeLauncher()) { event in
-            if case .engine(.textDelta(let t)) = event { events.add(t) }
+                                              appendSystemPrompt: ClaudeCodeTurn.systemNote)
+        let texts = TextRecorder()
+        let asked = TextRecorder()
+        let outcome = try await ClaudeCodeTurn.run(
+            install: install, invocation: invocation, message: ClaudeCodeInput.line(text: "fix the greeting"), workspace: dir,
+            environment: ClaudeCodeEnvironment.environment(for: script.path, base: ProcessInfo.processInfo.environment),
+            launcher: ProcessClaudeCodeLauncher(), decide: { request in
+                asked.add(request.toolName)
+                return .allow
+            }) { event in
+            if case .engine(.textDelta(let t)) = event { texts.add(t) }
         }
         XCTAssertNil(outcome.failure)
         XCTAssertFalse(outcome.interrupted)
-        XCTAssertTrue(outcome.reachedModel)
+        XCTAssertTrue(outcome.progressed)
         XCTAssertEqual(outcome.sessionID, ClaudeCodeFixtures.sessionID)
         XCTAssertEqual(outcome.lastReplyText, "Done — fixed the typo.")
-        XCTAssertEqual(events.all.joined(), "I'll fix the greeting.Done — fixed the typo.")
-        // What the CLI really received.
+        XCTAssertEqual(texts.all.joined(), "I'll fix the greeting.Done — fixed the typo.")
+        XCTAssertEqual(asked.all, ["Bash"])
+        // What the CLI really received: its arguments, the prompt, and the answer to its question.
         let args = try String(contentsOf: dir.appendingPathComponent("args-1"), encoding: .utf8).split(separator: "\n").map(String.init)
         XCTAssertEqual(args, invocation.arguments(for: install))
-        XCTAssertTrue(args.contains("Bash(rm *),Bash(sudo *),Bash(mv *),Bash(cp *),Bash(mkdir *),Bash(chmod *),Bash(chown *),Bash(dd *),Bash(git push *),Bash(git commit *),Bash(git checkout *),Bash(git reset *),Bash(git rebase *),Bash(git merge *),Bash(git branch -d *),Bash(brew install *),Bash(pip install *),Bash(npm install *)"),
-                      "the deny rules arrive as one argument")
-        let stdin = try Data(contentsOf: dir.appendingPathComponent("stdin-1"))
+        let stdin = try String(contentsOf: dir.appendingPathComponent("stdin-1"), encoding: .utf8)
         XCTAssertEqual(JSONValue(parsing: stdin)?["message"]?["content"]?[0]?["text"], "fix the greeting")
+        let answer = try String(contentsOf: dir.appendingPathComponent("answer-1"), encoding: .utf8)
+        XCTAssertEqual(JSONValue(parsing: answer), ["type": "control_response", "response": ["subtype": "success", "request_id": "req-1",
+                       "response": ["behavior": "allow", "updatedInput": ["command": "rm -rf build", "description": "Clean"], "toolUseID": "toolu_q"]]])
     }
 
-    func testStopEndsTheTurnWithSIGINT() async throws {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cc-cli-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    func testStopSendsClaudeCodesOwnInterrupt() async throws {
+        let dir = try tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let script = try Self.fakeCLI(in: dir)
         try Data().write(to: dir.appendingPathComponent("hang"))
         let install = ClaudeCodeInstall(path: script.path, version: "2.1.299", flags: everything.flags)
-        let lines = TextRecorder()
         let started = Date()
         let task = Task {
             try await ClaudeCodeTurn.run(install: install, invocation: ClaudeCodeInvocation(model: "sonnet", session: .new("u")),
-                                         prompt: "wait", workspace: dir, environment: ProcessInfo.processInfo.environment,
-                                         launcher: ProcessClaudeCodeLauncher(interruptGrace: 10, killGrace: 2)) { event in
-                if case .notice(let text) = event { lines.add(text) }
-            }
+                                         message: ClaudeCodeInput.line(text: "wait"), workspace: dir,
+                                         environment: ProcessInfo.processInfo.environment,
+                                         launcher: ProcessClaudeCodeLauncher(interruptGrace: 10, killGrace: 2),
+                                         decide: { _ in .allow }) { _ in }
         }
         while !FileManager.default.fileExists(atPath: dir.appendingPathComponent("stdin-1").path) {
             if Date().timeIntervalSince(started) > 10 { return XCTFail("the CLI never started") }
@@ -560,15 +634,19 @@ final class ClaudeCodeTests: XCTestCase {
         let outcome = try await task.value
         XCTAssertTrue(outcome.interrupted)
         XCTAssertNil(outcome.failure, "a stop is not a failure")
-        XCTAssertEqual(outcome.result?.errors, ["interrupted"], "SIGINT let the CLI end its turn and say so")
+        XCTAssertEqual(outcome.result?.terminalReason, "aborted_streaming", "Claude Code ended its turn and said so")
+        let request = try String(contentsOf: dir.appendingPathComponent("interrupt-1"), encoding: .utf8)
+        XCTAssertEqual(JSONValue(parsing: request)?["request"]?["subtype"], "interrupt")
+        XCTAssertTrue(JSONValue(parsing: request)?["request_id"]?.string?.hasPrefix("vision-stop-") == true)
         XCTAssertLessThan(Date().timeIntervalSince(started), 9, "it didn't need SIGTERM")
     }
 
     func testACLIThatCantStart() async {
         do {
             _ = try await ClaudeCodeTurn.run(install: ClaudeCodeInstall(path: "/nonexistent/claude", version: "2.1.299"),
-                                             invocation: ClaudeCodeInvocation(), prompt: "x", workspace: workspace,
-                                             environment: [:], launcher: ProcessClaudeCodeLauncher()) { _ in }
+                                             invocation: ClaudeCodeInvocation(), message: ClaudeCodeInput.line(text: "x"),
+                                             workspace: workspace, environment: [:], launcher: ProcessClaudeCodeLauncher(),
+                                             decide: { _ in .allow }) { _ in }
             XCTFail("it can't start")
         } catch let error as ClaudeCodeError {
             guard case .couldNotStart = error else { return XCTFail("\(error)") }

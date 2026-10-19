@@ -176,7 +176,7 @@ struct SetupWizard: View {
                 model.showPlanGuide(closing: true, plan: "zai")
             }
             guideChoice(icon: "terminal", title: "Claude Code — your Claude Pro or Max plan",
-                        detail: "Runs the claude command on this Mac, signed in with your own Claude plan. Vision shows its work, tools and cost, and never touches your sign-in.") {
+                        detail: ClaudeCodeWords.summary) {
                 model.showClaudeCodeGuide(closing: true)
             }
             guideChoice(icon: "creditcard", title: "A subscription or API plan — Kimi, Qwen, OpenAI, GLM",

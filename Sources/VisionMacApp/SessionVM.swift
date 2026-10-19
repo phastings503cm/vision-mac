@@ -146,8 +146,6 @@ public final class SessionVM: Identifiable {
     /// The route (`ProviderProfile.routeID`) this chat talks to — its own, stored with the conversation (see
     /// `ChatRoutes.swift`). Nil = not chosen yet: it takes the primary when it next sends.
     public var routeID: String?
-    /// The chat's Claude Code session, when it runs (or ran) on Claude Code — stored with the conversation.
-    public var claudeCode: ClaudeCodeLink?
     /// What the last Claude Code turn cost at API prices (Claude Code's own estimate; the plan covers it).
     public var lastCostUSD: Double?
     /// The model's live reasoning for the current step (not persisted).

@@ -1,24 +1,33 @@
 import Foundation
 import VisionHarnessCore
 
-// MARK: - A chat turn on Claude Code
+// MARK: - Chats on Claude Code (your Claude subscription)
 //
-// A chat whose model is a Claude Code route runs each turn as `claude -p` in the chat's folder (see
-// `ClaudeCodeTurn`), resuming the chat's own Claude Code session. Everything around the turn is Vision's as for any
-// model — the run phases, the ETA cache, the Prompts timeline, `/goal` (one `claude -p` per round), the task queue,
-// Stop — because this replaces only the engine run inside `turn()`: the same events come back (`EngineEvent`) and
-// the same `RunResult` goes out. Messages the session hasn't seen (earlier turns on another model) go along as a
-// recap, so a chat can move between Claude Code and any other model and keep its conversation.
+// A chat whose route is a Claude Code route hands each turn to the official claude CLI in headless mode instead of
+// Vision's own engine: one `claude -p` per turn (per /goal round, per task), stream-json in and out, in the chat's
+// folder, carrying on the same Claude Code session with --resume. Its events become the chat's rows through the same
+// `apply` as every engine event, so run phases, the ETA, the Prompts timeline, /goal and the task queue all work on it
+// unchanged; Claude Code's permission questions are answered with the chat's preset (asking the person on the same card
+// Vision's own engine uses); Stop interrupts the turn. The CLI does all the talking with the person's own sign-in —
+// Vision never reads it. Vision for Windows does the same (AgentHost.ClaudeCode.cs).
 
 extension AppTransport {
-    /// One user message → one Claude Code run. Called by `turn()` after the user's message is in the timeline.
+    /// One turn on Claude Code. The user's row is already in the chat; this runs `claude -p` and returns what the goal
+    /// loop and the queue read (the reply, the usage).
     func claudeCodeTurn(_ vm: SessionVM, profile: ProviderProfile, modelText: String, attachments: [MessageAttachment],
                         userEntryID: String) async throws -> RunResult {
         let sessionID = vm.id
-        // A Sensitive chat never runs on an engine that reads files itself: the shield can't anonymise them.
+        // A Sensitive chat never runs on an engine that reads files itself: the shield can't mask what it reads.
         if isSensitiveChat(vm) {
             markUndelivered(vm, entryID: userEntryID)
             throw ClaudeCodeError.sensitiveChat
+        }
+        let workspace = vm.workspaceURL ?? scratchFolder(for: vm, create: true)
+        // A chat that was on one of Vision's own models this launch says it moved.
+        if dropEngine(sessionID), claudeCode.announced.insert(sessionID).inserted {
+            let text = "This chat now uses \(Self.routeLabel(profile)) — \(ClaudeCodeModels.name(profile.model)), on your Claude plan through the claude app on this computer."
+            vm.note(text)
+            log.recordItem(sessionID, kind: "notice", text: text, toolName: nil, argSummary: nil, output: nil, isError: false)
         }
         let (found, status) = await claudeCode.usableInstall()
         guard let install = found else {
@@ -30,49 +39,75 @@ extension AppTransport {
             markUndelivered(vm, entryID: userEntryID)
             throw CancellationError()
         }
-        let workspace = vm.workspaceURL ?? scratchFolder(for: vm, create: true)
-        let input = transcripts[sessionID] ?? []
-        let thinking = vm.thinking ?? profile.thinking
-        let rules = ModelRequestRules.for(profile, model: profile.model)
-        let environment = ClaudeCodeEnvironment.environment(for: install.path, base: ProcessInfo.processInfo.environment)
 
-        var link = vm.claudeCode
-        var attempt = 0
-        while true {
-            attempt += 1
-            let choice = ClaudeCodeLink.choice(for: link)
-            if case .new(let id) = choice { link = ClaudeCodeLink(sessionID: id, lastTotalCostUSD: nil) }
-            // A new session knows nothing of this chat: it gets the whole conversation so far. A resumed one gets
-            // what happened since it last spoke (turns on other models).
-            let since: Date? = {
-                if case .resume = choice { return vm.claudeCode?.syncedAt ?? .distantFuture }
-                return nil
-            }()
-            var prompt = ClaudeCodeRecap.preface(Self.claudeCodeRecapItems(vm.entries, since: since, excluding: userEntryID)) ?? ""
-            var images: [ClaudeCodeImage] = []
-            var addDirs: [String] = []
-            if !attachments.isEmpty {
-                let folder = claudeCodeAttachmentFolder(for: vm)
-                let prepared = ClaudeCodeInput.prepare(attachments, folder: folder)
-                if !prepared.text.isEmpty { prompt += prepared.text + "\n\n" }
-                images = prepared.images
-                if prepared.saved, !folder.path.hasPrefix(workspace.path + "/") { addDirs.append(folder.path) }
+        // Attachments: pictures and PDFs go as themselves; a long file goes in parts, and Claude Code reads the rest of it
+        // from where Vision saved it (it has no read_attachment tool).
+        var addDirs: [String] = []
+        var notes: [String] = []
+        var parts: [AttachmentWirePart] = []
+        if !attachments.isEmpty {
+            let prepared = await prepareAttachments(attachments, vm: vm, entryID: userEntryID, profile: profile,
+                                                    window: contextLimit(for: vm))
+            let store = attachmentStore(for: sessionID)
+            for attachment in prepared where (attachment.parts ?? 1) > 1 {
+                guard let entry = store.entries().last(where: { $0.name == attachment.name }) else { continue }
+                notes.append("(The full text of \(attachment.name) is saved at \(store.directory.appendingPathComponent(entry.file).path) — read the rest of it there with your Read tool; there is no read_attachment tool.)")
+                if !addDirs.contains(store.directory.path) { addDirs.append(store.directory.path) }
             }
-            prompt += modelText
-            let invocation = ClaudeCodeInvocation(model: profile.model, effort: thinking.flatMap { rules.effortWord($0) },
-                                                  preset: vm.preset, session: choice,
-                                                  appendSystemPrompt: ClaudeCodeTurn.visionNote, addDirs: addDirs)
+            parts = AttachmentWire.parts(for: prepared, route: ClaudeCodeInput.attachmentRoute)
+        }
 
+        // The Claude Code session this chat carries on — or a new one, which first hears what the chat said before it.
+        let stored = log.claudeSession(sessionID)
+        var session = stored.session
+        var lastCost = stored.cost
+        var message = modelText
+        if vm.goal != nil { message += "\n\n" + ClaudeCodeTurn.goalNote }
+        if !notes.isEmpty { message += "\n\n" + notes.joined(separator: "\n") }
+        let body = message
+        /// The chat before the new message (all of it, or only after `since`), as a recap in front of `text`.
+        func seeded(_ text: String, since: Date?) -> String {
+            var before = Array(vm.entries.prefix { $0.id != userEntryID })
+            if let since { before = before.filter { $0.at > since } }
+            return ClaudeCodeRecap.build(Self.replayMessages(before)).map { $0 + "\n\n" + text } ?? text
+        }
+        var choice: ClaudeCodeSessionChoice
+        if let session {
+            choice = .resume(session)
+            // Turns on other models since it last spoke go along first (none when nothing happened in between).
+            message = seeded(body, since: stored.syncedAt ?? .distantPast)
+        } else {
+            choice = .new(UUID().uuidString.lowercased())
+            message = seeded(body, since: nil)
+        }
+        let policy = PermissionPolicy(preset: vm.preset, workspaceRoot: workspace)
+        let environment = ClaudeCodeEnvironment.environment(for: install.path, base: ProcessInfo.processInfo.environment)
+        let rules = ModelRequestRules.for(profile, model: profile.model)
+        let effort = (vm.thinking ?? profile.thinking).flatMap { rules.effortWord($0) }
+        let decide: @Sendable (ClaudeCodePermissionRequest) async -> ClaudeCodePermissionDecision = { [weak self] request in
+            let decision = ClaudeCodePermissions.decide(request, policy: policy)
+            guard case .ask(let name, let detail) = decision else { return decision }
+            let allowed = await self?.askGate(sessionID: sessionID, gateID: request.toolUseID ?? request.requestID,
+                                              name: name, detail: detail) ?? false
+            return allowed ? .allow : .deny(ClaudeCodePermissions.declined)
+        }
+
+        var outcome: ClaudeCodeTurnOutcome
+        var attempts = 0
+        while true {
+            attempts += 1
+            let invocation = ClaudeCodeInvocation(model: profile.model, effort: effort, preset: vm.preset, session: choice,
+                                                  appendSystemPrompt: ClaudeCodeTurn.systemNote, addDirs: addDirs)
             // Events are applied on the main actor, in order, and all of them before the turn is wrapped up.
             let (events, sink) = AsyncStream<ClaudeCodeEvent>.makeStream()
             let consumer = Task { @MainActor [weak self] in
                 for await event in events { self?.applyClaudeCode(event, sessionID: sessionID) }
             }
-            let outcome: ClaudeCodeTurnOutcome
             do {
-                outcome = try await ClaudeCodeTurn.run(install: install, invocation: invocation, prompt: prompt,
-                                                       images: images, workspace: workspace, environment: environment,
-                                                       launcher: claudeCode.launcher) { sink.yield($0) }
+                outcome = try await ClaudeCodeTurn.run(install: install, invocation: invocation,
+                                                       message: ClaudeCodeInput.line(text: message, parts: parts),
+                                                       workspace: workspace, environment: environment,
+                                                       launcher: claudeCode.launcher, decide: decide) { sink.yield($0) }
             } catch {
                 sink.finish()
                 await consumer.value
@@ -82,94 +117,73 @@ extension AppTransport {
             }
             sink.finish()
             await consumer.value
-
-            // A session Claude Code doesn't have (its files were removed) or already has: once, start over or resume.
-            if attempt == 1, !outcome.reachedModel, let failure = outcome.failure {
-                if failure == .sessionNotFound {
-                    let text = "Claude Code no longer has this chat's conversation — started a new one, with this chat so far as context."
-                    vm.note(text)
-                    log.recordItem(sessionID, kind: "notice", text: text, toolName: nil, argSummary: nil, output: nil, isError: false)
-                    link = nil
-                    vm.claudeCode = nil
-                    continue
-                }
-                if failure == .sessionInUse {
-                    link = ClaudeCodeLink(sessionID: choice.id, started: true, syncedAt: vm.claudeCode?.syncedAt)
-                    continue
-                }
+            // Whatever happened, the session it opened is the one to carry on (a lost one is replaced on the next turn).
+            if let opened = outcome.sessionID {
+                log.setClaudeSession(id: sessionID, session: opened,
+                                     cost: outcome.result?.totalCostUSD ?? (opened == session ? lastCost : nil),
+                                     syncedAt: outcome.progressed ? Date() : nil)
             }
-            return try finishClaudeCodeTurn(vm, outcome: outcome, link: link ?? ClaudeCodeLink(sessionID: outcome.sessionID),
-                                            resumed: { if case .resume = choice { return true } else { return false } }(),
-                                            version: install.version, input: input, modelText: modelText, userEntryID: userEntryID)
+            guard let failure = outcome.failure, !outcome.progressed, attempts < 4,
+                  failure == .sessionNotFound || failure == .sessionInUse else { break }
+            let text = "Claude Code no longer had this chat's session, so a new one starts here, with a recap of the chat so far."
+            vm.note(text)
+            log.recordItem(sessionID, kind: "notice", text: text, toolName: nil, argSummary: nil, output: nil, isError: false)
+            session = nil
+            lastCost = nil
+            choice = .new(UUID().uuidString.lowercased())
+            message = seeded(body, since: nil)
         }
-    }
-
-    /// Remember the session, keep the transcript in step, show what the turn used — then hand back the turn's result,
-    /// or its failure, or the Stop.
-    private func finishClaudeCodeTurn(_ vm: SessionVM, outcome: ClaudeCodeTurnOutcome, link: ClaudeCodeLink, resumed: Bool,
-                                      version: String?, input: [LLMMessage], modelText: String,
-                                      userEntryID: String) throws -> RunResult {
-        let sessionID = vm.id
+        // Switching this chat to another model later: it rebuilds its transcript from the rows, Claude Code's turns included.
+        transcripts[sessionID] = nil
         vm.retry = nil
-        var updated = link
-        if !outcome.sessionID.isEmpty { updated.sessionID = outcome.sessionID }
-        let cost = ClaudeCodeTurn.turnCost(total: outcome.result?.totalCostUSD, previousTotal: link.lastTotalCostUSD,
-                                           resumed: resumed, version: version)
-        if outcome.reachedModel {
-            updated.started = true
-            updated.syncedAt = Date()
-            if let total = outcome.result?.totalCostUSD { updated.lastTotalCostUSD = total }
-        }
-        vm.claudeCode = updated
-        log.setClaudeCode(id: sessionID, link: updated)
-
-        guard outcome.reachedModel else {
-            // Claude never saw the message (not signed in, a refused session): say so, and keep it out of the
-            // conversation every model is given.
-            markUndelivered(vm, entryID: userEntryID)
-            vm.endStreaming()
-            if outcome.failure == .notSignedIn { claudeCode.invalidate() }
-            if let failure = outcome.failure { throw failure }
-            if outcome.interrupted { throw CancellationError() }
-            throw ClaudeCodeError.failed("Claude Code finished without answering.")
-        }
-
-        // The conversation every other model is given: the message and Claude Code's reply (its tool work stays in
-        // Claude Code's session and in the timeline).
-        transcripts[sessionID] = input + [.user(modelText),
-                                          .assistant(ClaudeCodeTurn.transcriptReply(outcome.lastReplyText, toolLog: outcome.toolLog))]
         vm.endStreaming()
 
-        if let result = outcome.result {
-            vm.lastUsage = result.usage
-            if let usage = result.usage {
-                vm.turnPromptTokens += usage.promptTokens
-                vm.turnCompletionTokens += usage.completionTokens
-            }
-            vm.lastCostUSD = cost
-            let line = ClaudeCodeTurn.usageLine(model: outcome.model ?? ClaudeCodeModels.name(vm.claudeCodeModelHint ?? ""),
-                                                result: result, cost: cost, apiKeySource: outcome.apiKeySource)
+        if let resolved = outcome.model { turnRoute[sessionID] = RouteUse(model: resolved, route: Self.routeLabel(profile)) }
+        if let source = outcome.apiKeySource, source != "none", claudeCode.keyNoted.insert(sessionID).inserted {
+            let text = source == "ANTHROPIC_API_KEY"
+                ? "Claude Code is using the ANTHROPIC_API_KEY set on this computer — what it does is billed to that key, not your Claude plan."
+                : "Claude Code is signed in with an API key (\(source)) — billed to that key, not your Claude plan."
+            vm.note(text)
+            log.recordItem(sessionID, kind: "notice", text: text, toolName: nil, argSummary: nil, output: nil, isError: false)
+        }
+        if let window = outcome.result?.contextWindow {
+            ClaudeCodeModels.learnWindow(profile.model, window)
+            learnContextWindow(routeID: profile.routeID, window)
+        }
+        if outcome.interrupted {
+            if !outcome.progressed { markUndelivered(vm, entryID: userEntryID) }
+            throw CancellationError()
+        }
+        if let failure = outcome.failure {
+            if !outcome.progressed { markUndelivered(vm, entryID: userEntryID) }
+            if failure == .notSignedIn { claudeCode.invalidate() }
+            throw failure
+        }
+
+        let usage = outcome.usage ?? outcome.result?.usage
+        vm.lastUsage = usage
+        if let usage {
+            vm.turnPromptTokens += usage.promptTokens
+            vm.turnCompletionTokens += usage.completionTokens
+        }
+        if let filled = outcome.contextTokens { vm.contextUsed = filled }
+        let denied = outcome.result?.denials ?? 0
+        if denied > 0 { vm.note("\(denied) tool call(s) were denied.") }
+        if let result = outcome.result, result.localCommand == nil,
+           let line = ClaudeCodeTurn.usageLine(result: result, usage: usage, previousTotal: lastCost, apiKeySource: outcome.apiKeySource) {
+            vm.lastCostUSD = result.totalCostUSD.map { ClaudeCodeTurn.turnCost(total: $0, previousTotal: lastCost) }
             vm.note(line)
             log.recordItem(sessionID, kind: "notice", text: line, toolName: nil, argSummary: nil, output: nil, isError: false)
         }
-        if let note = ClaudeCodeTurn.denialNote(outcome.denials, preset: vm.preset) {
-            vm.note(note)
-            log.recordItem(sessionID, kind: "notice", text: note, toolName: nil, argSummary: nil, output: nil, isError: false)
-        }
-        vm.contextUsed = outcome.contextTokens ?? vm.contextUsed
-        if outcome.interrupted { throw CancellationError() }
-        if let failure = outcome.failure { throw failure }
-        return RunResult(messages: transcripts[sessionID] ?? input, usage: outcome.result?.usage,
-                         deniedCount: outcome.denials.count, finalText: outcome.result?.text ?? outcome.lastReplyText,
-                         lastPromptTokens: outcome.contextTokens, hitIterationLimit: outcome.hitTurnLimit,
-                         lastReplyText: outcome.lastReplyText)
+        return RunResult(messages: [], usage: usage, deniedCount: denied, finalText: outcome.lastReplyText,
+                         lastPromptTokens: outcome.contextTokens, lastReplyText: outcome.lastReplyText)
     }
 
-    /// `/compact` in a Claude Code chat: Claude Code's own /compact on the chat's session (it keeps the conversation).
+    /// `/compact` on a Claude Code chat: Claude Code compacts its own session.
     func claudeCodeCompact(_ vm: SessionVM, profile: ProviderProfile, focus: String?) async {
         let sessionID = vm.id
-        guard let link = vm.claudeCode, link.started else {
-            vm.note("Nothing to compact yet.")
+        guard let session = log.claudeSession(sessionID).session else {
+            vm.note("Nothing to compact yet — this chat hasn't talked to Claude Code.")
             return
         }
         let (found, status) = await claudeCode.usableInstall()
@@ -177,93 +191,47 @@ extension AppTransport {
             vm.note(ClaudeCodeHost.notReadyMessage(status), role: .error)
             return
         }
-        vm.activity = "Claude Code is compacting its conversation…"
         let workspace = vm.workspaceURL ?? scratchFolder(for: vm, create: true)
-        let focusText = focus.map { " " + $0 } ?? ""
-        let invocation = ClaudeCodeInvocation(model: profile.model, preset: vm.preset, session: .resume(link.sessionID),
-                                              appendSystemPrompt: ClaudeCodeTurn.visionNote)
+        let command = "/compact" + ((focus ?? "").trimmingCharacters(in: .whitespaces).isEmpty ? "" : " " + focus!.trimmingCharacters(in: .whitespaces))
         let (events, sink) = AsyncStream<ClaudeCodeEvent>.makeStream()
         let consumer = Task { @MainActor [weak self] in
-            var noted = false
+            // Only its notes ("Claude Code compacted the conversation …") and the working line: the command prints no reply.
             for await event in events {
-                // Only its notes ("Claude Code compacted its conversation …"); the command prints no reply worth a bubble.
-                if case .notice = event {
-                    noted = true
-                    self?.applyClaudeCode(event, sessionID: sessionID)
+                switch event {
+                case .notice, .activity: self?.applyClaudeCode(event, sessionID: sessionID)
+                default: break
                 }
             }
-            return noted
         }
         let outcome = try? await ClaudeCodeTurn.run(
-            install: install, invocation: invocation, prompt: "/compact" + focusText, workspace: workspace,
+            install: install, invocation: ClaudeCodeInvocation(model: profile.model, preset: vm.preset, session: .resume(session)),
+            message: ClaudeCodeInput.line(text: command), workspace: workspace,
             environment: ClaudeCodeEnvironment.environment(for: install.path, base: ProcessInfo.processInfo.environment),
-            launcher: claudeCode.launcher) { sink.yield($0) }
+            launcher: claudeCode.launcher, decide: { _ in .deny(ClaudeCodePermissions.declined) }) { sink.yield($0) }
         sink.finish()
-        let noted = await consumer.value
+        await consumer.value
         if let failure = outcome?.failure {
-            vm.note("Compaction failed: \(failure.errorDescription ?? "Claude Code reported an error.")", role: .error)
+            vm.note(failure.errorDescription ?? "Claude Code ended the turn with an error.", role: .error)
             return
         }
-        if var updated = vm.claudeCode, let total = outcome?.result?.totalCostUSD {
-            updated.lastTotalCostUSD = total
-            vm.claudeCode = updated
-            log.setClaudeCode(id: sessionID, link: updated)
-        }
-        if !noted, outcome?.interrupted == false {
-            let text = "Claude Code compacted its conversation."
-            vm.note(text)
-            log.recordItem(sessionID, kind: "notice", text: text, toolName: nil, argSummary: nil, output: nil, isError: false)
+        if let id = outcome?.sessionID {
+            log.setClaudeSession(id: sessionID, session: id, cost: outcome?.result?.totalCostUSD ?? log.claudeSession(sessionID).cost)
         }
     }
 
     /// One event of a Claude Code turn, on the main actor.
     func applyClaudeCode(_ event: ClaudeCodeEvent, sessionID: String) {
+        guard let vm = sessions.first(where: { $0.id == sessionID }) else { return }
         switch event {
         case .engine(let engineEvent):
             apply(engineEvent, sessionID: sessionID)
         case .notice(let text):
-            guard let vm = sessions.first(where: { $0.id == sessionID }) else { return }
             vm.note(text)
             log.recordItem(sessionID, kind: "notice", text: text, toolName: nil, argSummary: nil, output: nil, isError: false)
+        case .activity(let text):
+            if vm.running { vm.activity = text }
+        case .permission, .unhandledControl:
+            break // answered by ClaudeCodeTurn
         }
     }
-
-    /// Where a Claude Code turn's attachments are saved for Claude to read (under the chat's attachment folder).
-    func claudeCodeAttachmentFolder(for vm: SessionVM) -> URL {
-        skillLocations.appSupport.appendingPathComponent("attachments", isDirectory: true)
-            .appendingPathComponent(vm.id, isDirectory: true)
-            .appendingPathComponent("claude-code", isDirectory: true)
-            .appendingPathComponent(String(Int(Date().timeIntervalSince1970 * 1000)), isDirectory: true)
-    }
-
-    /// The chat's messages a Claude Code session hasn't seen: after `since` (nil = all), without the new message.
-    /// What the person and the assistants said, tool work as one line each, a folded summary as what it says.
-    nonisolated static func claudeCodeRecapItems(_ entries: [ChatEntry], since: Date?, excluding entryID: String) -> [ClaudeCodeRecapItem] {
-        var items: [ClaudeCodeRecapItem] = []
-        for entry in entries where entry.id != entryID {
-            if let since, entry.at <= since { continue }
-            switch entry.kind {
-            case .message(let body):
-                switch body.role {
-                case .user: items.append(ClaudeCodeRecapItem(role: .person, text: body.text))
-                case .assistant: items.append(ClaudeCodeRecapItem(role: .assistant, text: body.text))
-                case .notice, .error: break
-                }
-            case .tool(let tool):
-                let line = "\(Theme.toolLabel(tool.name)) \(tool.preview)".trimmingCharacters(in: .whitespaces)
-                    + (tool.summary.map { " — \($0)" } ?? "")
-                items.append(ClaudeCodeRecapItem(role: .tool, text: line))
-            case .compaction(let note):
-                items.append(ClaudeCodeRecapItem(role: .assistant, text: "Summary of the conversation before this point: \(note.summary)"))
-            case .todos:
-                break
-            }
-        }
-        return items
-    }
-}
-
-extension SessionVM {
-    /// The Claude Code model this chat's route names (for the usage line when the CLI didn't say).
-    var claudeCodeModelHint: String? { routeID?.split(separator: "|").last.map(String.init) }
 }

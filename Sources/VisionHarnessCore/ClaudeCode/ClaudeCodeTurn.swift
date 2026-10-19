@@ -3,10 +3,21 @@ import Darwin
 
 // MARK: - Running one turn on Claude Code
 //
-// `ClaudeCodeTurn.run` starts `claude -p` in the chat's folder, writes the prompt to it as one stream-json user
-// message, turns every line it prints into Vision events as it arrives (`ClaudeCodeStreamParser`), and says how the
-// turn ended. Stop (cancelling the task) sends the CLI SIGINT — Claude Code's own "end the turn" — then SIGTERM and
-// SIGKILL if it doesn't go, so the session stays resumable and nothing it started is left running.
+// `ClaudeCodeTurn.run` starts `claude -p` in the chat's folder, writes the prompt as one stream-json user message and
+// keeps standard input open: every line Claude Code prints becomes Vision events as it arrives
+// (`ClaudeCodeStreamParser`), each permission question is answered on stdin (`decide`, which may ask the person), and
+// once the turn's result is in, stdin is closed so Claude Code finishes (and any background work it waits for) and
+// exits. Stop (cancelling the task) sends Claude Code's own `interrupt` control request, then kills the process if it
+// hasn't ended after 8 seconds. The same flow as Vision for Windows (ClaudeCodeRunner.cs).
+
+/// The running CLI's standard input, for the turn to write to while it runs.
+public protocol ClaudeCodeChannel: AnyObject, Sendable {
+    /// Write one JSON line (the newline is added). Ignored once input is closed.
+    func send(_ line: String)
+    /// Close standard input: Claude Code finishes what it is doing and exits.
+    func closeInput()
+    var inputClosed: Bool { get }
+}
 
 /// How the process ended.
 public struct ClaudeCodeExit: Sendable, Equatable {
@@ -23,20 +34,24 @@ public struct ClaudeCodeExit: Sendable, Equatable {
     }
 }
 
-/// Starts the CLI for one turn. Cancelling the calling task stops the CLI (`ClaudeCodeExit.interrupted`); only a
-/// program that can't start throws.
+/// Starts the CLI for one turn: `input` is written first and stdin stays open; every stdout line goes to `onLine` with
+/// the channel to answer on. Cancelling the calling task stops the turn — `interrupt()`'s line while stdin is open,
+/// then the process is killed after the grace period — and returns with `interrupted`. Only a program that can't start
+/// throws.
 public protocol ClaudeCodeLauncher: Sendable {
     func launch(executable: String, arguments: [String], environment: [String: String], workingDirectory: URL,
-                input: Data, onLine: @escaping @Sendable (String) -> Void) async throws -> ClaudeCodeExit
+                input: String, interrupt: @escaping @Sendable () -> String,
+                onLine: @escaping @Sendable (String, any ClaudeCodeChannel) -> Void) async throws -> ClaudeCodeExit
 }
 
-/// The plain-language failures of a turn.
+/// The plain-language failures of a turn (the same words as Vision for Windows).
 public enum ClaudeCodeError: Error, LocalizedError, Equatable, Sendable {
+    /// Not found (the status summary and where to look).
     case notInstalled(String)
     case couldNotStart(String)
     case notSignedIn
-    /// The Claude plan's usage limit (or billing) stopped the turn; the CLI's words.
-    case usageLimit(String)
+    /// The Claude plan's limit is used up for now (the whole sentence).
+    case rateLimited(String)
     /// `--resume` named a session Claude Code no longer has.
     case sessionNotFound
     /// `--session-id` named a session that already exists.
@@ -47,7 +62,7 @@ public enum ClaudeCodeError: Error, LocalizedError, Equatable, Sendable {
     /// Another try can't fix it without the person (install, sign in, wait for the plan, change the chat).
     public var isPermanent: Bool {
         switch self {
-        case .notInstalled, .couldNotStart, .notSignedIn, .usageLimit, .sensitiveChat: true
+        case .notInstalled, .couldNotStart, .notSignedIn, .rateLimited, .sensitiveChat: true
         case .sessionNotFound, .sessionInUse, .failed: false
         }
     }
@@ -57,11 +72,10 @@ public enum ClaudeCodeError: Error, LocalizedError, Equatable, Sendable {
         case .notInstalled(let why): why
         case .couldNotStart(let why): "Couldn't start Claude Code: \(why)"
         case .notSignedIn:
-            "Claude Code isn't signed in on this Mac. In Terminal, run `claude auth login` (or run `claude` and type /login) and sign in with your Claude Pro or Max account, then send again. Vision never handles your Claude sign-in."
-        case .usageLimit(let words):
-            "Claude Code stopped: your Claude plan's usage limit is reached (\(words)). It resets on your plan's schedule — or pick another model for this chat."
-        case .sessionNotFound: "Claude Code no longer has this chat's conversation."
-        case .sessionInUse: "Claude Code already has a conversation with this chat's id."
+            "Claude Code isn't signed in on this computer. Open a terminal, run  claude auth login  (choose your Claude account), then send again."
+        case .rateLimited(let sentence): sentence
+        case .sessionNotFound: "Claude Code no longer has this chat's session."
+        case .sessionInUse: "Claude Code already has a session with this chat's id."
         case .sensitiveChat: ClaudeCodeTurn.sensitiveRefusal
         case .failed(let why): why
         }
@@ -70,24 +84,23 @@ public enum ClaudeCodeError: Error, LocalizedError, Equatable, Sendable {
 
 /// What a finished (or stopped) turn left behind.
 public struct ClaudeCodeTurnOutcome: Sendable {
-    /// The Claude Code session the turn ran in (resume it next time).
-    public var sessionID: String
-    /// The model answered: the session exists and can be resumed.
-    public var reachedModel: Bool
+    /// The Claude Code session the turn ran in (carry it on next time); nil when the CLI never said.
+    public var sessionID: String?
+    /// Something happened beyond the prompt: a reply, a tool call.
+    public var progressed: Bool
+    /// The last result line.
     public var result: ClaudeCodeResult?
-    /// The final reply, or the last text written when the turn stopped early.
+    /// Every result's tokens (background work can add turns after the first result).
+    public var usage: LLMUsage?
+    /// The last thing the main conversation said.
     public var lastReplyText: String
     public var contextTokens: Int?
+    /// The model the alias resolved to ("claude-sonnet-5-5").
     public var model: String?
     public var apiKeySource: String?
     public var interrupted: Bool
-    public var denials: [ClaudeCodeDenial]
-    /// Why the turn failed (nil: it finished, stopped at its step limit, or was stopped).
+    /// Why the turn failed (nil: it finished, or was stopped).
     public var failure: ClaudeCodeError?
-    /// One line per tool call the turn made (`ClaudeCodeStreamParser.toolLog`).
-    public var toolLog: [String] = []
-
-    public var hitTurnLimit: Bool { result?.hitTurnLimit ?? false }
 }
 
 public enum ClaudeCodeTurn {
@@ -95,282 +108,329 @@ public enum ClaudeCodeTurn {
     /// engine that reads files itself, so the refusal reads the same whichever check meets it first.
     public static let sensitiveRefusal = "This chat is Sensitive. Claude Code reads your files itself and sends them to its own service, so the sensitive-data shield can't mask anything on the way. Sensitive chats can't use it — choose a private model (your own hardware, Guardian, Amazon Bedrock in your AWS account), or turn Sensitive off for this chat."
 
-    /// Added after Claude Code's own system prompt on every turn.
-    public static let visionNote = """
-        You are running inside Vision, a desktop agent harness, as the engine of one of its chats. The person reads \
-        your replies and tool calls in Vision's chat window, not in a terminal. Some messages start with earlier \
-        messages of this Vision chat that ran on another model; treat those as context you already have. When a \
-        message asks you to end with a marker such as GOAL_COMPLETE or GOAL_BLOCKED, put it on its own line at the \
-        very end of your reply.
-        """
+    /// The note every Claude Code session gets once (its system prompt is recorded on the first turn and reused, so it
+    /// says only what holds for every turn).
+    public static let systemNote = "You are running inside Vision, a desktop agent harness, for one of the person's chats: they see your replies, tool calls, plans and todo lists there, and answer your permission requests in Vision. When a message asks you to end with GOAL_COMPLETE or GOAL_BLOCKED, write that marker alone on the last line of your reply — Vision's goal_complete and goal_blocked tools don't exist here."
 
-    /// Run one turn. Events arrive on the launcher's reading queue, in order. A turn that failed returns with
-    /// `failure` set and a stopped one with `interrupted` — either way with what it did (the session it ran in, the
-    /// text it wrote); only a CLI that can't start throws (`ClaudeCodeError.couldNotStart`).
-    public static func run(install: ClaudeCodeInstall, invocation: ClaudeCodeInvocation, prompt: String,
-                           images: [ClaudeCodeImage] = [], workspace: URL, environment: [String: String],
-                           launcher: any ClaudeCodeLauncher,
+    /// What a /goal round adds to its message on Claude Code.
+    public static let goalNote = "(Vision note: you are Claude Code here — the goal_complete and goal_blocked tools aren't available. When the goal is fully done and verified, end your reply with a line containing exactly GOAL_COMPLETE; if only the person can unblock you, end with a line GOAL_BLOCKED: <what you need>.)"
+
+    /// How long a Stop waits for Claude Code to end the turn itself before the process is killed.
+    public static let interruptGrace: TimeInterval = 8
+
+    /// Run one turn. Events arrive on the launcher's reading queue, in order; `decide` answers each permission
+    /// question (it may wait for the person). A turn that failed returns with `failure` set and a stopped one with
+    /// `interrupted` — either way with what it did; only a CLI that can't start throws (`couldNotStart`).
+    public static func run(install: ClaudeCodeInstall, invocation: ClaudeCodeInvocation, message: String,
+                           workspace: URL, environment: [String: String], launcher: any ClaudeCodeLauncher,
+                           decide: @escaping @Sendable (ClaudeCodePermissionRequest) async -> ClaudeCodePermissionDecision,
                            onEvent: @escaping @Sendable (ClaudeCodeEvent) -> Void) async throws -> ClaudeCodeTurnOutcome {
         let parser = LockedParser(ClaudeCodeStreamParser(workspace: workspace))
         let exit: ClaudeCodeExit
         do {
-            exit = try await launcher.launch(executable: install.path, arguments: invocation.arguments(for: install),
-                                             environment: environment, workingDirectory: workspace,
-                                             input: ClaudeCodeInput.line(text: prompt, images: images)) { line in
-                for event in parser.consume(line) { onEvent(event) }
+            exit = try await launcher.launch(
+                executable: install.path, arguments: invocation.arguments(for: install), environment: environment,
+                workingDirectory: workspace, input: message,
+                interrupt: { ClaudeCodeInput.interrupt(requestID: "vision-stop-" + String(UUID().uuidString.lowercased().prefix(8))) }
+            ) { line, channel in
+                let (events, firstResult) = parser.consume(line)
+                for event in events {
+                    switch event {
+                    case .permission(let request):
+                        Task {
+                            let decision = await decide(request)
+                            switch decision {
+                            case .allow:
+                                channel.send(ClaudeCodeInput.allow(requestID: request.requestID, input: request.input, toolUseID: request.toolUseID))
+                            case .deny(let message):
+                                channel.send(ClaudeCodeInput.deny(requestID: request.requestID, message: message, toolUseID: request.toolUseID))
+                            case .ask:
+                                channel.send(ClaudeCodeInput.deny(requestID: request.requestID, message: ClaudeCodePermissions.declined,
+                                                                  toolUseID: request.toolUseID))
+                            }
+                        }
+                    case .unhandledControl(let requestID, let subtype):
+                        channel.send(ClaudeCodeInput.unhandled(requestID: requestID, subtype: subtype))
+                    default:
+                        onEvent(event)
+                    }
+                }
+                // The reply is in: let it finish (and wait for any background work it started) and exit.
+                if firstResult {
+                    channel.closeInput()
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+                        if !parser.ended { onEvent(.activity("Claude Code is finishing work it started in the background…")) }
+                    }
+                }
             }
         } catch {
             throw ClaudeCodeError.couldNotStart(error.localizedDescription)
         }
+        parser.end()
         for event in parser.finish() { onEvent(event) }
+        for event in parser.closeDangling(exit.interrupted ? "Stopped before it finished" : "Not finished — Claude Code ended the turn first") {
+            onEvent(event)
+        }
         let state = parser.snapshot()
-        let chosen = invocation.session?.id ?? ""
-        return ClaudeCodeTurnOutcome(sessionID: state.sessionID ?? chosen, reachedModel: state.reachedModel,
-                                     result: state.result, lastReplyText: state.lastReplyText,
-                                     contextTokens: state.contextTokens, model: state.model,
-                                     apiKeySource: state.apiKeySource, interrupted: exit.interrupted,
-                                     denials: state.result?.denials ?? state.denials,
-                                     failure: exit.interrupted ? nil : failure(result: state.result, apiError: state.apiError, exit: exit),
-                                     toolLog: state.toolLog)
+        return ClaudeCodeTurnOutcome(sessionID: state.sessionID, progressed: state.progressed, result: state.result,
+                                     usage: state.usage, lastReplyText: state.lastReplyText, contextTokens: state.contextTokens,
+                                     model: state.model, apiKeySource: state.apiKeySource, interrupted: exit.interrupted,
+                                     failure: exit.interrupted ? nil : failure(state, exit: exit))
     }
 
-    /// What went wrong, or nil for a turn that ended well (or at its step limit).
-    static func failure(result: ClaudeCodeResult?, apiError: (category: String, text: String)?, exit: ClaudeCodeExit) -> ClaudeCodeError? {
-        let words = [result?.text ?? "", apiError?.text ?? "", exit.stderr].joined(separator: "\n")
-        let lower = words.lowercased()
-        if apiError?.category == "authentication_failed" || lower.contains("not logged in") || lower.contains("please run /login")
-            || lower.contains("invalid api key") || lower.contains("oauth token has expired") {
+    /// Why a turn failed, in plain words — or nil when it finished.
+    static func failure(_ state: LockedParser.Snapshot, exit: ClaudeCodeExit) -> ClaudeCodeError? {
+        let result = state.result
+        if let result, !result.isError { return nil }
+        let said = ([state.apiError?.text, result?.text] + (result?.errors ?? []).map { Optional($0) })
+            .compactMap { $0 }.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.joined(separator: "\n")
+        let everything = (said + "\n" + exit.stderr + "\n" + state.unparsed).lowercased()
+        if state.apiError?.category == "authentication_failed" || everything.contains("not logged in")
+            || everything.contains("please run /login") {
             return .notSignedIn
         }
+        if everything.contains("no conversation found with session id") { return .sessionNotFound }
+        if everything.contains("is already in use") { return .sessionInUse }
+        if state.rateLimit != nil || (state.apiError?.category == "rate_limit" && said.lowercased().contains("limit")) {
+            let words = state.rateLimit.map { "your Claude plan's \($0.typeWords) limit\($0.resetWords())" } ?? "your Claude plan's usage limit"
+            return .rateLimited("You've reached \(words). Pick another model for this chat from the model menu, or send again once it resets.")
+        }
         guard let result else {
-            if lower.contains("no conversation found") { return .sessionNotFound }
-            if lower.contains("already in use") { return .sessionInUse }
-            let tail = exit.stderr.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "\n").suffix(3).joined(separator: " ")
-            return .failed("Claude Code stopped without finishing (exit code \(exit.exitCode))" + (tail.isEmpty ? "." : ": \(tail)"))
+            let why = firstLines(exit.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? state.unparsed : exit.stderr)
+            return .failed(why.isEmpty ? "Claude Code stopped without answering (exit code \(exit.exitCode))."
+                                       : "Claude Code stopped without answering: \(why)")
         }
-        guard result.isError, !result.hitTurnLimit else { return nil }
-        if ["rate_limit", "billing_error"].contains(apiError?.category ?? "") || lower.contains("usage limit")
-            || lower.contains("hit your limit") || lower.contains("limit reached") {
-            let detail = (result.text.isEmpty ? apiError?.text ?? "" : result.text).trimmingCharacters(in: .whitespacesAndNewlines)
-            return .usageLimit(detail.isEmpty ? "limit reached" : String(detail.prefix(200)))
+        switch result.subtype {
+        case "error_max_turns":
+            return .failed("Claude Code stopped: it reached its limit of steps for one turn. Send “keep going” to carry on.")
+        case "error_max_budget_usd":
+            return .failed("Claude Code stopped: it reached the spending cap for this turn.")
+        default:
+            return .failed(said.isEmpty ? "Claude Code ended the turn with an error." : "Claude Code: \(firstLines(said))")
         }
-        let detail = ([result.text] + result.errors + [apiError?.text ?? ""])
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }.first
-        return .failed("Claude Code reported an error" + (detail.map { ": \(String($0.prefix(400)))" } ?? " (\(result.subtype))."))
+    }
+
+    static func firstLines(_ text: String) -> String {
+        let lines = text.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.prefix(3)
+        return ClaudeCodeTools.prefix(lines.joined(separator: " "), 400)
     }
 
     /// The parser behind a lock: lines arrive on the launcher's queue, the snapshot is read after the run.
     final class LockedParser: @unchecked Sendable {
         private let lock = NSLock()
         private let parser: ClaudeCodeStreamParser
+        private var isEnded = false
         init(_ parser: ClaudeCodeStreamParser) { self.parser = parser }
 
-        func consume(_ line: String) -> [ClaudeCodeEvent] { lock.withLock { parser.consume(line) } }
+        /// The line's events, and whether it was the turn's first result.
+        func consume(_ line: String) -> ([ClaudeCodeEvent], Bool) {
+            lock.withLock {
+                let before = parser.results
+                let events = parser.consume(line)
+                return (events, before == 0 && parser.results == 1)
+            }
+        }
         func finish() -> [ClaudeCodeEvent] { lock.withLock { parser.finish() } }
+        func closeDangling(_ why: String) -> [ClaudeCodeEvent] { lock.withLock { parser.closeDangling(why) } }
+        func end() { lock.withLock { isEnded = true } }
+        var ended: Bool { lock.withLock { isEnded } }
 
         struct Snapshot: Sendable {
             var sessionID: String?
-            var reachedModel: Bool
+            var progressed: Bool
             var result: ClaudeCodeResult?
+            var usage: LLMUsage?
             var lastReplyText: String
             var contextTokens: Int?
             var model: String?
             var apiKeySource: String?
             var apiError: (category: String, text: String)?
-            var denials: [ClaudeCodeDenial]
-            var toolLog: [String]
+            var rateLimit: ClaudeCodeRateLimit?
+            var unparsed: String
         }
 
         func snapshot() -> Snapshot {
             lock.withLock {
-                Snapshot(sessionID: parser.sessionID, reachedModel: parser.reachedModel, result: parser.result,
+                Snapshot(sessionID: parser.sessionID, progressed: parser.progressed, result: parser.result, usage: parser.usage,
                          lastReplyText: parser.lastReplyText, contextTokens: parser.contextTokens, model: parser.model,
-                         apiKeySource: parser.apiKeySource, apiError: parser.apiError, denials: parser.denials,
-                         toolLog: parser.toolLog)
+                         apiKeySource: parser.apiKeySource, apiError: parser.apiError, rateLimit: parser.rateLimit,
+                         unparsed: parser.unparsed)
             }
         }
     }
 
-    // MARK: Cost
+    // MARK: The line under a turn
 
-    /// This turn's cost at API prices. From Claude Code 2.1.277 a resumed session's `total_cost_usd` is the
-    /// session's running total, so the turn's share is the difference from the last one seen.
-    public static func turnCost(total: Double?, previousTotal: Double?, resumed: Bool, version: String?) -> Double? {
-        guard let total else { return nil }
-        let cumulative = resumed && version.map { ClaudeCodeLocator.compareVersions($0, "2.1.277") != .orderedAscending } == true
-        guard cumulative, let previousTotal, total >= previousTotal else { return total }
-        return total - previousTotal
-    }
-
-    /// "≈ $0.42" (more digits under a cent).
-    public static func formatCost(_ usd: Double) -> String {
-        usd >= 0.01 || usd == 0 ? String(format: "≈ $%.2f", usd) : String(format: "≈ $%.4f", usd)
-    }
-
-    /// The line under a finished turn: model, steps, tokens and the cost at API prices — and who pays.
-    public static func usageLine(model: String?, result: ClaudeCodeResult, cost: Double?, apiKeySource: String?) -> String {
-        var parts = ["Claude Code" + (model.map { " · \($0)" } ?? "")]
+    /// "Claude Code: 3 steps · 12,400 tokens in (8,000 cached) · 84 out · about $0.01 at API prices — covered by your
+    /// Claude plan." The CLI's cost adds up over the session, so a turn's share is the difference from the last total.
+    public static func usageLine(result: ClaudeCodeResult, usage: LLMUsage?, previousTotal: Double?, apiKeySource: String?) -> String? {
+        var parts: [String] = []
         if result.numTurns > 0 { parts.append("\(result.numTurns) step\(result.numTurns == 1 ? "" : "s")") }
-        if let usage = result.usage {
-            parts.append("\(usage.promptTokens.formatted()) in · \(usage.completionTokens.formatted()) out")
+        if let usage {
+            parts.append("\(grouped(usage.promptTokens)) tokens in" + ((usage.cachedTokens ?? 0) > 0 ? " (\(grouped(usage.cachedTokens!)) cached)" : ""))
+            parts.append("\(grouped(usage.completionTokens)) out")
         }
-        if let durationMs = result.durationMs, durationMs > 0 {
-            let seconds = Double(durationMs) / 1000
-            parts.append(seconds < 60 ? String(format: "%.0fs", seconds) : String(format: "%.1f min", seconds / 60))
+        if let total = result.totalCostUSD {
+            let who = (apiKeySource.map { !$0.isEmpty && $0 != "none" } ?? false) ? "billed to the API key" : "covered by your Claude plan"
+            parts.append("\(costWords(turnCost(total: total, previousTotal: previousTotal))) at API prices — \(who)")
         }
-        var line = parts.joined(separator: " · ")
-        if let cost {
-            let paysWithKey = !(apiKeySource ?? "none").isEmpty && (apiKeySource ?? "none") != "none"
-            line += " · \(formatCost(cost)) at API prices" + (paysWithKey ? " (billed to your API key)" : " (your Claude plan covers it)")
-        }
-        return line
+        return parts.isEmpty ? nil : "Claude Code: " + parts.joined(separator: " · ") + "."
     }
 
-    /// The reply as other models are given it: Claude Code's text, then a short account of its tool work (capped),
-    /// so a chat that moves to another model knows what changed.
-    public static func transcriptReply(_ reply: String, toolLog: [String], limit: Int = 1_500) -> String {
-        let text = reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? "(Claude Code worked on this without a written reply.)" : reply
-        guard !toolLog.isEmpty else { return text }
-        var lines: [String] = []
-        var used = 0
-        for line in toolLog {
-            if used + line.count > limit { lines.append("… and \(toolLog.count - lines.count) more"); break }
-            lines.append(line)
-            used += line.count
-        }
-        return text + "\n\n[Claude Code's tool work this turn: " + lines.joined(separator: "; ") + "]"
+    /// This turn's share of the session's running total (a smaller total means the session started over).
+    public static func turnCost(total: Double, previousTotal: Double?) -> Double {
+        if let previousTotal, total >= previousTotal { return total - previousTotal }
+        return total
     }
 
-    /// The note about tool calls the chat's permission setting refused ("Bash ×2"), or nil.
-    public static func denialNote(_ denials: [ClaudeCodeDenial], preset: PermissionPreset) -> String? {
-        guard !denials.isEmpty else { return nil }
-        var counts: [(String, Int)] = []
-        for denial in denials {
-            if let index = counts.firstIndex(where: { $0.0 == denial.toolName }) { counts[index].1 += 1 }
-            else { counts.append((denial.toolName, 1)) }
-        }
-        let list = counts.map { $0.1 > 1 ? "\($0.0) ×\($0.1)" : $0.0 }.joined(separator: ", ")
-        let n = denials.count
-        let head = "Claude Code was refused \(n) tool call\(n == 1 ? "" : "s") (\(list)) — "
-        switch preset {
-        case .plan: return head + "this chat is Plan only, so it can read and plan but not change anything."
-        case .workspaceWrite: return head + "this chat's permission setting doesn't let it run that unattended. Switch the chat to Full access to let it."
-        case .fullAccess: return head + "edits outside the chat's folder and tools that need a person's approval stay off in Vision."
-        }
+    /// "under $0.01", "about $0.42", "about $1.5".
+    public static func costWords(_ usd: Double) -> String {
+        if usd < 0.01 { return "under $0.01" }
+        return "about $" + String(format: usd < 1 ? "%.2f" : "%.1f", usd)
+    }
+
+    /// 12400 → "12,400" (the same on every Mac, whatever its region).
+    static func grouped(_ n: Int) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.locale = Locale(identifier: "en_US")
+        return formatter.string(from: NSNumber(value: n)) ?? String(n)
     }
 }
 
-// MARK: - Earlier messages for a Claude Code session that hasn't seen them
+// MARK: - The chat so far, for a Claude Code session that hasn't seen it
 
-/// One message of the chat as plain text, for the recap.
-public struct ClaudeCodeRecapItem: Sendable, Equatable {
-    public enum Role: String, Sendable { case person, assistant, tool }
-    public var role: Role
-    public var text: String
-
-    public init(role: Role, text: String) {
-        self.role = role
-        self.text = text
-    }
-}
-
+/// A chat that moves onto Claude Code part-way (or whose Claude Code session was lost) already has a conversation
+/// Claude Code never saw. Its first Claude Code turn carries a recap of it — the most recent exchanges that fit, oldest
+/// first — so the work continues instead of starting over. (The same text as Vision for Windows' ClaudeCodeRecap.)
 public enum ClaudeCodeRecap {
-    /// The longest recap, in characters (the newest messages are kept).
-    public static let maxCharacters = 24_000
-    static let maxPerMessage = 4_000
+    /// Roughly 8K tokens of history.
+    public static let defaultBudget = 32_000
 
-    /// Messages of this Vision chat that Claude Code's session hasn't seen (they ran on another model, or before
-    /// this chat moved to Claude Code), as a preface to the new message; nil when there are none.
-    public static func preface(_ items: [ClaudeCodeRecapItem]) -> String? {
-        var lines: [String] = []
+    public static let header = "[Earlier in this chat — before this Claude Code session. Another model (or an earlier session) answered these; carry on from here rather than starting over.]"
+    public static let footer = "[End of the earlier conversation. The person's new message follows.]"
+
+    /// The recap, or nil when there is nothing before the new message.
+    public static func build(_ history: [LLMMessage], budget: Int = defaultBudget) -> String? {
+        var parts: [String] = []
         var used = 0
-        var dropped = 0
-        for item in items.reversed() {
-            let text = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        for message in history.reversed() {
+            var text = (message.content ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { continue }
-            let body = text.count > maxPerMessage ? String(text.prefix(maxPerMessage)) + " …(cut)" : text
-            let label: String
-            switch item.role {
-            case .person: label = "Person"
-            case .assistant: label = "Assistant"
-            case .tool: label = "Tool activity"
+            let who: String
+            switch message.role {
+            case .user: who = "Person"
+            case .assistant: who = "Assistant"
+            default: who = "Summary"
             }
-            let line = "\(label): \(body)"
-            if used + line.count > maxCharacters, !lines.isEmpty { dropped += 1; continue }
-            lines.append(line)
-            used += line.count
+            let room = budget - used
+            if room < 200 { break }
+            if text.count > room - 20 { text = "…" + String(text.suffix(room - 21)) }
+            parts.append("\(who): \(text)")
+            used += text.count + who.count + 4
         }
-        guard !lines.isEmpty else { return nil }
-        let head = "[Earlier in this Vision chat — messages you haven't seen (they ran on another model). Read them as context, then answer the new message below."
-            + (dropped > 0 ? " \(dropped) older message\(dropped == 1 ? " was" : "s were") left out." : "") + "]"
-        return head + "\n\n" + lines.reversed().joined(separator: "\n\n") + "\n\n[End of earlier messages. The new message:]\n\n"
+        guard !parts.isEmpty else { return nil }
+        return header + "\n\n" + parts.reversed().joined(separator: "\n\n") + "\n\n" + footer
     }
 }
 
 // MARK: - The real launcher
 
-/// Starts the real `claude` with pipes for standard input, output and error. No shell: the arguments go to the
-/// program as they are.
+/// Starts the real `claude` with pipes for standard input, output and error. No shell: the arguments go to the program
+/// as they are.
 public struct ProcessClaudeCodeLauncher: ClaudeCodeLauncher {
-    /// SIGINT → SIGTERM, and SIGTERM → SIGKILL, in seconds.
+    /// Interrupt request → SIGTERM, and SIGTERM → SIGKILL, in seconds.
     public var interruptGrace: TimeInterval
     public var killGrace: TimeInterval
 
-    public init(interruptGrace: TimeInterval = 5, killGrace: TimeInterval = 3) {
+    public init(interruptGrace: TimeInterval = ClaudeCodeTurn.interruptGrace, killGrace: TimeInterval = 3) {
         self.interruptGrace = interruptGrace
         self.killGrace = killGrace
     }
 
     public func launch(executable: String, arguments: [String], environment: [String: String], workingDirectory: URL,
-                       input: Data, onLine: @escaping @Sendable (String) -> Void) async throws -> ClaudeCodeExit {
+                       input: String, interrupt: @escaping @Sendable () -> String,
+                       onLine: @escaping @Sendable (String, any ClaudeCodeChannel) -> Void) async throws -> ClaudeCodeExit {
         let run = ClaudeCodeProcessRun(executable: executable, arguments: arguments, environment: environment,
-                                       workingDirectory: workingDirectory, input: input, onLine: onLine,
+                                       workingDirectory: workingDirectory, input: input, interrupt: interrupt, onLine: onLine,
                                        interruptGrace: interruptGrace, killGrace: killGrace)
         return try await withTaskCancellationHandler {
             try await run.execute()
         } onCancel: {
-            run.interrupt()
+            run.stop()
         }
     }
 }
 
-/// One run of the CLI. `interrupt()` may come from any thread at any time, before the child exists too.
-final class ClaudeCodeProcessRun: @unchecked Sendable {
+/// One run of the CLI. `stop()` may come from any thread at any time, before the child exists too.
+final class ClaudeCodeProcessRun: ClaudeCodeChannel, @unchecked Sendable {
     private let executable: String
     private let arguments: [String]
     private let environment: [String: String]
     private let workingDirectory: URL
-    private let input: Data
-    private let onLine: @Sendable (String) -> Void
+    private let input: String
+    private let interruptLine: @Sendable () -> String
+    private let onLine: @Sendable (String, any ClaudeCodeChannel) -> Void
     private let interruptGrace: TimeInterval
     private let killGrace: TimeInterval
 
     private let lock = NSLock()
+    /// Writes to stdin happen here, in order; the descriptor is only touched on this queue.
+    private let writer = DispatchQueue(label: "vision.claude-code.stdin")
+    private var stdinHandle: FileHandle?
+    private var closed = false
     private var pid: pid_t = 0
     /// The CLI leads its own process group (what Foundation's Process does), so the group can be killed.
     private var leadsGroup = false
     private var started = false
     private var exited = false
     private var exitCode: Int32 = 0
-    private var interrupted = false
+    private var stopRequested = false
     private var lineBuffer = Data()
     private var stderrTail = Data()
     private let exitGate = AWSCLIGate()
     private let outClosed = AWSCLIGate()
     private let errClosed = AWSCLIGate()
 
-    init(executable: String, arguments: [String], environment: [String: String], workingDirectory: URL, input: Data,
-         onLine: @escaping @Sendable (String) -> Void, interruptGrace: TimeInterval, killGrace: TimeInterval) {
+    init(executable: String, arguments: [String], environment: [String: String], workingDirectory: URL, input: String,
+         interrupt: @escaping @Sendable () -> String, onLine: @escaping @Sendable (String, any ClaudeCodeChannel) -> Void,
+         interruptGrace: TimeInterval, killGrace: TimeInterval) {
         self.executable = executable
         self.arguments = arguments
         self.environment = environment
         self.workingDirectory = workingDirectory
         self.input = input
+        self.interruptLine = interrupt
         self.onLine = onLine
         self.interruptGrace = interruptGrace
         self.killGrace = killGrace
     }
+
+    // MARK: The channel
+
+    func send(_ line: String) {
+        let data = Data((line + "\n").utf8)
+        writer.async { [self] in
+            guard let handle = lock.withLock({ closed ? nil : stdinHandle }) else { return }
+            // EPIPE (it exited before reading) is an error here, not a SIGPIPE: its output says why.
+            try? handle.write(contentsOf: data)
+        }
+    }
+
+    func closeInput() {
+        writer.async { [self] in
+            let handle: FileHandle? = lock.withLock {
+                guard !closed else { return nil }
+                closed = true
+                return stdinHandle
+            }
+            try? handle?.close()
+        }
+    }
+
+    var inputClosed: Bool { lock.withLock { closed } }
+
+    // MARK: Running
 
     func execute() async throws -> ClaudeCodeExit {
         guard FileManager.default.isExecutableFile(atPath: executable) else {
@@ -418,6 +478,8 @@ final class ClaudeCodeProcessRun: @unchecked Sendable {
                 }
             }
         }
+        _ = fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
+        lock.withLock { stdinHandle = stdin.fileHandleForWriting }
         do {
             try await Self.spawn(child)
         } catch {
@@ -427,22 +489,15 @@ final class ClaudeCodeProcessRun: @unchecked Sendable {
         }
         let childPID = child.processIdentifier
         let ownGroup = getpgid(childPID) == childPID
-        let interruptNow: Bool = lock.withLock {
+        let stopNow: Bool = lock.withLock {
             pid = childPID
             leadsGroup = ownGroup
             started = true
-            return interrupted
+            return stopRequested
         }
-        if interruptNow { signalInterrupt() }
-
-        // The prompt, then end of input (off this thread: a big paste fills the pipe until the CLI reads it).
-        let writer = stdin.fileHandleForWriting
-        _ = fcntl(writer.fileDescriptor, F_SETNOSIGPIPE, 1)
-        let payload = input
-        DispatchQueue.global(qos: .userInitiated).async {
-            try? writer.write(contentsOf: payload)
-            try? writer.close()
-        }
+        // The prompt; stdin stays open for the permission answers.
+        send(input)
+        if stopNow { beginStop() }
 
         await exitGate.wait()
         // The last lines may still be in the pipe; a grandchild holding it open is only waited for briefly.
@@ -451,8 +506,9 @@ final class ClaudeCodeProcessRun: @unchecked Sendable {
         stdout.fileHandleForReading.readabilityHandler = nil
         stderr.fileHandleForReading.readabilityHandler = nil
         flushLine()
+        closeInput()
         return lock.withLock {
-            ClaudeCodeExit(exitCode: exitCode, stderr: String(decoding: stderrTail, as: UTF8.self), interrupted: interrupted)
+            ClaudeCodeExit(exitCode: exitCode, stderr: String(decoding: stderrTail, as: UTF8.self), interrupted: stopRequested)
         }
     }
 
@@ -463,12 +519,11 @@ final class ClaudeCodeProcessRun: @unchecked Sendable {
         lock.withLock {
             lineBuffer.append(chunk)
             while let newline = lineBuffer.firstIndex(of: 0x0A) {
-                let line = lineBuffer[lineBuffer.startIndex..<newline]
-                lines.append(String(decoding: line, as: UTF8.self))
+                lines.append(String(decoding: lineBuffer[lineBuffer.startIndex..<newline], as: UTF8.self))
                 lineBuffer.removeSubrange(lineBuffer.startIndex...newline)
             }
         }
-        for line in lines { onLine(line) }
+        for line in lines { onLine(line, self) }
     }
 
     private func flushLine() {
@@ -477,26 +532,27 @@ final class ClaudeCodeProcessRun: @unchecked Sendable {
             defer { lineBuffer.removeAll() }
             return String(decoding: lineBuffer, as: UTF8.self)
         }
-        if let last { onLine(last) }
+        if let last { onLine(last, self) }
     }
 
     // MARK: Stopping
 
-    /// Stop the turn: SIGINT (Claude Code ends the turn and keeps the session), SIGTERM after the grace period,
-    /// then SIGKILL for the CLI and anything left in its process group.
-    func interrupt() {
+    /// Stop the turn: the interrupt control request while stdin is open (Claude Code ends the turn and keeps the
+    /// session), SIGINT when it's already closed, SIGTERM after the grace period, then SIGKILL for the CLI and anything
+    /// left in its process group.
+    func stop() {
         let running: Bool = lock.withLock {
-            guard !interrupted else { return false }
-            interrupted = true
+            guard !stopRequested else { return false }
+            stopRequested = true
             return started && !exited
         }
-        if running { signalInterrupt() }
+        if running { beginStop() }
     }
 
-    private func signalInterrupt() {
-        let (target, group): (pid_t, Bool) = lock.withLock { (pid, leadsGroup) }
+    private func beginStop() {
+        let (target, group, inputOpen): (pid_t, Bool, Bool) = lock.withLock { (pid, leadsGroup, !closed) }
         guard target > 1 else { return }
-        kill(target, SIGINT)
+        if inputOpen { send(interruptLine()) } else { kill(target, SIGINT) }
         DispatchQueue.global().asyncAfter(deadline: .now() + interruptGrace) { [weak self] in
             guard let self, self.lock.withLock({ !self.exited }) else { return }
             kill(target, SIGTERM)
@@ -524,32 +580,5 @@ final class ClaudeCodeProcessRun: @unchecked Sendable {
                 }
             }
         }
-    }
-}
-
-// MARK: - A chat's link to its Claude Code session
-
-/// What a Vision chat remembers about its Claude Code conversation (stored with the chat as `claudeCode`).
-public struct ClaudeCodeLink: Codable, Hashable, Sendable {
-    /// The Claude Code session id (a UUID).
-    public var sessionID: String
-    /// The session exists in Claude Code (a turn reached the model): the next turn resumes it.
-    public var started: Bool
-    /// When the session last caught up with the chat: messages after this (on other models) go to it as a recap.
-    public var syncedAt: Date?
-    /// The session's running cost total at the last turn (Claude Code 2.1.277+ reports totals per session).
-    public var lastTotalCostUSD: Double?
-
-    public init(sessionID: String, started: Bool = false, syncedAt: Date? = nil, lastTotalCostUSD: Double? = nil) {
-        self.sessionID = sessionID
-        self.started = started
-        self.syncedAt = syncedAt
-        self.lastTotalCostUSD = lastTotalCostUSD
-    }
-
-    /// The session a turn uses: resume one that exists, else start one under a new id.
-    public static func choice(for link: ClaudeCodeLink?, newID: () -> String = { UUID().uuidString.lowercased() }) -> ClaudeCodeSessionChoice {
-        if let link, link.started, !link.sessionID.isEmpty { return .resume(link.sessionID) }
-        return .new(newID())
     }
 }

@@ -941,7 +941,6 @@ public final class AppTransport {
             if cwd == nil { vm.workFolder = row.scratch }
             vm.routeID = row.route
             vm.thinking = row.thinking.flatMap(ThinkingLevel.init(rawValue:))
-            vm.claudeCode = row.claudeCode
             vm.updatedAt = row.updatedAt
             vm.loaded = false
             return vm
@@ -1310,7 +1309,7 @@ public final class AppTransport {
     /// Queue tasks run unattended — a gate nobody answers would stall the
     /// whole queue. So for queue sessions the decision times out (auto-deny)
     /// after a few minutes, and the stall is surfaced in the chat.
-    private func askGate(sessionID: String, gateID callID: String, name: String, detail: String) async -> Bool {
+    func askGate(sessionID: String, gateID callID: String, name: String, detail: String) async -> Bool {
         guard let vm = sessions.first(where: { $0.id == sessionID }) else { return false }
         if Task.isCancelled { return false }
         // Tool-call ids repeat ("call-0" every turn, in every chat): key the
@@ -2311,7 +2310,7 @@ public final class AppTransport {
 
     /// Read (if the composer hadn't), budget, split and save a message's attachments off the main thread, and put
     /// the final badges — how each one went — under the user's message.
-    private func prepareAttachments(_ attachments: [MessageAttachment], vm: SessionVM, entryID: String,
+    func prepareAttachments(_ attachments: [MessageAttachment], vm: SessionVM, entryID: String,
                                     profile: ProviderProfile, window: Int) async -> [MessageAttachment] {
         let store = attachmentStore(for: vm.id)
         let route = attachmentRoute(for: profile)
@@ -2746,6 +2745,19 @@ public final class AppTransport {
         var p = provider
         if let served = routeInfo[provider.routeID]?.servedModel, !served.isEmpty { p.model = served }
         return p
+    }
+
+    /// A chat moves onto an engine of its own (Claude Code): forget its Vision engine. True when it had one.
+    @discardableResult
+    func dropEngine(_ sessionID: String) -> Bool {
+        engines[sessionID] = nil
+        return engineKeys.removeValue(forKey: sessionID) != nil
+    }
+
+    /// A window the model's own runtime reported (Claude Code's `modelUsage`): the gauge uses it from now on.
+    func learnContextWindow(routeID: String, _ window: Int) {
+        guard window > 0, probedContext[routeID] != window else { return }
+        probedContext[routeID] = window
     }
 
     /// Ask the server what it serves and how big its window is, then return the

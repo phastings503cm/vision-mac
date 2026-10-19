@@ -29,17 +29,18 @@ public struct ProcessClaudeCodeCommandRunner: ClaudeCodeCommandRunner {
 // MARK: - The environment a `claude` child gets
 
 public enum ClaudeCodeEnvironment {
-    /// Never handed to the CLI. An Anthropic API key or token in Vision's environment would make Claude Code bill
-    /// that key instead of using the person's Claude plan; the rest describe *another* Claude Code session (Vision
-    /// started from a Claude Code terminal) and would make the child think it is nested inside it or switch it to
-    /// bare mode, which ignores the plan's sign-in. The AWS runner's own variables are for the AWS CLI only.
-    public static let removed: [String] = [
-        "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
-        "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SIMPLE", "CLAUDE_CODE_SESSION_ID",
-        "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_HOST_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET",
-        "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH", "CLAUDE_AGENT_SDK_VERSION",
-        "CLAUDE_CODE_EXECPATH", "CLAUDE_PID",
-    ] + ProcessAWSCLIRunner.standardEnvironment.keys.sorted()
+    /// The variables that mark a *parent* Claude Code session (Vision itself started from a Claude Code terminal),
+    /// which would make the child think it is nested inside it — Vision for Windows' list, plus CLAUDE_CODE_SIMPLE
+    /// (a parent's bare mode, which never reads the plan's sign-in). Credentials pass through untouched and unread:
+    /// the CLI decides how it signs in (a turn says so when an API key pays instead of the plan).
+    public static let parentSessionVariables: [String] = [
+        "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_HOST_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
+        "CLAUDE_CODE_SSE_PORT", "CLAUDE_CODE_EXECPATH", "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_CODE_MESSAGING_SOCKET",
+        "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH", "CLAUDE_PID", "CLAUDE_CODE_SIMPLE",
+    ]
+
+    /// Never handed to the CLI: the parent-session markers, and the AWS runner's own variables (for the AWS CLI only).
+    public static let removed: [String] = parentSessionVariables + ProcessAWSCLIRunner.standardEnvironment.keys.sorted()
 
     /// The variables to change for one run: the removed ones gone, PATH with the folder the CLI lives in (an npm
     /// install's `claude` is a node script that needs the `node` next to it) and the usual tool folders a GUI app
@@ -278,41 +279,32 @@ public struct ClaudeCodeAuth: Sendable, Equatable {
         return !usesAPIKey
     }
 
-    public var usesAPIKey: Bool { (authMethod ?? "").lowercased().contains("api") && !(authMethod ?? "").lowercased().contains("oauth") }
+    public var usesAPIKey: Bool {
+        let method = (authMethod ?? "").lowercased()
+        return method.contains("api") && method.contains("key")
+    }
 
     public var isAnthropic: Bool {
-        guard let provider = apiProvider?.lowercased(), !provider.isEmpty else { return true }
-        return provider == "firstparty" || provider == "anthropic"
+        let provider = (apiProvider ?? "").lowercased()
+        return !["bedrock", "vertex", "foundry"].contains(provider)
     }
 
-    /// One line for the card ("Signed in with your Claude Max plan as pat@example.com").
-    public var summary: String {
-        guard loggedIn else { return "Not signed in." }
-        if !isAnthropic {
-            let name: String
-            switch apiProvider?.lowercased() {
-            case "bedrock": name = "Amazon Bedrock"
-            case "vertex": name = "Google Vertex AI"
-            case "foundry": name = "Microsoft Foundry"
-            default: name = apiProvider ?? "another provider"
-            }
-            return "Signed in, but Claude Code is set to use \(name) — it bills that account, not a Claude plan."
+    /// How the CLI pays for what it does — "your Claude Max plan", "an Anthropic API key — billed to that key, not your
+    /// subscription", "Amazon Bedrock (the CLI's own AWS settings)" (Vision for Windows' words).
+    public var describe: String {
+        switch (apiProvider ?? "").lowercased() {
+        case "bedrock": return "Amazon Bedrock (the CLI's own AWS settings)"
+        case "vertex": return "Google Vertex AI (the CLI's own settings)"
+        case "foundry": return "Microsoft Foundry (the CLI's own settings)"
+        default: break
         }
-        if usesAPIKey {
-            return "Signed in with an Anthropic API key — Claude Code bills that key's account, not a Claude plan."
-        }
-        let plan = subscriptionType.map { " \(Self.planName($0))" } ?? ""
-        return "Signed in with your Claude\(plan) plan" + (email.map { " as \($0)" } ?? "") + "."
+        if usesAPIKey { return "an Anthropic API key — billed to that key, not your subscription" }
+        return subscriptionType.map { "your Claude \(Self.planName($0)) plan" } ?? "your Claude subscription"
     }
 
+    /// "max" → "Max" (the first letter capitalised, as Windows does).
     static func planName(_ raw: String) -> String {
-        switch raw.lowercased() {
-        case "max": "Max"
-        case "pro": "Pro"
-        case "team": "Team"
-        case "enterprise": "Enterprise"
-        default: raw.prefix(1).uppercased() + raw.dropFirst()
-        }
+        raw.prefix(1).uppercased() + raw.dropFirst()
     }
 }
 
@@ -339,7 +331,7 @@ public enum ClaudeCodeStatus: Sendable, Equatable {
         }
     }
 
-    /// A chat can run on it (signed in, or a version that can't say).
+    /// Signed in (or a version that can't say): the card's "ready".
     public var isUsable: Bool {
         switch self {
         case .ready, .unknownSignIn: true
@@ -347,23 +339,32 @@ public enum ClaudeCodeStatus: Sendable, Equatable {
         }
     }
 
+    /// A turn may start on it. Signed out still runs: the turn says so in Claude Code's own words, and works the
+    /// moment the person signs in.
+    public var canRun: Bool {
+        switch self {
+        case .ready, .unknownSignIn, .signedOut: true
+        default: false
+        }
+    }
+
     public var auth: ClaudeCodeAuth? { if case .ready(_, let auth) = self { auth } else { nil } }
 
-    /// The card's headline.
+    /// The card's headline (Vision for Windows' words).
     public var summary: String {
         switch self {
         case .missing:
-            return "Claude Code isn't installed on this Mac."
+            return "Claude Code isn't installed on this computer (Vision looked on PATH and where its installers put it)."
         case .broken(let path, let problem):
-            return "The claude command at \(path) didn't start properly (\(problem))."
+            return "Claude Code at \(path) didn't start properly (\(problem))."
         case .tooOld(let install):
-            return "Claude Code \(install.version ?? "") is too old for Vision (no headless stream mode). Update it: run `claude update` in Terminal."
+            return "Claude Code \(install.version ?? "") is too old for Vision (it has no headless stream mode). Update it in a terminal: claude update"
         case .signedOut(let install):
-            return "Claude Code \(install.version ?? "") is installed but not signed in."
+            return "Claude Code \(install.version ?? "") is installed but not signed in. Sign in once in a terminal: claude auth login"
         case .unknownSignIn(let install):
-            return "Claude Code \(install.version ?? "") is installed. This version can't say whether it is signed in — the first message will tell."
+            return "Claude Code \(install.version ?? "") is installed. (This version can't say whether it's signed in — your first message will.)"
         case .ready(let install, let auth):
-            return "Claude Code \(install.version ?? "") — \(auth.summary)"
+            return "Claude Code \(install.version ?? "") is ready — signed in\(auth.email.map { " as \($0)" } ?? ""), using \(auth.describe)."
         }
     }
 
@@ -371,9 +372,10 @@ public enum ClaudeCodeStatus: Sendable, Equatable {
     public var steps: [ClaudeCodeStep] {
         switch self {
         case .missing, .broken:
-            return ClaudeCodeStep.install + ClaudeCodeStep.signIn
+            return ClaudeCodeStep.install
         case .tooOld:
-            return [ClaudeCodeStep(text: "Update Claude Code in Terminal:", command: "claude update")]
+            return [ClaudeCodeStep(text: "Update it in a terminal:", command: "claude update"),
+                    ClaudeCodeStep(text: "Come back here and press Check again.")]
         case .signedOut:
             return ClaudeCodeStep.signIn
         case .unknownSignIn, .ready:
@@ -392,17 +394,18 @@ public struct ClaudeCodeStep: Sendable, Equatable, Hashable {
         self.command = command
     }
 
-    /// Anthropic's installers, the recommended one first.
+    /// Anthropic's installers, then signing in (Vision for Windows' steps, the macOS ones).
     public static let install: [ClaudeCodeStep] = [
-        ClaudeCodeStep(text: "Install Claude Code — in Terminal, run Anthropic's installer:", command: "curl -fsSL https://claude.ai/install.sh | bash"),
-        ClaudeCodeStep(text: "Or with Homebrew:", command: "brew install --cask claude-code"),
-        ClaudeCodeStep(text: "Or with npm (Node.js 18 or newer):", command: "npm install -g @anthropic-ai/claude-code"),
+        ClaudeCodeStep(text: "Open Terminal and run:", command: "curl -fsSL https://claude.ai/install.sh | bash"),
+        ClaudeCodeStep(text: "Or, with Node.js 18+ installed:", command: "npm install -g @anthropic-ai/claude-code"),
+        ClaudeCodeStep(text: "Then sign in once (choose your Claude account — Pro or Max):", command: "claude auth login"),
+        ClaudeCodeStep(text: "Come back here and press Check again."),
     ]
 
     /// Signing in happens in the CLI, with the person's own Claude account — Vision never sees it.
     public static let signIn: [ClaudeCodeStep] = [
-        ClaudeCodeStep(text: "Sign in with your Claude Pro or Max account — in Terminal, run this and follow the browser sign-in:", command: "claude auth login"),
-        ClaudeCodeStep(text: "Then come back and press Check Again."),
+        ClaudeCodeStep(text: "Sign in once (choose your Claude account — Pro or Max):", command: "claude auth login"),
+        ClaudeCodeStep(text: "Come back here and press Check again."),
     ]
 }
 
