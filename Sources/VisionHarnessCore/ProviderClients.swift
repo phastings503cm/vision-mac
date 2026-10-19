@@ -3,9 +3,10 @@ import Foundation
 // MARK: - Provider clients
 //
 // Every configured route is served by one of these clients: Bedrock routes by `BedrockClient` (the
-// Converse API, signed with SigV4 or authorised with a Bedrock API key), Claude Code routes by
-// `ClaudeCodeClient` (one-shot side tasks only — a chat's turns run through `ClaudeCodeTurn`), everything
-// else by `OpenAIClient` (chat completions). The app asks for a client here instead of choosing one itself —
+// Converse API, signed with SigV4 or authorised with a Bedrock API key), "Anthropic API (key)" routes by
+// `AnthropicClient` (the Messages API), Claude Code routes by `ClaudeCodeClient` (one-shot side tasks only — a
+// chat's turns run through `ClaudeCodeTurn`), everything else by `OpenAIClient` (chat completions). The app asks
+// for a client here instead of choosing one itself —
 // which is also where a route that isn't private gets the sensitive-data shield (`ShieldClient`) and the
 // main model gets its backups (`FailoverClient`), each backup with its own shield.
 
@@ -64,15 +65,39 @@ public enum ProviderClients {
     /// One route's client — behind the shield when the route isn't private and there is something to mask.
     private static func single(_ profile: ProviderProfile, _ events: ClientEvents) -> any ProviderClient {
         let client: any ProviderClient
-        if profile.kind == .claudeCode {
+        switch profile.kind {
+        case .claudeCode:
             client = ClaudeCodeClient(profile: profile)
-        } else if profile.kind == .bedrock {
+        case .bedrock:
             let usesAPIKey = profile.awsProfile == nil && !(profile.apiKey ?? "").isEmpty
             client = BedrockClient(profile: profile, credentials: usesAPIKey ? nil : awsCredentials?(profile))
-        } else {
+        case .anthropic:
+            client = AnthropicClient(profile: profile, onNotice: events.notice)
+        case .guardian where (profile.apiKey ?? "").isEmpty:
+            // Signed out of Guardian: its models wait for the sign-in instead of sending a request without one.
+            return GuardianSignInNeeded(profile: profile)
+        default:
             client = OpenAIClient(profile: profile, onNotice: events.notice)
         }
         guard !profile.isPrivateRoute, let detector = shield?.detector() else { return client }
         return ShieldClient(inner: client, detector: detector, onReport: events.shield)
     }
+}
+
+/// A Guardian model while signed out of Guardian: every call says how to get it back.
+public struct GuardianSignInNeeded: ProviderClient {
+    public let profile: ProviderProfile
+
+    /// What a chat on a Guardian model says while signed out (the same words on Windows).
+    public static let message = "Sign in to Guardian to use this model."
+
+    static var error: LLMError { .rejected(status: 401, message: message, body: "signed out of Guardian", permanent: true) }
+
+    public func stream(_ request: LLMRequest) -> AsyncThrowingStream<LLMStreamEvent, Error> {
+        AsyncThrowingStream { $0.finish(throwing: Self.error) }
+    }
+
+    public func listModels() async throws -> [String] { throw Self.error }
+
+    public func modelInfo(_ model: String?) async -> ModelInfo? { nil }
 }

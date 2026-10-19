@@ -12,6 +12,61 @@ prompt on first launch — right-click the app and choose **Open**, or run:
 xattr -d com.apple.quarantine /Applications/Vision.app
 ```
 
+## What's new in 0.16.5 — your chats from Claude Code, Codex, OpenClaw, Claude.ai, ChatGPT and Guardian
+
+- **Import Chats.** **File ▸ Import Chats…** (⇧⌘I) brings in your conversations from **Claude Code**, **Codex**,
+  **OpenClaw**, a **Claude.ai** or **ChatGPT** data export (the ZIP, its folder or `conversations.json`), a Vision
+  chat file, and — signed in — your **Guardian** chats and the Vision chats your account keeps there. Tick some or
+  all; every message keeps its time, tool calls come in as tool cards, and a chat whose folder is on this Mac opens
+  in that project. Carry any of them on with any model — a Claude Code session can continue on Bedrock, Guardian or
+  your own hardware. Importing again brings only what's new, and a chat you already have (here, or the same one
+  Guardian imported) shows as imported. Reading changes nothing in the other tools.
+- **Export a chat.** **File ▸ Export Chat ▸ Markdown… / JSON…** (or the chat's right-click menu). The JSON imports
+  back into Vision on any computer, Mac or Windows. **Send Chat to Guardian** keeps it with your account, masked
+  first like the prompts Guardian's notebook gets; an open chat's plan goes along as a checklist, and a Sensitive
+  chat stays Sensitive when it comes back.
+- **Search all chats.** The field above the chat list (⇧⌘F) finds every word of a search in titles, prompts,
+  answers and tool calls across every chat, made here or imported; narrow it to one source, and click a result to
+  open the chat at that row.
+
+## What's new in 0.16.4 — MCP servers, undo a turn's file changes, and Sensitive chats
+
+- **MCP servers.** **Settings ▸ MCP Servers** connects Vision to Model Context Protocol servers — a program it
+  starts, or a URL — and their tools join every chat. **Import** brings in the servers you already set up in
+  Claude Code, Claude Desktop and Cursor. Keys and tokens go into the Keychain, not the settings file. Every call
+  asks first unless you trust the server; `/mcp` lists them in a chat. A project's own servers arrive switched
+  off, showing exactly what they run, until you turn them on.
+- **See and undo what a turn changed.** When a turn ends, **Files changed (N)** lists the files the agent wrote —
+  with its shell commands' changes too, in a git repository — and shows each one's diff. **Rewind this turn…** puts
+  them back as they were and removes the files it created; it says first which ones changed again since, and leaves
+  alone a file that changes while you decide. `/rewind` or **Session ▸ Rewind…** lists the chat's recent turns; an
+  older turn's changes are also under its prompt in **Prompts**. The model is told which files went back.
+- **Sensitive chats.** Mark a chat **Sensitive** (the menu under the composer, **Session ▸ Sensitive Chat** or
+  `/sensitive on`) and it talks only to private models — your own hardware, Guardian, Amazon Bedrock in your AWS
+  account — or to other models only through the shield, which masks what it detects before sending. Claude Code,
+  which reads your files itself, is never used for it. The strip at the top says what that means for the chat's
+  model, the model menu greys out the ones it can't use, and its backups, subagents, `/compact`, skills written
+  from it and tasks it queues follow the same rule. A project can start all its chats Sensitive.
+
+## What's new in 0.16.3 — DeepSeek, Claude with an API key, and Guardian's models in every chat
+
+- **DeepSeek has its own card.** Choose **DeepSeek — API key** in the wizard (or **Settings ▸ AI Models ▸ Add ▸
+  DeepSeek…**), paste a key from platform.deepseek.com, and pick **V4 Pro** or **V4.1 Flash** — both with a 1M
+  context. The thinking menu (Off, Low, High, Max) and tools work; a refused key or an empty balance is said in
+  plain words instead of retried. DeepSeek's servers are in China, so the route starts out not private and the
+  shield masks sensitive details before sending.
+- **Claude with an Anthropic API key.** **Anthropic API (Claude) — API key** in the wizard (or **Add ▸ Anthropic
+  API (key)…**) talks to Claude directly: streaming, tools, pictures, PDFs, thinking, prompt caching, and
+  Anthropic's hand-over to another Claude model when one declines, with a line saying so. Paste a Claude Pro or
+  Max sign-in token by mistake and the guide tells you it isn't an API key.
+- **Guardian's models are in every chat's model menu.** Signed in to Guardian, its models appear by themselves
+  under **Guardian** in each chat's menu — no button to press. The list is read at launch, at sign-in, on an
+  organization switch, every 15 minutes and by **Settings ▸ Guardian ▸ Refresh**. Sign out and they leave the
+  menus; a chat that was on one says *Sign in to Guardian to use this model.* and works again as soon as you sign
+  back in. The **Use Guardian's Models** button is gone.
+- Guardian routes no longer ask for model-server details before every turn, and the badges under a sent message
+  say exactly how each file went — "sent as text" when a request is past Anthropic's room for pictures and PDFs.
+
 ## What's new in 0.16.2 — copy any prompt, long chats load a page at a time
 
 - **Copy any prompt or reply.** Hover a message for its copy button, right-click it for **Copy Prompt** or **Copy

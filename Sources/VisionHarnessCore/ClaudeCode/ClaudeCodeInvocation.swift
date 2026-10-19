@@ -161,8 +161,8 @@ public enum ClaudeCodeInput {
                                                         imageTypes: ["image/png", "image/jpeg", "image/gif", "image/webp"],
                                                         maxImages: 20, maxImageBytes: 3_750_000,
                                                         maxDocuments: 5, maxDocumentBytes: maxAttachmentBytes,
-                                                        maxDocumentPages: 100, maxTotalBytes: maxAttachmentBytes)
-    /// Pictures and PDFs in one message, all together, before base64 (12 MB).
+                                                        maxRequestMediaBytes: maxAttachmentBytes, maxDocumentPages: 100)
+    /// Pictures and PDFs in one message (a turn sends one), all together, before base64 (12 MB).
     public static let maxAttachmentBytes = 12 * 1024 * 1024
 
     /// The user message that starts a turn, as one stream-json line: its text, then pictures and PDFs as content

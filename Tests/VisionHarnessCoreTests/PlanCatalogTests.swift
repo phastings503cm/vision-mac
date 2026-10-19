@@ -6,7 +6,8 @@ final class PlanCatalogTests: XCTestCase {
     private func plan(_ id: String) -> SubscriptionPlan { PlanCatalog.plan(id)! }
 
     func testTheCatalogHasEveryPlanWithItsAddresses() {
-        XCTAssertEqual(PlanCatalog.plans.map(\.id), ["zai", "kimi-code", "moonshot-api", "openai", "qwen-coding", "qwen-api"])
+        XCTAssertEqual(PlanCatalog.plans.map(\.id), ["zai", "deepseek", "anthropic", "kimi-code", "moonshot-api", "openai",
+                                                      "qwen-coding", "qwen-api"])
         // Z.ai is one provider with four endpoints (the Coding Plan's keys work only on its own).
         XCTAssertEqual(plan("zai").regions.map(\.baseURL),
                        ["https://api.z.ai/api/coding/paas/v4", "https://api.z.ai/api/paas/v4",
@@ -19,6 +20,8 @@ final class PlanCatalogTests: XCTestCase {
             "kimi-code": ["https://api.kimi.ai/coding/v1", "https://api.kimi.com/coding/v1"],
             "moonshot-api": ["https://api.moonshot.ai/v1", "https://api.moonshot.cn/v1"],
             "openai": ["https://api.openai.com/v1"],
+            "deepseek": ["https://api.deepseek.com"],
+            "anthropic": ["https://api.anthropic.com/v1"],
             "qwen-coding": ["https://coding-intl.dashscope.aliyuncs.com/v1", "https://coding.dashscope.aliyuncs.com/v1"],
             "qwen-api": ["https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "https://dashscope.aliyuncs.com/compatible-mode/v1"],
         ]

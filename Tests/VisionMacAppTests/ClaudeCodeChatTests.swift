@@ -275,6 +275,14 @@ final class ClaudeCodeChatTests: XCTestCase {
         XCTAssertTrue(texts(vm, .error).contains(ClaudeCodeTurn.sensitiveRefusal), "\(texts(vm, .error))")
         XCTAssertTrue(texts(vm, .notice).contains("Not delivered to the model: summarise the patient notes"))
         XCTAssertTrue(texts(vm, .user).isEmpty)
+
+        // The chat's own Sensitive switch: refused the same way, before anything is sent.
+        transport.isSensitiveChat = { $0.sensitive }
+        let other = transport.newSession(cwd: dir.path)
+        transport.setSensitive(true, for: other)
+        try await send("and these notes", to: other)
+        XCTAssertEqual(runs(), 0, "the claude command never ran")
+        XCTAssertTrue(texts(other, .error).contains(ClaudeCodeTurn.sensitiveRefusal), "\(texts(other, .error))")
     }
 
     func testNotSignedInSaysHowToSignIn() async throws {

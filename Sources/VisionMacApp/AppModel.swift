@@ -11,7 +11,7 @@ enum WorkspaceMode: String, CaseIterable, Identifiable {
     var icon: String { self == .chat ? "bubble.left.and.bubble.right" : "chevron.left.forwardslash.chevron.right" }
 }
 
-enum SettingsTab: Hashable { case general, models, spark, guardian, skills, computer, importExport, plugins, editor }
+enum SettingsTab: Hashable { case general, models, spark, guardian, skills, computer, mcp, importExport, plugins, editor }
 
 /// The right column's tabs: the chat's tasks (its current plan first, then what is queued) and its Prompts timeline.
 enum RunPanelTab: String, CaseIterable, Identifiable {
@@ -78,6 +78,10 @@ final class AppModel {
     var runPanelTab: RunPanelTab = .tasks
     /// The All Prompts window (every chat's prompts on this Mac).
     var showAllPrompts = false
+    /// File ▸ Import Chats… (chats from Claude Code, Codex, OpenClaw, exports, Guardian).
+    var showChatImport = false
+    /// The search across every chat (the chat list's search field).
+    let chatSearch = ChatSearchModel()
     /// The background activity popover.
     var showActivity = false
     /// A prompt whose results and notes are open.
@@ -106,6 +110,8 @@ final class AppModel {
         // What model servers refused before (a temperature Kimi fixes, …) is remembered across launches.
         RequestAdaptationStore.shared.fileURL = AppPaths.requestAdaptationsFile
         transport = AppTransport(config: config)
+        // The MCP servers in Settings ▸ MCP Servers connect in the background; their tools join every chat.
+        transport.startMCP()
         spark = SparkController(config: config, transport: transport)
         // Guardian's shared state: prompts on submit, turn durations for the
         // multitenant ETA cache, and the transport back-reference for the
@@ -179,6 +185,8 @@ final class AppModel {
             Task { @MainActor in await spark.handleCommand(arg, in: vm) }
         }
         spark.startMonitoring()
+
+        chatSearch.transport = transport
 
         // The agent's file writes drive the editor's live reload.
         transport.onFilesChanged = { [weak self] changes in
@@ -346,6 +354,14 @@ final class AppModel {
                 openProject(URL(fileURLWithPath: cwd), activateSession: false)
             }
         }
+    }
+
+    /// Open the chat a search hit is in, scrolled to the row it matched (flashing).
+    func open(_ hit: ChatSearchHit) {
+        select(hit.chatID)
+        guard let session = transport.selected, session.id == hit.chatID,
+              let entryID = transport.entryID(forSearchHit: hit, in: session) else { return }
+        session.pager.jump(to: entryID)
     }
 
     @discardableResult

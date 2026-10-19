@@ -148,6 +148,16 @@ public final class SessionVM: Identifiable {
     public var routeID: String?
     /// What the last Claude Code turn cost at API prices (Claude Code's own estimate; the plan covers it).
     public var lastCostUSD: Double?
+    /// What the current (or last) turn changed, file by file, with what each held before — the "Files changed (N)"
+    /// card under the turn, and its Rewind (see `CheckpointStore`). Nil until a turn changes a file.
+    public var checkpoint: TurnCheckpointRecord?
+    /// Words for the model that go in front of the next message (after a rewind: which files went back).
+    public var pendingModelNotes: [String] = []
+    /// The chat is Sensitive: only private models, or others through the shield (see `SensitivityPolicy`). Stored
+    /// with the conversation; a new chat starts with its project's default.
+    public var sensitive = false
+    /// Where an imported chat came from (nil: made here). Shown in the chat list; the search can filter by it.
+    public var importSource: ChatSource?
     /// The model's live reasoning for the current step (not persisted).
     public var reasoning: String = ""
     public var reasoningStarted: Date?

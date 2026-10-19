@@ -73,6 +73,19 @@ struct AppCommands: Commands {
             Button("Open Project Folder…") { model.chooseProject() }
                 .keyboardShortcut("o", modifiers: .command)
             Divider()
+            Button("Import Chats…") { model.showChatImport = true }
+                .keyboardShortcut("i", modifiers: [.command, .shift])
+            Menu("Export Chat") {
+                Button("Markdown…") { ChatExportActions.save(.markdown, sessionID: model.transport.selectedID, transport: model.transport) }
+                Button("JSON…") { ChatExportActions.save(.json, sessionID: model.transport.selectedID, transport: model.transport) }
+            }
+            .disabled(model.transport.selectedID == nil)
+            Button("Send Chat to Guardian") {
+                ChatExportActions.sendToGuardian(sessionID: model.transport.selectedID, transport: model.transport,
+                                                 guardian: model.guardian)
+            }
+            .disabled(model.transport.selectedID == nil)
+            Divider()
             Button("New Terminal") {
                 model.mode = .code
                 model.code.newTerminal()
@@ -119,8 +132,24 @@ struct AppCommands: Commands {
                 .keyboardShortcut("m", modifiers: [.command, .shift])
             Button("Credentials Vault…") { model.showVault = true }
                 .keyboardShortcut("k", modifiers: [.command, .shift])
+            Button("MCP Servers…") {
+                model.settingsTab = .mcp
+                model.showSettings = true
+            }
             Button("Reload Project Context") { model.transport.refreshProjectContext() }
                 .disabled(model.project == nil)
+            Divider()
+            Button("Rewind…") {
+                if let session = model.selectedSession {
+                    model.transport.rewindRequest = RewindRequest(chatID: session.id, turnID: nil)
+                }
+            }
+            .disabled(model.selectedSession == nil)
+            // Sensitive: only private models, or others through the shield (see SensitivityPolicy).
+            Toggle("Sensitive Chat", isOn: Binding(
+                get: { model.selectedSession?.sensitive ?? false },
+                set: { on in if let session = model.selectedSession { model.transport.setSensitive(on, for: session) } }))
+                .disabled(model.selectedSession == nil)
         }
 
         CommandGroup(after: .toolbar) {
@@ -137,6 +166,11 @@ struct AppCommands: Commands {
                 model.toggleRunPanel(.prompts)
             }
             .keyboardShortcut("h", modifiers: [.command, .shift])
+            Button("Search All Chats") {
+                model.mode = .chat
+                model.chatSearch.focusRequest += 1
+            }
+            .keyboardShortcut("f", modifiers: [.command, .shift])
             Button("All Prompts…") { model.showAllPrompts = true }
                 .keyboardShortcut("h", modifiers: [.command, .shift, .option])
             Button("Background Activity") { model.showActivity.toggle() }
@@ -219,6 +253,13 @@ struct RootView: View {
         }
         .sheet(isPresented: $model.showAllPrompts) {
             AllPromptsView().environment(model)
+        }
+        .sheet(item: Binding(get: { model.transport.rewindRequest }, set: { model.transport.rewindRequest = $0 })) { request in
+            RewindSheet(request: request).environment(model)
+        }
+        .sheet(isPresented: $model.showChatImport) {
+            ChatImportSheet(model: ChatImportModel(transport: model.transport, guardian: model.guardian))
+                .environment(model)
         }
         .sheet(item: $model.resultsRecord) { record in
             PromptResultsView(record: record).environment(model)

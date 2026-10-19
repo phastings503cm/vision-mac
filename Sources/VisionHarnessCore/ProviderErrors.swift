@@ -282,3 +282,126 @@ public extension ZAIDiagnosis {
         for try await _ in client.stream(request) {}
     }
 }
+
+// MARK: - DeepSeek
+
+/// DeepSeek's errors in plain words (api-docs.deepseek.com/quick_start/error_codes, 2026-10-19): 400 invalid format,
+/// 401 wrong key, 402 no balance, 422 invalid parameters, 429 rate limit, 500 server error, 503 overloaded. A real
+/// 401 body: {"error":{"message":"Authentication Fails, Your api key: ****abcd is invalid (request_id: …)",
+/// "type":"authentication_error","param":null,"code":"invalid_request_error"}}.
+public enum DeepSeekErrors {
+    /// Where a DeepSeek key is made, and where its balance is topped up.
+    public static let keyPage = "platform.deepseek.com/api_keys"
+    public static let topUpPage = "platform.deepseek.com/top_up"
+
+    public static func explain(status: Int, body: String, model: String) -> ProviderErrorExplanation? {
+        let said = ParameterRejection.text(of: body)
+        let lower = said.lowercased()
+        switch status {
+        case 401:
+            return .init(message: "DeepSeek didn't accept the API key. Check it's a key from \(keyPage) (it starts with sk-), copied in one piece.",
+                         permanent: true, suggestedEndpoint: nil)
+        case 402:
+            return .init(message: "The DeepSeek account has no balance left (402 Insufficient Balance). Top it up at \(topUpPage), then try again.",
+                         permanent: true, suggestedEndpoint: nil)
+        case 400 where lower.contains("reasoning_content"):
+            return .init(message: "DeepSeek (\(model)) wants its earlier reasoning sent back with this conversation and refused without it (400). Start a new chat, or turn thinking off for this chat.",
+                         permanent: true, suggestedEndpoint: nil)
+        case 400 where lower.contains("model not exist") || lower.contains("model_not_found"):
+            return .init(message: "DeepSeek doesn't serve `\(model)`. The current models are deepseek-flash and deepseek-v4-pro.",
+                         permanent: true, suggestedEndpoint: nil)
+        case 429:
+            return .init(message: "DeepSeek's rate limit was reached (429) — Vision waits and tries again.",
+                         permanent: false, suggestedEndpoint: nil)
+        case 503:
+            return .init(message: "DeepSeek's servers are overloaded right now (503) — Vision waits and tries again.",
+                         permanent: false, suggestedEndpoint: nil)
+        default:
+            return nil
+        }
+    }
+}
+
+// MARK: - Anthropic
+
+/// Anthropic API errors (`{"type":"error","error":{"type":…,"message":…},"request_id":…}`) in plain words. Real 401
+/// bodies (recorded 2026-10-19): "invalid x-api-key", "x-api-key header is required".
+public enum AnthropicErrors {
+    public static let keyPage = "console.anthropic.com/settings/keys"
+
+    /// The error's type and message, when the body is Anthropic's error shape.
+    public static func parse(_ body: String) -> (type: String, message: String)? {
+        guard let object = JSONValue(parsing: body), let error = object["error"], error.object != nil else { return nil }
+        return (error["type"]?.string ?? "", error["message"]?.string ?? "")
+    }
+
+    /// "prompt is too long: 250123 tokens > 200000 maximum" → 200000.
+    public static func overflowLimit(_ message: String) -> Int? {
+        guard message.lowercased().contains("prompt is too long") else { return nil }
+        let pattern = #"(\d+)\s*maximum"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: message, range: NSRange(message.startIndex..., in: message)),
+              let range = Range(match.range(at: 1), in: message) else { return 0 }
+        return Int(message[range]) ?? 0
+    }
+
+    /// An HTTP error reply as the error to throw.
+    public static func error(status: Int, body: String, model: String) -> LLMError {
+        let parsed = parse(body)
+        let said = parsed?.message ?? ParameterRejection.text(of: body)
+        let type = parsed?.type ?? ""
+        if status == 413 || type == "request_too_large" {
+            return .overflow(limit: 0, detail: "request too large for Anthropic's API (HTTP 413)")
+        }
+        if status == 400, let limit = overflowLimit(said) { return .overflow(limit: limit, detail: said) }
+        let snippet = said.isEmpty ? "no details" : String(said.prefix(300))
+        switch (status, type) {
+        case (401, _):
+            return .rejected(status: 401, message: "Anthropic didn't accept the API key (“\(snippet)”). Use a key from \(keyPage) — it starts with sk-ant-. A Claude Pro or Max subscription doesn't include API access; for that, use Claude Code.",
+                             body: body, permanent: true)
+        case (402, _):
+            return .rejected(status: 402, message: "The Anthropic account needs credit or a payment method (402: \(snippet)). Add it at console.anthropic.com ▸ Billing.",
+                             body: body, permanent: true)
+        case (403, _):
+            return .rejected(status: 403, message: "Anthropic refused this key for `\(model)` (403): \(snippet)", body: body, permanent: true)
+        case (404, _):
+            return .rejected(status: 404, message: "Anthropic doesn't offer `\(model)` to this key (404). Pick another model — the route's model list shows the ones the key can use.",
+                             body: body, permanent: true)
+        case (429, _):
+            return .rejected(status: 429, message: "Anthropic's rate limit for this key was reached (429) — Vision waits and tries again.",
+                             body: body, permanent: false)
+        case (529, _), (_, "overloaded_error"):
+            return .rejected(status: 529, message: "Anthropic's API is overloaded right now (529) — Vision waits and tries again.",
+                             body: body, permanent: false)
+        case (400, _):
+            return .rejected(status: 400, message: "Anthropic refused the request (400): \(snippet)", body: body, permanent: true)
+        default:
+            return .http(status, body)
+        }
+    }
+
+    /// An `error` event in the middle of a stream (overloaded, api_error): retried like its HTTP twin.
+    static func streamError(type: String, message: String) -> LLMError {
+        let status: Int = switch type {
+        case "overloaded_error": 529
+        case "rate_limit_error": 429
+        case "invalid_request_error": 400
+        case "authentication_error": 401
+        case "permission_error": 403
+        case "not_found_error": 404
+        default: 500
+        }
+        let body = JSONValue.object(["type": "error", "error": .object(["type": .string(type), "message": .string(message)])]).serialized()
+        return error(status: status, body: body, model: "")
+    }
+
+    /// Claude's safety check declined the request (`stop_reason: "refusal"`): nothing to retry.
+    static func refusal(category: String?, explanation: String?, model: String?) -> LLMError {
+        var text = "\(model.map { "\($0) " } ?? "Claude ")declined this request"
+        if let category, !category.isEmpty { text += " (its safety check: \(category))" }
+        text += "."
+        if let explanation, !explanation.isEmpty { text += " \(explanation)" }
+        text += " Rephrase it, or pick another model for this chat."
+        return .rejected(status: 400, message: text, body: "stop_reason: refusal", permanent: true)
+    }
+}

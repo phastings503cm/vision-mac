@@ -7,8 +7,9 @@
 <p align="center">
   A native SwiftUI coding agent that <em>is</em> the harness. It runs the tool loop itself and talks
   straight to an OpenAI-compatible model server — a DGX Spark or Strix Halo on your LAN, a local
-  Ollama or LM Studio, a GLM, Kimi, Qwen or OpenAI plan — or Amazon Bedrock, and it can put several
-  of them to work at once. No Node, no sidecar process, no web view.
+  Ollama or LM Studio, a GLM, Kimi, DeepSeek, Anthropic, Qwen or OpenAI plan, your Guardian account's
+  models — or Amazon Bedrock, and it can put several of them to work at once. A chat can also run on the
+  official Claude Code CLI with your own Claude Pro or Max plan. No Node, no sidecar process, no web view.
 </p>
 
 <p align="center">
@@ -75,8 +76,9 @@ existing route in place, so headers and other settings survive.
 
 Three choices on the backend page start a guide instead: **My Spark Swapper (DGX Spark or Strix Halo)**
 sets a Swapper box up from one connection code, **A subscription or API plan — GLM, Kimi, Qwen, OpenAI**
-shows where to get a key and checks it, and **Amazon Bedrock with my AWS account (guided)** signs you in
-to AWS. Each is described below, and each is also under **Add** in **Settings ▸ AI Models**.
+shows where to get a key and checks it, **Amazon Bedrock with my AWS account (guided)** signs you in
+to AWS, and **Claude Code — your Claude Pro or Max plan** finds the `claude` command and checks its sign-in.
+Each is described below, and each is also under **Add** in **Settings ▸ AI Models**.
 
 ### Context window
 
@@ -157,10 +159,10 @@ Page**, **Rename…** and **Remove**. A Swapper older than 2.0 (no Connect tab) 
 **Connect with an address and login instead** (the guide has the same link); its password goes to the
 Keychain. A Spark set up in Settings ▸ Spark before 0.14 is carried over as the first box.
 
-### Subscription plans: GLM, Kimi, Qwen, OpenAI
+### Subscription plans: GLM, Kimi, DeepSeek, Anthropic, Qwen, OpenAI
 
-Choose **A subscription or API plan — GLM, Kimi, Qwen, OpenAI** in the wizard, or **Add ▸ Subscription
-plan…** in **Settings ▸ AI Models**. The guide knows these plans, each with its International and China
+Choose **A subscription or API plan — Kimi, Qwen, OpenAI, GLM, DeepSeek, Anthropic** in the wizard, or **Add ▸
+Subscription plan…** in **Settings ▸ AI Models**. The guide knows these plans, each with its International and China
 addresses where it has both:
 
 | Plan | Models |
@@ -168,6 +170,8 @@ addresses where it has both:
 | Z.ai (GLM) — Coding Plan or API key | `glm-5.3` (1M context), `glm-5.3-flash`, … |
 | Kimi Code (subscription) | `kimi-for-coding` (K2.8, up to 1M), `k3`, `k3-256k`, `kimi-for-coding-highspeed` |
 | Moonshot (Kimi) — pay-as-you-go API | what `/models` lists |
+| DeepSeek API | `deepseek-v4-pro` (1M, text), `deepseek-flash` (V4.1 Flash, 1M, reads images) |
+| Anthropic API (Claude, with an API key) | `claude-opus-5-5`, `claude-fable-5-1`, `claude-sonnet-5-5`, `claude-haiku-5-5` — what `/v1/models` lists |
 | OpenAI API | what `/models` lists, the newest `gpt-*` chat model recommended |
 | Qwen — Alibaba Cloud Coding Plan | `qwen3.7-plus`, `qwen3-coder-plus`, `qwen3-coder-next`, … |
 | Qwen — Model Studio pay-as-you-go | what `/models` lists |
@@ -184,6 +188,18 @@ pick the model, asks how Vision should use it, and says hello through it.
   Coding Plan key — switch the endpoint to Coding Plan* — with a **Switch to …** button. Z.ai's business codes
   (no balance, plan expired, usage limit used up until …) are explained in plain words and not retried.
 - **GLM-5.3 always thinks.** Vision never asks it not to; the thinking menu maps to its `low` / `high` / `max`.
+- **DeepSeek has its own card** in the wizard and **Add ▸ DeepSeek…**. The thinking menu maps to DeepSeek's
+  switch and effort: *Off* sends `thinking: {"type": "disabled"}`, *Low* / *High* / *Max* send `"enabled"` with
+  `reasoning_effort` `low` / `high` / `max` (*Medium* is `high`, as DeepSeek maps it); with tools, every earlier answer's
+  reasoning goes back with the conversation, as DeepSeek requires; a key it refuses, an empty balance (402) and
+  its rate limit are said in plain words, and only the last is retried. DeepSeek's servers are in China — the
+  route starts out not private, so the shield masks before sending.
+- **Anthropic API (key)** — its own card and **Add ▸ Anthropic API (key)…** — talks to Claude on the Messages
+  API directly: streaming, tools, images, PDFs, extended thinking (adaptive with summaries; Opus 5.5's *Off* is
+  its lowest effort, Sonnet 5.5's is `between_tools`), prompt caching (after the system prompt, the tools and the
+  conversation) and Anthropic's server-side fallback (a declined request moves to the model Anthropic
+  recommends, with a line saying so). A Claude Pro or Max subscription isn't an API key — the guide says so if
+  you paste a subscription token; a subscription goes through Claude Code instead.
 - **Kimi Code checks which app is calling.** Vision tells it honestly that it is Vision
   (`User-Agent: Vision/<version> (macOS)`) and never imitates another tool. If Kimi turns it away, Vision
   says so and suggests the Moonshot API, which works with any app.
@@ -289,6 +305,25 @@ When there are subagent servers, the primary is told which are private and to de
 others in general terms. A task marked `sensitive` runs only on a private server; if none can take it, the
 model is told to do it itself.
 
+### Sensitive chats
+
+Mark a chat **Sensitive** — the **Sensitive** menu under the composer, **Session ▸ Sensitive Chat**, or
+`/sensitive on` — and it uses only:
+
+- **private models**: your own hardware (a Spark, a Strix Halo box, Ollama, LM Studio — the route's
+  **Private** switch), **Guardian**, or **Amazon Bedrock in your own AWS account**;
+- **or other models only through the shield**, which masks what it detects before sending and puts it back
+  in the answer — so while the shield is switched off, they're refused;
+- and **never an engine that reads your files itself** (Claude Code): the shield can't see what it sends.
+
+The strip at the top of the chat says what that means for its model now ("Sensitive — Kimi Code isn't
+private: what the shield detects is masked before sending"). Sending to a model the chat can't use is
+refused with the reason, and your message stays in the box; the model menu greys those models out; a
+`/goal` or task pauses. A Sensitive chat falls over only to backups it may use, its subagents stay on
+private servers while the shield is off, and a model that only gets it masked gets no pictures (screenshots
+or attached) and PDFs only as their text — the shield can check text, not a picture. **New Chats in <project> Start Sensitive** in the same menu makes it
+the project's default.
+
 ### Using Amazon Bedrock
 
 On the wizard's backend page choose **Amazon Bedrock with my AWS account (guided)** — or **Settings ▸
@@ -367,6 +402,8 @@ model menu.
   your message and its attachments' text — and the shield under the reply says what. Pictures and PDFs go as
   themselves (up to 20 pictures of 3.75 MB and 5 PDFs of 100 pages, 12 MB in all per message; past that, as their
   text). It is never a subagent server or a backup (it runs its own agent and subagents).
+- Claude Code edits files with its own tools, so its turns have no **Files changed** card or Rewind (use git), and
+  it uses its own MCP servers (`claude mcp`), not Vision's.
 
 ## Tools
 
@@ -511,6 +548,33 @@ Folder in Finder** is on the chat's right-click menu. Your own instruction files
 as "Using the deploy skill" when the model loads one); the open project's don't. A task such a chat puts
 on the Task Queue works in the same folder.
 
+### Chats from your other AI tools
+
+**File ▸ Import Chats…** (⇧⌘I, also Settings ▸ Import & Export) brings conversations from elsewhere in as real
+chats you can carry on with any model: **Claude Code** sessions (`~/.claude/projects` — subagents' own transcripts
+stay out; the chat says how many there were), **Codex** sessions (`~/.codex/sessions`), **OpenClaw** sessions (its
+session store and older transcript files, on the branch each session ended on), a **Claude.ai** or **ChatGPT**
+data export (the ZIP, its folder or `conversations.json`), a Vision chat file, and — signed in — your **Guardian**
+chats and the Vision chats your account keeps there. The list shows each chat's source, title, date and message
+count; tick some or all. Every message keeps its time, tool calls come in as tool cards, and a chat whose folder
+exists on this Mac opens in that project. A model never replays another tool's calls: they reach it as a written
+summary, so a Claude Code session can continue on Qwen, Bedrock or Guardian. Importing again brings only what is
+new (scheduled and scripted runs are hidden unless you ask; a session Claude Code copied into a worktree's folder is
+offered once, the fuller copy). Reading changes nothing; nothing leaves the Mac except
+the calls to your signed-in Guardian. The first look at a long Claude Code history takes a few seconds; later ones
+read only what changed.
+
+**Export**: **File ▸ Export Chat ▸ Markdown… / JSON…** (or the chat's right-click menu), and **Send Chat to
+Guardian** to keep it with your account — masked first, like the prompts Guardian's notebook gets (the Credentials
+Vault's secrets always, what the sensitive-data shield finds when it is on). An open chat's plan goes along as a
+"Plan:" checklist. The JSON imports back into Vision on any computer. A Sensitive chat stays Sensitive: its JSON
+and its copy in Guardian say so, and it comes back Sensitive — as does any chat imported into a project (or
+among chats without one) set to start chats Sensitive.
+
+**Search all chats** — the field above the chat list (⇧⌘F) — finds every word of a search in titles, prompts,
+answers and tool calls across every chat, made here or imported; its menu narrows it to one source. Click a
+result to open the chat at that row.
+
 ### Tasks: what the chat is doing, and what comes next
 
 **⇧⌘P** — or **Tasks** in the toolbar — opens the right column on the chat's tasks, in chat and code mode.
@@ -566,6 +630,9 @@ at the bottom.
 | `/swap [box] [model]` | Lists every Swapper box's models, or switches what one serves — the box behind this chat's model unless you name one. |
 | `/agents` | The kinds of subagent, the model servers they run on with how busy each is, and what is running now. |
 | `/skills` · `/skill <name>` · `/skill new <what>` · `/<name> args` | Skills: list, select for this chat, have the model write one, or run one. |
+| `/rewind [n]` | The chat's recent turns that changed files, newest first (and the Rewind sheet); `/rewind 2` asks to undo turn 2's file changes. |
+| `/mcp [reload]` | The MCP servers, whether each is connected, and their tools; `/mcp reload` reconnects them. |
+| `/sensitive [on\|off]` | Shows whether this chat is Sensitive and what that means for its model, or turns it on or off. |
 | `/help` | Lists these. |
 
 Long chats also compact automatically at 75% of the window (keeping up to ~96K recent tokens verbatim),
@@ -656,6 +723,58 @@ process protocol — drop a file in `~/Library/Application Support/Vision/plugin
 of its position. `requiresApproval` defaults to **true** — a plugin runs arbitrary shell, and silence
 is the wrong default. A plugin tool may not shadow a built-in.
 
+## MCP servers
+
+**Settings ▸ MCP Servers** (also **Session ▸ MCP Servers…**) connects Vision to [Model Context
+Protocol](https://modelcontextprotocol.io) servers, and each server's tools join every chat as
+`mcp__<server>__<tool>` — GitHub, a database, your docs, a browser.
+
+- **Two kinds.** A *program* Vision starts and talks to over stdin/stdout (started through your login
+  shell, so `npx`, `uvx` and `docker` are found as in Terminal), or a *URL* (Streamable HTTP, with the
+  server's session id on every request). Resources, when a server has them, are one more tool:
+  `mcp__<server>__resources` lists them or reads one.
+- **Import** brings in the servers you already set up: Claude Code (`~/.claude.json` — its own servers and
+  this project's — and the project's `.mcp.json`), Claude Desktop (`claude_desktop_config.json`) and Cursor
+  (`~/.cursor/mcp.json`, the project's `.cursor/mcp.json`). Nothing starts while you look; the same server
+  in two apps is offered once; one Vision already has is greyed out. A server marked SSE is imported as
+  Streamable HTTP with a note (many offer both). A project's own servers (`.mcp.json`, `.cursor/mcp.json`)
+  come unchecked unless you approved them in Claude Code, show the full command they run, and arrive
+  switched off — turn one on once you've checked it.
+- **Secrets stay in the Keychain.** Environment variables and HTTP headers (tokens, API keys) are kept
+  there, one item each — `mcp-servers.json` in the app's data folder holds only their names. `${NAME}` and
+  `${NAME:-default}` are filled in from your environment when the server starts, as Claude Code does (a
+  name Vision doesn't have is left to your login shell). Import warns about a variable you don't have and
+  a key written in plain text in a command line.
+- **Every call asks first** (the usual permission card, naming the server, the tool and its arguments)
+  unless the chat has Full access or you trust the server: *Read-only tools without asking* (tools the
+  server marks read-only) or *All tools without asking*. Tools can be switched off one by one.
+- A server that fails says why (its own words from stderr, an HTTP status); one that dies is started
+  again on its next call. `/mcp` lists them in a chat.
+
+## Checkpoints and Rewind
+
+Before the agent changes a file in a turn, Vision keeps what the file held; when it's done, what the turn
+left. That covers its file tools (`write_file`, `edit`, its subagents' too, background ones included),
+and — in a git repository — what each shell command (and each local MCP tool that isn't read-only)
+changed: `git status` before and after, with the files that were already changed kept first. Ignored
+files (build output) aren't looked at; outside a git repository a shell command's changes aren't
+recorded.
+
+- **Files changed (N)** under the turn lists them; click one for its diff. **Rewind this turn…** puts every
+  file back to how it was before the turn and removes the ones it created — after a confirmation that says
+  which files go back and which changed again since (yours, or a later turn's): **Rewind All** throws
+  those later changes away, **Rewind Only the Others** leaves them.
+- **`/rewind`** (or **Session ▸ Rewind…**) lists the chat's recent turns that changed files; `/rewind 2`
+  asks to undo the second. A rewind is a turn of its own, so it can be rewound too.
+- A rewind looks at each file again just before writing it: one that changed after you confirmed is left
+  as it is and said so. A turn that's still running can't be rewound.
+- A prompt's results (in **Prompts**) keep its **Files changed** with the same Rewind, so an older turn's
+  changes stay findable; right-click a file for **Open in Editor**.
+- The model is told with your next message which files went back, so it re-reads them.
+- Contents are kept once however many turns keep them (by SHA-256, under `checkpoints/` in the app's data
+  folder), for 30 days and at most 1 GB — the oldest go first. Files over 16 MB aren't kept, so a turn that
+  changes one can't rewind it (the card says so).
+
 ## Permissions
 
 The shield in the toolbar sets the preset new chats start with; a chat keeps the preset it was
@@ -683,6 +802,8 @@ Guardian (guardian.503cm.com) is the account side of the family — models, prom
 
 **Connect**: the wizard's *My Guardian account* choice, or Settings ▸ Guardian. **Sign In with Guardian in the Browser** opens Guardian's consent page (Entra SSO, passwordless — PKCE with a loopback redirect, nothing typed into Vision); email, password and the authenticator code are still there under a disclosure. The session token goes to the Keychain. Pick the **organization** Vision works in (sent with every call, the Guardian model route included), and see your **limits** — spend, tokens, requests per day/week/month — with bars and when each resets. The route behaves like any OpenAI-compatible server — primary, subagent, backup, thinking levels — with Guardian doing the proxying.
 
+**Guardian's models in every chat**: once signed in, the models Guardian offers you appear by themselves in every chat's model menu under **Guardian** — no button to press. Any chat can pick one like any other model (Guardian's context window and plan terms come with it). The list is read again on every sign-in, on an organization switch and every 15 minutes, and kept for the next launch (without the token). Signing out takes them out of the menus; a chat that was on one keeps it and says *Sign in to Guardian to use this model.* — signing in again renews the token for every chat on them.
+
 **When Guardian says no**, Vision says why in a dialog, never a bare HTTP code: what is missing and who can grant it (*Missing: the “vision” module is turned off for you. An admin of your Guardian organization can turn it on for you (Guardian ▸ Settings ▸ Members).*), or which limit was reached and when it resets (*Spend today: $4.80 of $5.00 — resets in 3 hours (Mon 4:00 PM).*). A spent budget or a missing permission is not retried.
 
 **The vault**: secrets you marked *Usable in Vision* in Guardian are listed; **Use** one and the agent can reference it as `{{vault:ENVKEY}}` (asked first) — held in memory only, gone when Vision quits or you sign out.
@@ -694,7 +815,7 @@ Guardian (guardian.503cm.com) is the account side of the family — models, prom
 | Prompt history | harness → Guardian | automatically, as you send prompts while signed in, and again with the outcome when each ends — masked first (your vault's secrets always, and what the sensitive-data shield masks); **Send my prompts to the notebook** in Settings ▸ Guardian turns it off |
 | Prompt history | Guardian → harness | Settings ▸ Guardian browses the account's notebook |
 | Skills | both ways | import the account's skills; deposit the project's `.vision/skills` |
-| Chats | both ways | export all loaded chats; import the account's exported ones back |
+| Chats | both ways | export all chats, or one with **Send Chat to Guardian** (masked first, like the prompt notebook: vault secrets always, the shield's finds when it is on); **Import Chats** brings back the account's kept chats and your Guardian chats (read a page at a time; a chat Guardian imported from something this Mac already has shows as imported) |
 | Code projects | both ways | upload the open project's text files to the account's private repo store — Guardian's own github-for-one, ready for the AI Coders module — never `.env` files, keys or certificates; download one back |
 
 **Estimates across users**: the turn-phase ETA cache that Vision keeps per machine (`eta-cache.json`) has a multitenant big sibling in Guardian, which aggregates durations per task kind and scope across its users — the client sends nothing but the kind, the scope number and the wall-clock.
@@ -741,6 +862,11 @@ VisionHarnessCore/         the harness. No AppKit, no SwiftUI — headlessly tes
   ChatTasks.swift          chat tasks' rules; which plan step a subagent works
   MachineControl/          screen control: the planner, the arbiter (taking turns), the seat, Accessibility
   OpenClaw/                reading a local OpenClaw; import and export
+  MCP/                     the MCP client: stdio and Streamable HTTP servers, their tools, import from other apps
+  Checkpoints/             what each turn changed (file tools, git for shell), Rewind, line diffs
+  SensitivityPolicy.swift  Sensitive chats: which models may see them, in one place
+  ChatImport/              chats from Claude Code, Codex, OpenClaw, Claude.ai/ChatGPT exports and Guardian;
+                           Markdown/JSON export; the search across chats
   GuardianHarnessAPI.swift browser sign-in (PKCE), /me, limits, vault, projects; GuardianProblems: refusals
 
 VisionMacApp/              SwiftUI
@@ -754,11 +880,15 @@ VisionMacApp/              SwiftUI
   SensitiveDataSettings.swift  Settings › AI Models › Sensitive data
   SwapperSettings.swift    Settings › Model Servers: the Swapper boxes
   ChatRoutes.swift         each chat's own model
+  MCPSettings.swift        Settings › MCP Servers: the list, the editor, the import sheet
+  CheckpointViews.swift    "Files changed (N)", diffs, the Rewind sheet
+  SensitivityViews.swift   the Sensitive strip and menu
   RunPanel.swift           the right column: Tasks and Prompts; All Prompts; Results
   ActivityMenu.swift       background activity
   ProjectStatusPanel.swift code mode's project status beside the chat
   ComposerAttachments.swift  chips, the preview sheet, the long-text viewer
   OpenClawSettings.swift   Settings › Import & Export
+  ChatImportSheet.swift    File › Import Chats… (ChatImportModel: sources, preview, import); ChatSearchModel
   GuardianService.swift    Guardian sign-in, organizations, limits, vault, prompt sync, refusal dialogs
   SparkController.swift    the boxes: status, switching, installs, routes that follow
   RouteMenu.swift          the primary / subagents / backups menu shared by toolbar and composer
@@ -779,7 +909,7 @@ VisionMacApp/              SwiftUI
 swift test
 ```
 
-1,771 tests (1,498 on the harness core, 273 on the app host): the engine loop (tool round-trips, denials, iteration budget, usage accounting,
+1,882 tests (1,585 on the harness core, 297 on the app host): the engine loop (tool round-trips, denials, iteration budget, usage accounting,
 cancellation), permission containment, the Qwen XML fallback, glob, markdown, plugin interpolation
 and quoting, prompt assembly, editor-buffer conflict resolution, 34 over the terminal emulator, and 8
 that spawn a real shell on a real pty and assert on what lands on the screen — plus the fleet (server
@@ -798,13 +928,26 @@ timeline (every ending, timing against the estimate, search, the composer quote,
 backfill of old chats, the file), chat tasks end to end (in order after the current work, paused by a Stop or
 a failure and at launch, goals and commands as tasks), and which model, route and settings a subagent really
 uses, checked on the wire. Also: each model's request rules and the safety net against the providers' own
-error bodies, Z.ai's errors and key diagnosis, each chat's own model with two chats at once, attachments read
-from real PDFs (text and scanned), Office files and pictures and the exact payload each kind of server gets,
-a 10,000-line paste sent in parts and queued with a task, the paste rule through AppKit's own paste path,
-the paged transcript (pages loading by scroll and by click, the reader's row kept in place, following the end,
-jumps) and Copy (a prompt exactly as sent, its pastes, goals and their rounds, ⇧⌘C),
+error bodies, Z.ai's errors and key diagnosis, DeepSeek's thinking switch, reasoning echo and errors (its real
+401 bodies pinned), the Anthropic Messages API against a scripted server (the request, thinking, caching,
+replay, server-side fallback, every error, and a request's shared room for pictures and PDFs), Claude Code
+against a stand-in `claude` (the command line, stream-json, permission questions answered on the chat's card,
+Stop, a lost session, the recap between models, /goal, folder trust, the shield on what Vision hands it), Guardian's
+models in every chat's menu (read at launch, on Refresh, signed out and back in), MCP servers over stdio and
+Streamable HTTP against scripted servers (tools, resources, a server that fails to start, import from Claude Code, Claude
+Desktop and Cursor, secrets kept out of the file), checkpoints and Rewind (the file tools, a shell
+command's changes through git — eol filters and odd paths included — conflicts, a file changed after the
+confirmation), Sensitive chats (each kind of model, backups, subagents, /compact and skills refused, the flag
+carried by tasks and imports), each chat's own model with
+two chats at once, attachments read from real PDFs (text and scanned), Office files and pictures and the exact
+payload each kind of server gets, a 10,000-line paste sent in parts and queued with a task, the paste rule
+through AppKit's own paste path, the paged transcript (pages loading by scroll and by click, the reader's row
+kept in place, following the end, jumps) and Copy (a prompt exactly as sent, its pastes, goals and their rounds, ⇧⌘C),
 validation sending a goal back and the no-progress stop, screen control's planner and arbiter against a fake
-machine, OpenClaw import and export against made-up installs (and read-only against a real one), and the
+machine, OpenClaw import and export against made-up installs (and read-only against a real one), chat import
+from made-up Claude Code, Codex, OpenClaw, Claude.ai and ChatGPT files (a session found twice, a branch walk,
+attachments; read-only against the real histories on this Mac), export to Markdown, JSON and Guardian (masked,
+the plan and the Sensitive flag going along), the search across every chat, and the
 Guardian contract — browser sign-in with PKCE through the loopback, organizations, limits, refusals, the
 vault, projects and the masked notebook — against a scripted Guardian. Five live tests are skipped unless
 pointed at a real server or a real OpenClaw.
@@ -825,11 +968,18 @@ Verified on macOS 14+ / Apple Silicon:
 
 - **The terminal is a subset, not a full VT.** Shells, build logs, `git`, and `less` are fine; a
   full-screen curses app that relies on mouse reporting or sixel is not.
-- **Amazon Bedrock, the multi-server fleet, backups, the subscription plans (Kimi and Z.ai included),
-  attachments and Guardian are covered by tests against fakes** (a scripted AWS CLI, stubbed HTTP, fake
-  model servers, a scripted Guardian built to its contract); the Swapper client was also run against a local
-  Swapper 2.0 demo. The first run against real AWS, a real Kimi or Z.ai key, real vLLM/llama.cpp with a PDF,
-  the live Guardian, and a real second box is yours.
+- **Amazon Bedrock, the multi-server fleet, backups, the subscription plans (Kimi, Z.ai, DeepSeek and the
+  Anthropic API included), attachments and Guardian are covered by tests against fakes** (a scripted AWS CLI,
+  stubbed HTTP, fake model servers, a scripted Guardian built to its contract); the Swapper client was also run
+  against a local Swapper 2.0 demo. The first run against real AWS, a real Kimi, Z.ai, DeepSeek or Anthropic
+  key, real vLLM/llama.cpp with a PDF, the live Guardian, and a real second box is yours.
+- **Claude Code was never run signed in here.** Its turns are tested against a stand-in `claude` that records what
+  it is given (arguments, the prompt, permission answers, the interrupt) and against the documented stream-json;
+  the real CLI (2.1.299) was run signed out, and to check which of a folder's settings `--setting-sources user`
+  leaves out. The first signed-in turn on a Claude plan is yours.
+- **MCP was run only against scripted servers** (a `sh` program, a stubbed HTTP server): no real `npx`
+  server through a real login shell yet. Legacy SSE-only servers don't connect, and there's no OAuth sign-in
+  for HTTP servers that need one (paste a token as a header).
 - **Screen control through Accessibility can't run in the test process** (macOS doesn't trust it); its
   decisions — which route, who waits, who has the mouse — are tested, and the live paths need a person.
 - **The shield masks what it recognises** — the patterns above and your own terms — not every name or
@@ -837,5 +987,6 @@ Verified on macOS 14+ / Apple Silicon:
   is told to.
 - **Reasoning is shown live but not kept** in the transcript once the answer arrives. Servers
   without a reasoning parser leave `<think>` text inline in the answer.
-- **Search across sessions is not implemented.** Transcripts are plain JSON under
-  `~/Library/Application Support/Vision/conversations/`, so `grep` works in the meantime.
+- **Chat import was run read-only against this Mac's real Claude Code, Codex and OpenClaw histories**;
+  Claude.ai and ChatGPT exports and your Guardian chats only against made-up files and a scripted Guardian.
+  A Guardian copy imported first doesn't hide the local session it came from (that one is the fuller copy).

@@ -179,8 +179,16 @@ struct SetupWizard: View {
                         detail: ClaudeCodeWords.summary) {
                 model.showClaudeCodeGuide(closing: true)
             }
-            guideChoice(icon: "creditcard", title: "A subscription or API plan — Kimi, Qwen, OpenAI, GLM",
-                        detail: "Use your Kimi, Alibaba Cloud, OpenAI or Z.ai plan. A guide shows where to get the key.") {
+            guideChoice(icon: "bolt.horizontal", title: "DeepSeek — API key",
+                        detail: "DeepSeek-V4 Pro and V4.1 Flash on DeepSeek's own API, 1M context. Paste a key from platform.deepseek.com; the check says plainly what's wrong if it doesn't work.") {
+                model.showPlanGuide(closing: true, plan: "deepseek")
+            }
+            guideChoice(icon: "sparkle", title: "Anthropic API (Claude) — API key",
+                        detail: "Claude Opus, Fable, Sonnet and Haiku with a key from console.anthropic.com — thinking, images, PDFs and prompt caching. (A Pro or Max subscription goes through Claude Code instead.)") {
+                model.showPlanGuide(closing: true, plan: "anthropic")
+            }
+            guideChoice(icon: "creditcard", title: "A subscription or API plan — Kimi, Qwen, OpenAI, GLM, DeepSeek, Anthropic",
+                        detail: "Use your Kimi, Alibaba Cloud, OpenAI, Z.ai, DeepSeek or Anthropic plan. A guide shows where to get the key.") {
                 model.showPlanGuide(closing: true)
             }
 
@@ -325,6 +333,7 @@ struct SetupWizard: View {
         case .openRouter: "Many hosted models behind one API. Needs an API key."
         case .bedrock: "Claude, Amazon Nova, Llama and more through your AWS account. Set up by its own guide."
         case .guardian: "Your Guardian account is the proxy: sign in with your guardian.503cm.com login and use the models your plan allows. Your prompts, skills, chats and code projects sync with Guardian too."
+        case .anthropic: "Claude on Anthropic's own API with an API key. Set up by the plan guide."
         case .claudeCode: "The claude command on this Mac, signed in with your Claude Pro or Max plan. Set up by its own card."
         }
     }
@@ -436,6 +445,8 @@ struct SetupWizard: View {
             "Amazon Bedrock is set up by its own guide: Settings ▸ Models ▸ Add Amazon Bedrock…"
         case .guardian:
             "Sign in with your Guardian login (the email and password you use at guardian.503cm.com). Vision exchanges it for a session token that is kept in your Keychain — the password never is."
+        case .anthropic:
+            "Paste an Anthropic API key (sk-ant-…). It is stored in your login keychain, never in the app's preferences file."
         case .claudeCode:
             "Claude Code is set up by its own card: Settings ▸ Models ▸ Add ▸ Claude Code…"
         }
@@ -449,6 +460,7 @@ struct SetupWizard: View {
         case .openRouter: "https://openrouter.ai/api/v1"
         case .bedrock: "https://bedrock-runtime.us-east-1.amazonaws.com"
         case .guardian: "https://guardian.503cm.com"
+        case .anthropic: AnthropicMessages.defaultBaseURL
         case .claudeCode: ProviderProfile.claudeCodeBaseURL
         }
     }
@@ -457,7 +469,7 @@ struct SetupWizard: View {
         kind == .openAICompat || kind == .ollama || kind == .lmStudio
     }
 
-    private var needsKey: Bool { kind == .openAI || kind == .openRouter }
+    private var needsKey: Bool { kind == .openAI || kind == .openRouter || kind == .anthropic }
     /// Your own server may sit behind a key (vLLM/SGLang `--api-key`, an nginx front).
     private var allowsKey: Bool { needsKey || kind == .openAICompat }
 
@@ -492,6 +504,8 @@ struct SetupWizard: View {
             "Sign in to AWS again and check that your account is allowed to use the model."
         case .guardian:
             "Check your Guardian email and password, and that your plan covers the model you picked. If the sign-in has expired, sign in again."
+        case .anthropic:
+            "Check the key is a current API key from console.anthropic.com ▸ API Keys and that the account has credit."
         case .claudeCode:
             "Open the Claude Code card (Settings ▸ Models ▸ Add ▸ Claude Code…) and press Check Again: it says whether the claude command is installed and signed in."
         }
@@ -887,6 +901,8 @@ struct SetupWizard: View {
             host = "https://bedrock-runtime.us-east-1.amazonaws.com"; port = ""; modelID = ""
         case .guardian:
             host = "https://guardian.503cm.com"; port = ""; modelID = ""
+        case .anthropic:
+            host = AnthropicMessages.defaultBaseURL; port = ""; modelID = "claude-opus-5-5"
         case .claudeCode:
             host = ProviderProfile.claudeCodeBaseURL; port = ""; modelID = "sonnet"
         }

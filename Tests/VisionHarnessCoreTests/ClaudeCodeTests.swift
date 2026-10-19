@@ -325,28 +325,34 @@ final class ClaudeCodeTests: XCTestCase {
                 }
             }
         }
-        let two = AttachmentReader.digested(MessageAttachment(kind: .file, name: "two.pdf", data: AttachmentFixtures.textPDF(["One.", "Two."])))
-        let three = AttachmentReader.digested(MessageAttachment(kind: .file, name: "three.pdf",
-                                                                data: AttachmentFixtures.textPDF(["A.", "B.", "C."])))
+        func pdf(_ name: String, pages: Int) -> MessageAttachment {
+            let text = (1...pages).map { "Page \($0) of \(name): revenue grew in the West, and the invoices are attached below." }
+            return AttachmentReader.digested(MessageAttachment(kind: .file, name: name, data: AttachmentFixtures.textPDF(text)))
+        }
+        let two = pdf("two.pdf", pages: 2), three = pdf("three.pdf", pages: 3)
         XCTAssertEqual(two.digest?.pages, 2)
+        XCTAssertEqual(two.digest?.scanned, false)
         // PDF pages in all: the one that would pass the limit goes as its text (and one over it alone says so on its chip).
         let pages = AttachmentRoute(vision: true, documents: true, maxDocumentPages: 4)
         XCTAssertEqual(kinds(AttachmentWire.parts(for: [two, three], route: pages)), ["document", "text"])
+        XCTAssertEqual(AttachmentWire.deliveries(for: [two, three], route: pages), [.document, .text], "what the badges say")
         XCTAssertEqual(AttachmentWire.delivery(three, route: AttachmentRoute(vision: true, documents: true, maxDocumentPages: 2)), .text)
         // Bytes in all, pictures and PDFs together.
         let png = AttachmentFixtures.png(of: "42")
         let pictures = (1...3).map { MessageAttachment(kind: .image, name: "p\($0).png", data: png) }
-        let budget = AttachmentRoute(vision: true, documents: true, maxTotalBytes: png.count * 2 + 10)
+        let budget = AttachmentRoute(vision: true, documents: true, maxRequestMediaBytes: png.count * 2 + 10)
         XCTAssertEqual(kinds(AttachmentWire.parts(for: pictures, route: budget)), ["image", "image", "text"])
-        let mixed = AttachmentRoute(vision: true, documents: true, maxTotalBytes: two.data.count + png.count / 2)
+        let mixed = AttachmentRoute(vision: true, documents: true, maxRequestMediaBytes: two.data.count + png.count / 2)
         XCTAssertEqual(kinds(AttachmentWire.parts(for: [two, pictures[0]], route: mixed)), ["document", "text"])
-        XCTAssertEqual(AttachmentWire.delivery(two, route: AttachmentRoute(vision: true, documents: true, maxTotalBytes: 10)), .text)
-        // Claude Code's own limits.
+        XCTAssertEqual(AttachmentWire.delivery(two, route: AttachmentRoute(vision: true, documents: true, maxRequestMediaBytes: 10)), .text)
+        // Claude Code's own limits — also what a Claude Code chat's composer chips and badges go by.
         let route = ClaudeCodeInput.attachmentRoute
+        XCTAssertEqual(AttachmentRoute.of(ProviderProfile(kind: .claudeCode, name: "Claude Code", baseURL: ProviderProfile.claudeCodeBaseURL,
+                                                          model: "sonnet")), route)
         XCTAssertEqual(route.maxImages, 20)
         XCTAssertEqual(route.maxDocuments, 5)
         XCTAssertEqual(route.maxDocumentPages, 100)
-        XCTAssertEqual(route.maxTotalBytes, 12 * 1024 * 1024)
+        XCTAssertEqual(route.maxRequestMediaBytes, 12 * 1024 * 1024)
         XCTAssertLessThanOrEqual(route.maxImageBytes ?? .max, 5 * 1024 * 1024 * 3 / 4, "an image's 5 MB is counted on its base64")
     }
 

@@ -168,6 +168,10 @@ public struct ProviderProfile: Codable, Hashable, Sendable {
         /// same account also shares prompts, skills, chats and code projects
         /// with every harness on it (see `GuardianClient`).
         case guardian
+        /// Anthropic's own API (api.anthropic.com/v1): Claude on the Messages API with an API key from
+        /// console.anthropic.com — streaming, tools, images, PDFs, extended thinking and prompt caching
+        /// (see `AnthropicClient`). Made by the plan guide ("Anthropic API (key)").
+        case anthropic
         /// Claude Code: the official `claude` command on this Mac, signed in with the person's Claude Pro or
         /// Max plan. A chat on it runs each turn as `claude -p` (stream-json in and out) in the chat's folder;
         /// the CLI does all the talking to Anthropic — Vision never reads or reuses its sign-in. The model is

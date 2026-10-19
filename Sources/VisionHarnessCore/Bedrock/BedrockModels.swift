@@ -185,6 +185,14 @@ public enum BedrockModels {
         return claude
     }
 
+    /// The family and version ("opus", 5.5) a Claude id names — a Bedrock id or Anthropic's own
+    /// ("claude-opus-5-5") — if it names one.
+    public static func claudeVersion(_ modelID: String) -> (family: String, version: Double)? {
+        let id = baseID(modelID) ?? modelID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard let (family, version) = placeClaude(id) else { return nil }
+        return (family, version)
+    }
+
     /// The family and version ("sonnet", 4.5) a Claude id names, if it names one.
     private static func placeClaude(_ id: String) -> (String, Double)? {
         let whole = NSRange(id.startIndex..., in: id)

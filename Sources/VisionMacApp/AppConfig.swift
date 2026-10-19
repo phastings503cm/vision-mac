@@ -73,6 +73,19 @@ public final class AppConfig {
     /// Called whenever the set of routes, the main model or the subagent
     /// settings change, so the fleet can be rebuilt. Not called while loading.
     @ObservationIgnored public var onRoutesChanged: (@MainActor () -> Void)?
+    // MARK: Guardian's models (memory only)
+
+    /// The models Guardian offers the signed-in account — every chat's model menu lists them under "Guardian", as
+    /// routes "Guardian|<model id>" (see `ChatRoutes.swift`). Never saved with the routes: `GuardianService` fills it
+    /// on sign-in, from its cache at launch and every 15 minutes, and empties it on sign-out.
+    public var guardianModels: [GuardianModel] = []
+    /// The Guardian sign-in's token those routes use (nil = signed out). Memory only: the Keychain copy belongs to
+    /// the connection, so signing in again renews every Guardian model at once.
+    @ObservationIgnored public var guardianToken: String?
+    /// The model proxy's address ("https://guardian.503cm.com/v1") and the organization it works in.
+    @ObservationIgnored public var guardianModelBase: String?
+    @ObservationIgnored public var guardianOrgID: String?
+
     /// Signed in to Guardian: send each prompt (masked) to the Guardian prompt notebook, with how it ended.
     public var guardianPromptSync: Bool = true {
         didSet { persist() }
@@ -128,6 +141,15 @@ public final class AppConfig {
     /// Per project folder ("" = chats without a project): the model and thinking level its chats last chose — what
     /// a new chat there starts with (see `ChatRoutes.swift`).
     public var projectChoices: [String: ChatChoice] = [:] { didSet { persist() } }
+    /// Per project folder ("" = chats without a project): its new chats start Sensitive (see
+    /// `AppTransport+Sensitivity.swift`). Only the projects set to Sensitive are stored.
+    public var projectSensitive: [String: Bool] = [:] {
+        didSet {
+            guard !loading else { return }
+            defaults.set(try? JSONEncoder().encode(projectSensitive.filter(\.value)), forKey: Self.projectSensitiveKey)
+        }
+    }
+    static let projectSensitiveKey = "sensitivity.byProject.v1"
 
     // The plan panel.
     /// Whether the plan panel is showing (it follows whichever chat is selected).
@@ -487,6 +509,10 @@ public final class AppConfig {
            let decoded = try? JSONDecoder().decode([String: ChatChoice].self, from: data) {
             projectChoices = decoded
         }
+        if let data = defaults.data(forKey: Self.projectSensitiveKey),
+           let decoded = try? JSONDecoder().decode([String: Bool].self, from: data) {
+            projectSensitive = decoded
+        }
     }
 
     private func persist() {
@@ -600,7 +626,7 @@ public extension ProviderProfile {
         switch kind {
         case .ollama, .lmStudio: return false
         case .openAICompat: return !isLoopbackOrLAN
-        case .openAI, .openRouter: return true
+        case .openAI, .openRouter, .anthropic: return true
         // A Bedrock route signs with an AWS sign-in; only one without a profile uses a Bedrock API key.
         case .bedrock: return awsProfile == nil
         // Guardian signs in with the account login; the session token is stored like a key.

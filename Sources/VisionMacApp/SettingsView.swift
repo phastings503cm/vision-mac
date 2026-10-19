@@ -29,6 +29,9 @@ struct SettingsView: View {
             ComputerSettings()
                 .tabItem { Label("Computer", systemImage: "cursorarrow.click.2") }
                 .tag(SettingsTab.computer)
+            MCPSettings()
+                .tabItem { Label("MCP Servers", systemImage: "point.3.connected.trianglepath.dotted") }
+                .tag(SettingsTab.mcp)
             ImportExportSettings()
                 .tabItem { Label("Import & Export", systemImage: "arrow.left.arrow.right.square") }
                 .tag(SettingsTab.importExport)
@@ -129,7 +132,8 @@ struct ProviderEditor: View {
             Form {
                 Section("API") {
                     Picker("Kind", selection: $draft.kind) {
-                        ForEach(draft.kind == .bedrock ? [ProviderProfile.Kind.bedrock] : ProviderProfile.Kind.manual, id: \.self) { kind in
+                        ForEach(draft.kind == .bedrock ? [ProviderProfile.Kind.bedrock]
+                                    : ProviderProfile.Kind.manual + (draft.kind == .anthropic ? [.anthropic] : []), id: \.self) { kind in
                             Text(kind.label).tag(kind)
                         }
                     }

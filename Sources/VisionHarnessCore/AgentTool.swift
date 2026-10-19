@@ -80,7 +80,8 @@ public struct AgentTool: ToolExecutor {
         guard let definition = types.find(typeName) else {
             return ToolResult(output: "Error: unknown agent_type '\(typeName ?? "")'. Available: \(types.describe()).")
         }
-        let sensitive = JSONArgs.bool(args, "sensitive", default: false)
+        // A Sensitive chat with the shield off keeps every subagent on a private server.
+        let sensitive = JSONArgs.bool(args, "sensitive", default: false) || context.privateSubagentsOnly
         let step = Self.stepArgument(JSONArgs.dictionary(args)["step"])
 
         if JSONArgs.bool(args, "run_in_background", default: false) {
@@ -177,8 +178,9 @@ public struct AgentTool: ToolExecutor {
                                              note: Self.placementNote(definition: definition, lease: leased, fleet: fleet))
                     }
                 } else {
-                    // No fleet: it would run on the chat's own model — for a sensitive task, only if that is private.
-                    if sensitive, (context.client as? any ProviderClient)?.profile.isPrivateRoute != true {
+                    // No fleet: it would run on the chat's own model — for a sensitive task, only if that is private
+                    // (as a Sensitive chat counts it: own hardware, Guardian, Bedrock in your account).
+                    if sensitive, !((context.client as? any ProviderClient).map { SensitivityPolicy.isPrivate($0.profile) } ?? false) {
                         if let runID { roster?.finish(runID, status: .failed, report: AgentFleet.noPrivateServer) }
                         return SubagentOutcome(ok: false, report: AgentFleet.noPrivateServer, agentType: definition.name,
                                                server: nil, elapsed: elapsed(), failovers: failovers)

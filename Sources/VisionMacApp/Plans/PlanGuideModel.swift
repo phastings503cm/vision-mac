@@ -214,14 +214,19 @@ final class PlanGuideModel {
     /// The key as pasted, minus the spaces around it.
     private var cleanKey: String { key.trimmingCharacters(in: .whitespacesAndNewlines) }
 
-    /// The route this guide makes: OpenAI-compatible (OpenAI's own for OpenAI), at the region's address, the
+    /// The route this guide makes: OpenAI-compatible (OpenAI's own for OpenAI, the Messages API for Anthropic), at the region's address, the
     /// privacy the user chose (stored only when it differs from the default), interactive-only when the plan says.
     func route(model: String) -> ProviderProfile? {
         guard let plan, let region else { return nil }
         let name = region.routeName
             ?? (plan.regions.count > 1 && region.id != "international" ? "\(plan.routeName) (\(region.name.components(separatedBy: " (").first ?? region.name))" : plan.routeName)
         let defaultPrivacy = RoutePrivacy.isPrivateAddress(region.baseURL)
-        return ProviderProfile(kind: plan.id == "openai" ? .openAI : .openAICompat, name: name, baseURL: region.baseURL,
+        let kind: ProviderProfile.Kind = switch plan.id {
+        case "openai": .openAI
+        case "anthropic": .anthropic
+        default: .openAICompat
+        }
+        return ProviderProfile(kind: kind, name: name, baseURL: region.baseURL,
                                apiKey: cleanKey.isEmpty ? nil : cleanKey, model: model,
                                isPrivate: isPrivate == defaultPrivacy ? nil : isPrivate,
                                interactiveOnly: plan.interactiveOnly ? true : nil)

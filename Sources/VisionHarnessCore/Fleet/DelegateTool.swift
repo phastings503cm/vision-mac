@@ -83,7 +83,7 @@ public struct DelegateTool: ToolExecutor {
             let description = ((item["description"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             tasks.append(Subtask(description: description.isEmpty ? "task \(index)" : description,
                                  prompt: prompt, definition: definition,
-                                 sensitive: (item["sensitive"] as? Bool) ?? allSensitive,
+                                 sensitive: ((item["sensitive"] as? Bool) ?? allSensitive) || context.privateSubagentsOnly,
                                  step: AgentTool.stepArgument(item["step"])))
         }
 

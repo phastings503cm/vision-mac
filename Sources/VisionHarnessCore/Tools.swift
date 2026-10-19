@@ -57,6 +57,9 @@ public struct ToolContext: Sendable {
     /// This chat's computer-access approvals, so a subagent asks only if the chat hasn't allowed it — and the global
     /// stop's revoke covers subagents too. Nil = a subagent starts with none of its own.
     public let computerGrants: ComputerGrants?
+    /// The chat is Sensitive and the shield is off: every subagent task runs only on a private server, as if it were
+    /// marked `sensitive` (see `SensitivityPolicy.subagentsPrivateOnly`).
+    public var privateSubagentsOnly = false
 
     public init(workspace: URL, policy: PermissionPolicy,
                 client: any LLMClient, registry: ToolRegistry, depth: Int = 0,

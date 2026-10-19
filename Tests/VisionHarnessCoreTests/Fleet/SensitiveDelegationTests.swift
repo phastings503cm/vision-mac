@@ -154,6 +154,16 @@ final class SensitiveDelegationTests: XCTestCase {
         let onPrivate = fleetContext(PrivateModel(profile: spark), root: dir.url, retry: fleetFastRetry)
         let ran = await AgentTool().execute(args: #"{"description":"payroll","prompt":"p","sensitive":true}"#, in: onPrivate)
         XCTAssertTrue(ran.output.contains("finished"), ran.output)
+
+        // Guardian and Bedrock in your account are private as a Sensitive chat counts them: a chat on one of them
+        // (shield off, so every subagent task is sensitive) still has subagents.
+        for profile in [ProviderProfile(kind: .bedrock, name: "Bedrock", baseURL: "", model: "claude"),
+                        ProviderProfile(kind: .guardian, name: "Guardian", baseURL: "https://guardian.example.com/api/v1", model: "g")] {
+            var context = fleetContext(PrivateModel(profile: profile), root: dir.url, retry: fleetFastRetry)
+            context.privateSubagentsOnly = true
+            let result = await AgentTool().execute(args: #"{"description":"notes","prompt":"p"}"#, in: context)
+            XCTAssertTrue(result.output.contains("finished"), "\(profile.name): \(result.output)")
+        }
     }
 
     func testTheAgentToolSaysWhenNothingPrivateCanTakeIt() async throws {

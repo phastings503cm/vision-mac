@@ -22,6 +22,8 @@ public enum KnownProvider: String, Sendable, Equatable {
     case kimiCode
     /// Z.ai / BigModel (api.z.ai, open.bigmodel.cn): GLM models, general and Coding Plan endpoints.
     case zai
+    /// DeepSeek's API (api.deepseek.com): deepseek-flash, deepseek-v4-pro.
+    case deepseek
     case openAI
     case other
 
@@ -31,6 +33,7 @@ public enum KnownProvider: String, Sendable, Equatable {
         case .moonshot: "Moonshot"
         case .kimiCode: "Kimi Code"
         case .zai: "Z.ai"
+        case .deepseek: "DeepSeek"
         case .openAI: "OpenAI"
         case .other: "The model server"
         }
@@ -46,6 +49,7 @@ public enum KnownProvider: String, Sendable, Equatable {
             return url.path.lowercased().contains("/coding") ? .kimiCode : .moonshot
         }
         if under("z.ai") || under("bigmodel.cn") { return .zai }
+        if under("deepseek.com") { return .deepseek }
         if under("openai.com") { return .openAI }
         return .other
     }
@@ -60,7 +64,9 @@ public enum ThinkingControl: Equatable, Sendable {
     case effortField
     /// `reasoning_effort` from a fixed vocabulary: each offered level and the word it sends. A model with no
     /// `.off` entry always thinks. `inTemplate` also puts the word in `chat_template_kwargs` (a GLM-5 on vLLM).
-    case effort(words: [ThinkingLevel: String], inTemplate: Bool)
+    /// `withToggle` also sends `thinking: {"type": "enabled" | "disabled"}` beside it, Off being "disabled" with
+    /// no word (its entry is "") — DeepSeek, as Vision for Windows' `ThinkingControl.WithToggle`.
+    case effort(words: [ThinkingLevel: String], inTemplate: Bool, withToggle: Bool = false)
     /// `thinking: {"type": "enabled" | "disabled"}` — on or off, no depth (Kimi K2.6, GLM-4.6 … GLM-5.1).
     case toggle
     /// Always thinks and takes no setting (Kimi K2.7 Code): nothing is sent.
@@ -93,6 +99,10 @@ public struct ModelRequestRules: Equatable, Sendable {
     /// The model's reasoning must go back on the assistant messages that made tool calls (`reasoning_content`) —
     /// Kimi answers 400 "thinking is enabled but reasoning_content is missing" otherwise.
     public var echoReasoning = false
+    /// With tools in the request, *every* assistant message must carry its reasoning, not only the ones that
+    /// called tools (DeepSeek: "the reasoning_content must be fully passed back to the API in all subsequent
+    /// requests", or a 400). One whose reasoning wasn't kept gets the stand-in while thinking is on.
+    public var echoReasoningOnEveryMessage = false
 
     public init(provider: KnownProvider, thinking: ThinkingControl) {
         self.provider = provider
@@ -105,7 +115,7 @@ public struct ModelRequestRules: Equatable, Sendable {
     public var thinkingLevels: [ThinkingLevel] {
         switch thinking {
         case .template, .effortField: ThinkingLevel.allCases
-        case .effort(let words, _): ThinkingLevel.allCases.filter { words[$0] != nil }
+        case .effort(let words, _, _): ThinkingLevel.allCases.filter { words[$0] != nil }
         case .toggle: [.off, .high]
         case .alwaysOn, .none: []
         }
@@ -115,7 +125,7 @@ public struct ModelRequestRules: Equatable, Sendable {
     public var alwaysThinks: Bool {
         switch thinking {
         case .alwaysOn: true
-        case .effort(let words, _): !words.isEmpty && words[.off] == nil
+        case .effort(let words, _, _): !words.isEmpty && words[.off] == nil
         default: false
         }
     }
@@ -141,10 +151,23 @@ public struct ModelRequestRules: Equatable, Sendable {
         }
     }
 
-    /// The `reasoning_effort` word for `level` under an `.effort` vocabulary (nil otherwise).
+    /// The `reasoning_effort` word for `level` under an `.effort` vocabulary (nil otherwise, and for an Off that
+    /// is said with the toggle alone).
     public func effortWord(_ level: ThinkingLevel) -> String? {
-        guard case .effort(let words, _) = thinking, let nearest = nearestLevel(level) else { return nil }
-        return words[nearest]
+        guard case .effort(let words, _, _) = thinking, let nearest = nearestLevel(level),
+              let word = words[nearest], !word.isEmpty else { return nil }
+        return word
+    }
+
+    /// Thinking is switched off for `level` by `thinking.type: "disabled"` (a toggle, or an effort vocabulary with
+    /// a toggle beside it) — the same test as Vision for Windows' `TurnsThinkingOff`.
+    public func turnsThinkingOff(_ level: ThinkingLevel?) -> Bool {
+        guard let level else { return false }
+        switch thinking {
+        case .toggle: return nearestLevel(level) == .off
+        case .effort(_, _, let withToggle): return withToggle && nearestLevel(level) == .off
+        default: return false
+        }
     }
 
     // MARK: The table
@@ -158,6 +181,7 @@ public struct ModelRequestRules: Equatable, Sendable {
         case .moonshot: return moonshot(id)
         case .kimiCode: return kimiCode(id)
         case .zai: return zai(id)
+        case .deepseek: return deepseek(id)
         case .openAI: return openAI(id)
         case .other: return other(profile, id)
         }
@@ -239,6 +263,30 @@ public struct ModelRequestRules: Equatable, Sendable {
         let vision = id.contains("flash") || id.range(of: #"^glm-[0-9.]+v"#, options: .regularExpression) != nil
         r.textOnlyContent = !vision
         r.acceptsImages = vision
+        return r
+    }
+
+    /// DeepSeek (api-docs.deepseek.com, 2026-10-19): deepseek-flash (DeepSeek-V4.1-Flash, reads images) and
+    /// deepseek-v4-pro (text only), both 1M context and up to 393216 output tokens. Thinking is on by default at
+    /// effort high. The OpenAI format switches it with `thinking: {"type": "enabled" | "disabled"}` and sizes it
+    /// with `reasoning_effort` low, high or max (medium is folded into high by the API itself; "none" is only the
+    /// Anthropic format's word): Off sends "disabled" and no effort. In thinking mode `tool_choice` "required" or a
+    /// named tool is a 400 and temperature has no effect (0…2 otherwise). With tools, every assistant message's
+    /// `reasoning_content` must come back.
+    static func deepseek(_ id: String) -> ModelRequestRules {
+        var words = lowHighMax
+        words[.off] = ""
+        var r = ModelRequestRules(provider: .deepseek, thinking: .effort(words: words, inTemplate: false, withToggle: true))
+        r.temperatureRange = 0...2
+        r.maxOutputTokens = 393_216
+        r.forcedToolChoice = false
+        r.echoReasoning = true
+        r.echoReasoningOnEveryMessage = true
+        if id.hasPrefix("deepseek-v4-pro") {
+            r.acceptsImages = false
+        } else if id.hasPrefix("deepseek-flash") || id.hasPrefix("deepseek-v4-flash") {
+            r.acceptsImages = true
+        }
         return r
     }
 

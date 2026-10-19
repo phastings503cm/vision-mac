@@ -26,6 +26,7 @@ struct RouteMenuSections: View {
         section("Subagents — take side tasks in parallel", helping, current: current)
         section("Backups — take over if the primary fails", standingBy, current: current)
         section("Other models", others, current: current)
+        guardianSection(config, current: current)
         if session != nil, let current, current != config.activeRoute, usable.contains(where: { $0.routeID == current }) {
             Button("Make This the Primary (for new projects and the fleet)") {
                 config.makeMain(current)
@@ -51,8 +52,9 @@ struct RouteMenuSections: View {
         if !routes.isEmpty {
             Section(title) {
                 ForEach(routes, id: \.routeID) { provider in
-                    // A Sensitive chat can't move onto an engine that reads files itself.
-                    let refused = provider.readsFilesDirectly && session.map { model.transport.isSensitiveChat($0) } == true
+                    // A Sensitive chat can't switch to a model it may not use (Claude Code; an online service while
+                    // the shield is off).
+                    let allowed = model.transport.sensitivityAllows(provider, in: session)
                     Button {
                         guard provider.routeID != current else { return }
                         if let session {
@@ -62,15 +64,52 @@ struct RouteMenuSections: View {
                             model.transport.resetRouteCache()
                         }
                     } label: {
-                        Label(provider.displayName,
+                        Label(provider.displayName + (allowed ? "" : " — not in a Sensitive chat"),
                               systemImage: provider.routeID == current ? "checkmark"
+                                  : !allowed ? "nosign"
                                   : provider.readsFilesDirectly ? "terminal"
                                   : provider.isPrivateRoute ? "lock.fill" : "shield.lefthalf.filled")
                     }
-                    .disabled(refused)
-                    .help(refused ? ClaudeCodeTurn.sensitiveRefusal
+                    .disabled(!allowed && provider.routeID != current)
+                    .help(!allowed ? (SensitivityPolicy.admission(for: provider, shieldOn: model.config.shield.enabled).refusal ?? "")
                           : provider.readsFilesDirectly ? ClaudeCodeGuideView.notPrivateHelp
                           : provider.isPrivateRoute ? "Private: may see sensitive data" : "Not private: sensitive details are masked before sending")
+                }
+            }
+        }
+    }
+
+    /// Guardian's models, while signed in to Guardian — there by themselves, no button to press. Signed out, a chat
+    /// on one of them shows it here with what to do.
+    @ViewBuilder
+    private func guardianSection(_ config: AppConfig, current: String?) -> some View {
+        let routes = config.guardianModelRoutes
+        if !routes.isEmpty {
+            Section("Guardian") {
+                ForEach(routes, id: \.routeID) { route in
+                    Button {
+                        guard route.routeID != current else { return }
+                        if let session {
+                            model.transport.setRoute(route.routeID, for: session)
+                        } else {
+                            // The primary is a configured route: keep this one, on the sign-in's token.
+                            config.store(route)
+                            config.setAPIKey(config.guardianToken ?? "", for: route)
+                            config.makeMain(route.routeID)
+                            model.transport.resetRouteCache()
+                        }
+                    } label: {
+                        Label(config.guardianMenuLabel(route.routeID),
+                              systemImage: route.routeID == current ? "checkmark" : ProviderProfile.Kind.guardian.icon)
+                    }
+                    .help("Guardian (\(route.model)): sensitive details are masked before sending")
+                }
+            }
+        } else if let current, config.isGuardianModel(current), config.guardianToken == nil {
+            Section("Guardian") {
+                Button("\(config.guardianMenuLabel(current)) — \(GuardianSignInNeeded.message)") {
+                    model.settingsTab = .guardian
+                    model.showSettings = true
                 }
             }
         }

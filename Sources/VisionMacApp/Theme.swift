@@ -149,6 +149,7 @@ extension ProviderProfile.Kind {
         case .openRouter: "OpenRouter"
         case .bedrock: "Amazon Bedrock"
         case .guardian: "Guardian"
+        case .anthropic: "Anthropic API"
         case .claudeCode: "Claude Code"
         }
     }
@@ -160,6 +161,7 @@ extension ProviderProfile.Kind {
         case .openAI, .openRouter: "cloud"
         case .bedrock: "cloud.bolt"
         case .guardian: "shield.lefthalf.filled"
+        case .anthropic: "sparkle"
         case .claudeCode: "terminal"
         }
     }

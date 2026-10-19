@@ -20,6 +20,10 @@ public final class AppTransport {
     /// Set right after a banner that says a Bedrock route's AWS sign-in ran out: the AWS CLI profile
     /// the banner's "Sign in to AWS…" button signs in again.
     public var awsSignInProfile: String?
+    /// The Rewind sheet to show (`/rewind`, a turn's "Rewind this turn…"); nil = none.
+    public var rewindRequest: RewindRequest?
+    /// Bumped when an MCP server connects, fails or changes its tools (Settings ▸ MCP Servers redraws).
+    public var mcpRevision = 0
     /// Plugin manifests loaded for the current project, and any that failed.
     public private(set) var plugins: [PluginManifest] = []
     public private(set) var pluginErrors: [String] = []
@@ -204,6 +208,11 @@ public final class AppTransport {
         var servers: [SubagentServers.Entry]
         /// Unattended work (a queue task, `/goal`): no backups or subagent servers that are interactive-only.
         var unattended: Bool
+        /// The MCP servers' tools changed (a server connected, failed, or listed new tools).
+        var mcp: Int = 0
+        /// A Sensitive chat ("" = not), and whether the shield is on for it: its prompt, its subagents' servers and its
+        /// pictures follow `SensitivityPolicy`.
+        var sensitive: String = ""
     }
 
     /// Everything about skills one turn needs: what exists, what's on, and the prompt text.
@@ -227,9 +236,10 @@ public final class AppTransport {
     @ObservationIgnored var onSwapCommand: ((String?, SessionVM) -> Void)?
     /// Claude Code on this Mac: the `claude` command, its sign-in status, and how turns start it.
     @ObservationIgnored public let claudeCode: ClaudeCodeHost
-    /// Whether a chat is Sensitive — the per-chat sensitivity policy answers it. A Sensitive chat never runs on an
-    /// engine that reads files itself (Claude Code): the shield can't anonymise what it reads.
-    @ObservationIgnored public var isSensitiveChat: (SessionVM) -> Bool = { _ in false }
+    /// Whether a chat is Sensitive (its own switch — `SensitivityPolicy`). A Sensitive chat never runs on an engine
+    /// that reads files itself (Claude Code): the shield can't anonymise what it reads. `turn()` refuses first; this is
+    /// the Claude Code turn's own backstop.
+    @ObservationIgnored public var isSensitiveChat: (SessionVM) -> Bool = { $0.sensitive }
 
     // MARK: - Chats without a project
 
@@ -366,8 +376,9 @@ public final class AppTransport {
         if cwd == nil { vm.workFolder = workFolder }
         sessions.insert(vm, at: 0)
         log.upsert(id: id, cwd: cwd, title: "New chat", preset: resolved.rawValue, scratch: vm.workFolder)
-        // Its own model: what its project's chats last chose, else the primary.
+        // Its own model: what its project's chats last chose, else the primary. Sensitive when its project says so.
         assignInitialChoice(vm)
+        assignInitialSensitivity(vm)
         if select { selectedID = id }
         return vm
     }
@@ -392,6 +403,7 @@ public final class AppTransport {
         backgroundPools.removeValue(forKey: id)?.stopAll()
         agentQueuedCount[id] = nil
         config.sessionSkills[id] = nil
+        checkpointStore.deleteChat(id)
         transcripts[id] = nil
         systemPrompts[id] = nil
         attachmentStore(for: id).removeAll()
@@ -721,12 +733,14 @@ public final class AppTransport {
                 // Queued from a chat without a project: a chat without one, working in that chat's folder.
                 vm = newSession(cwd: nil, select: false, workFolder: folder)
                 if task.routeID != nil { assignInitialChoice(vm, routeID: task.routeID, thinking: task.thinking) }
+                if task.sensitive == true { markSensitive(vm) }
                 renameSession(vm.id, to: "🚀 \(task.title)")
                 queue.attachSession(taskID, vm.id)
             } else {
                 let cwd = task.cwd ?? projectContext?.root.path ?? sessions.first?.cwd
                 vm = newSession(cwd: cwd, select: false)
                 if task.routeID != nil { assignInitialChoice(vm, routeID: task.routeID, thinking: task.thinking) }
+                if task.sensitive == true { markSensitive(vm) }
                 renameSession(vm.id, to: "🚀 \(task.title)")
                 queue.attachSession(taskID, vm.id)
             }
@@ -941,6 +955,8 @@ public final class AppTransport {
             if cwd == nil { vm.workFolder = row.scratch }
             vm.routeID = row.route
             vm.thinking = row.thinking.flatMap(ThinkingLevel.init(rawValue:))
+            vm.sensitive = row.sensitive ?? false
+            vm.importSource = row.source.flatMap(ChatSource.init(rawValue:))
             vm.updatedAt = row.updatedAt
             vm.loaded = false
             return vm
@@ -954,11 +970,16 @@ public final class AppTransport {
     /// Replay a stored transcript into a session's timeline. Called lazily, so
     /// a long session list stays cheap to open.
     public func hydrate(_ vm: SessionVM) {
+        let firstLoad = !vm.loaded
         if !vm.loaded {
             // Anything added while the timeline was unloaded (a notice) goes after it.
             let added = vm.entries
             vm.entries = []
+            // Reading history back isn't using the chat: it keeps its place in the list (an imported chat stays
+            // where its own last message put it).
+            let stamp = vm.updatedAt
             replayLog(into: vm)
+            if added.isEmpty { vm.updatedAt = stamp }
             vm.entries.append(contentsOf: added)
             vm.loaded = true
         }
@@ -968,6 +989,8 @@ public final class AppTransport {
             transcripts[vm.id] = Self.replayMessages(vm.entries)
         }
         loadPromptHistory(vm)
+        // The latest turn's "Files changed (N)" card comes back after a relaunch.
+        if firstLoad { restoreCheckpoint(vm) }
     }
 
     private func replayLog(into vm: SessionVM) {
@@ -1061,6 +1084,8 @@ public final class AppTransport {
         // Which subagent servers may see sensitive data.
         let servers = subagentServerEntries
         if let note = SubagentServers.note(servers) { prompt += "\n\n--- Subagent servers ---\n" + note }
+        if let note = mcpPromptNote { prompt += "\n\n--- MCP servers ---\n" + note }
+        if vm.sensitive { prompt += "\n\n" + Self.sensitivePrompt }
         if vm.preset == .plan {
             prompt += """
 
@@ -1096,6 +1121,8 @@ public final class AppTransport {
         if config.computerToolsEnabled {
             extra.append(contentsOf: ToolRegistry.machineTools())
         }
+        // The connected MCP servers' tools, `mcp__<server>__<tool>`, behind the permission prompt (MCPTool).
+        extra.append(contentsOf: mcpTools(reserved: Set(builtins.names + extra.map(\.name))))
         let registry = builtins.adding(extra)
 
         var engineConfig = EngineConfig(model: model,
@@ -1103,10 +1130,13 @@ public final class AppTransport {
                                         maxOutputTokens: (client as? any ProviderClient)?.profile.maxOutputTokens,
                                         contextWindow: window,
                                         thinking: thinking,
-                                        visionEnabled: visionOn(for: (client as? any ProviderClient)?.profile),
+                                        visionEnabled: visionOn(for: (client as? any ProviderClient)?.profile)
+                                            && !sensitiveWithholdsPictures(vm, route: (client as? any ProviderClient)?.profile),
                                         retry: retryPolicy)
         // Subagents of a queue task or a /goal keep off servers that are for interactive use only.
         engineConfig.unattended = unattended
+        // A Sensitive chat with the shield off keeps its subagents on private servers.
+        engineConfig.privateSubagentsOnly = privateSubagentsOnly(vm)
         let engine = Engine(
             client: client,
             registry: registry,
@@ -1233,6 +1263,8 @@ public final class AppTransport {
         queue.note(task.id, "Queued by the agent in “\(vm?.title ?? "a chat")”.")
         // The task's chat runs on the model of the chat that queued it.
         if let vm { queue.setRoute(id: task.id, routeID: chatRouteID(vm), thinking: vm.thinking?.rawValue) }
+        // A Sensitive chat's task runs in a Sensitive chat.
+        if vm?.sensitive == true { queue.setSensitive(id: task.id, true) }
         let position = queue.position(of: task.id) ?? 0
         var out = "Queued “\(task.title)” at #\(position) (\(queue.queuedCount) waiting)."
         if queueRunning {
@@ -1509,6 +1541,15 @@ public final class AppTransport {
         case .control(let arg):
             vm.note(setControlScope(vm, argument: arg))
 
+        case .rewind(let arg):
+            rewindCommand(arg, vm: vm)
+
+        case .mcp(let arg):
+            mcpCommand(arg, vm: vm)
+
+        case .sensitive(let arg):
+            sensitiveCommand(arg, vm: vm)
+
         case .goal(let goal):
             pinRouteIfUnset(vm)
             if let route = chatRoute(vm), route.isInteractiveOnly {
@@ -1559,6 +1600,8 @@ public final class AppTransport {
             vm.note("The conversation is already as compact as it gets (~\(tokens.formatted()) tokens).")
         case .failed:
             vm.note("Compaction failed: the model did not return a summary. Nothing was changed.", role: .error)
+        case .refused(let why):
+            vm.note(why, role: .error)
         case .compacted(let removed, let before, let after):
             let text = "Compacted \(removed) messages: ~\(before.formatted()) → ~\(after.formatted()) tokens."
             vm.note(text)
@@ -1568,6 +1611,8 @@ public final class AppTransport {
 
     enum CompactOutcome {
         case nothingYet, noModel, alreadyCompact(Int), failed
+        /// A Sensitive chat on a model it may not use: nothing was sent.
+        case refused(String)
         case compacted(removed: Int, before: Int, after: Int)
     }
 
@@ -1580,6 +1625,9 @@ public final class AppTransport {
         let messages = transcripts[sessionID] ?? []
         guard messages.contains(where: { $0.role == .user }) else { return .nothingYet }
         guard let profile = await resolveRoute(vm) else { return .noModel }
+        // The whole conversation goes to the model: only where this chat's turns may go.
+        let client: any ProviderClient
+        do { client = try conversationClient(for: vm, profile: profile) } catch { return .refused(Self.describe(error)) }
         let prompt = systemPrompts[sessionID] ?? basePrompt
         let before = TokenEstimate.request(systemPrompt: prompt, messages: messages)
         guard let plan = Compaction.plan(usedTokens: before, limit: contextLimit(for: vm),
@@ -1588,7 +1636,6 @@ public final class AppTransport {
         }
         vm.activity = "Compacting conversation…"
         defer { vm.activity = nil }
-        let client = ProviderClients.make(profile)
         guard let summary = await Compaction.summarize(client: client, plan: plan,
                                                        model: profile.model, focus: focus),
               !Task.isCancelled else {
@@ -1891,6 +1938,8 @@ public final class AppTransport {
         // the same turn. Either way the prompt gets its row in the Prompts timeline.
         if !resumingGoal {
             phasesBegin(vm, prompt: modelText ?? goal ?? text)
+            // A new prompt's "Files changed" card starts empty.
+            vm.checkpoint = nil
         }
         let source: PromptRecord.Source = goal != nil ? .goal : (modelText != nil && text.hasPrefix("/") ? .skill : .typed)
         let isAutomatic = autoTurns.contains(sessionID)
@@ -2070,6 +2119,11 @@ public final class AppTransport {
                 notice(why, error: true)
                 return .blocked(why)
             }
+            // The chat is Sensitive and its model may not see it (switched mid-goal, or the shield was turned off).
+            if let why = sensitivityRefusal(for: vm) {
+                notice(why, error: true)
+                return .blocked(why)
+            }
             let modelText: String
             let displayText: String
             if !kickedOff {
@@ -2190,6 +2244,10 @@ public final class AppTransport {
         if transcripts[sessionID] == nil {
             transcripts[sessionID] = vm.entries.isEmpty ? [] : Self.replayMessages(vm.entries)
         }
+        // A Sensitive chat never sends to a model it may not use (the composer checks first; this is the backstop for
+        // tasks, goals and re-sends).
+        pinRouteIfUnset(vm)
+        if let refusal = sensitivityRefusal(for: vm) { throw SensitivityRefusal(refusal) }
         let firstBadges = attachments.map { AttachmentBadge($0) }
         let userEntryID = vm.appendMessage(.user, displayText, attachments: firstBadges)
         log.recordItem(sessionID, kind: "user", text: displayText, toolName: nil, argSummary: nil, output: nil, isError: false,
@@ -2208,18 +2266,26 @@ public final class AppTransport {
         turnRoute[sessionID] = RouteUse(model: profile.model, route: Self.routeLabel(profile))
         // Claude Code runs its own agent: the turn goes to the claude CLI, not to Vision's engine.
         if profile.kind == .claudeCode {
-            return try await claudeCodeTurn(vm, profile: profile, modelText: modelText, attachments: attachments,
+            // After a rewind Claude Code is told which files went back, as Vision's own engine is.
+            var text = modelText
+            if !vm.pendingModelNotes.isEmpty {
+                text = vm.pendingModelNotes.joined(separator: "\n\n") + "\n\n" + text
+                vm.pendingModelNotes = []
+            }
+            return try await claudeCodeTurn(vm, profile: profile, modelText: text, attachments: attachments,
                                             userEntryID: userEntryID)
         }
         let window = contextLimit(for: vm)
         let thinking = vm.thinking
         let skillState = self.skillState(for: vm)
         let unattended = isUnattended(vm)
-        let backups = backupProfiles(unattended: unattended, excluding: profile.routeID)
+        let backups = backupProfiles(unattended: unattended, excluding: profile.routeID, sensitive: vm.sensitive)
         let key = EngineKey(profile: profile, window: window, thinking: thinking, preset: vm.preset,
                             skills: skillState.signature, computerTools: config.computerToolsEnabled,
                             vision: visionOn(for: profile), vault: vault.revision, agents: agentsStamp(for: vm),
-                            backups: backups, servers: subagentServerEntries, unattended: unattended)
+                            backups: backups, servers: subagentServerEntries, unattended: unattended,
+                            mcp: mcpToolsRevision,
+                            sensitive: vm.sensitive ? (shieldOn ? "shield" : "private-only") : "")
         if let previous = engineKeys[sessionID], previous.profile.model != profile.model {
             vm.note("The server is now serving `\(profile.model)` (was `\(previous.profile.model)`) — switched to it, \(window.formatted())-token window.")
         }
@@ -2245,11 +2311,21 @@ public final class AppTransport {
         let sink = self
         let progress = RunProgress()
         let result: RunResult
+        // What the turn changes is recorded file by file, so it can be shown and rewound (see AppTransport+Checkpoints).
+        let checkpoint = turnCheckpoint(for: vm)
+        // After a rewind the model is told which files went back, in front of this message.
+        var modelText = modelText
+        if !vm.pendingModelNotes.isEmpty {
+            modelText = vm.pendingModelNotes.joined(separator: "\n\n") + "\n\n" + modelText
+            vm.pendingModelNotes = []
+        }
         do {
-            result = try await engine.run(messages: input, userText: modelText,
-                                          userAttachments: outgoing, progress: progress) { event in
-                Task { @MainActor in
-                    sink.apply(event, sessionID: sessionID)
+            result = try await TurnCheckpoint.$current.withValue(checkpoint) {
+                try await engine.run(messages: input, userText: modelText,
+                                     userAttachments: outgoing, progress: progress) { event in
+                    Task { @MainActor in
+                        sink.apply(event, sessionID: sessionID)
+                    }
                 }
             }
         } catch {
@@ -2311,10 +2387,12 @@ public final class AppTransport {
     }
 
     /// What a route takes besides text — what the composer's chips describe (pass the chat's own route; nil = the primary).
-    func attachmentRoute(for profile: ProviderProfile? = nil) -> AttachmentRoute {
+    func attachmentRoute(for profile: ProviderProfile? = nil, chat: SessionVM? = nil) -> AttachmentRoute {
         guard let profile = profile ?? config.activeProvider else { return .textOnly }
         var route = AttachmentRoute.of(effective(profile))
-        route.vision = route.vision && visionOn(for: profile)
+        route.vision = route.vision && visionOn(for: profile) && !sensitiveWithholdsPictures(chat, route: profile)
+        // A Sensitive chat's masked model reads files as text only: the shield can check text, not a PDF.
+        if sensitiveWithholdsPictures(chat, route: profile) { route.documents = false }
         return route
     }
 
@@ -2323,16 +2401,18 @@ public final class AppTransport {
     func prepareAttachments(_ attachments: [MessageAttachment], vm: SessionVM, entryID: String,
                                     profile: ProviderProfile, window: Int) async -> [MessageAttachment] {
         let store = attachmentStore(for: vm.id)
-        let route = attachmentRoute(for: profile)
+        let route = attachmentRoute(for: profile, chat: vm)
         let previous = vm.activity
         if attachments.contains(where: { $0.digest == nil }) { vm.activity = "Reading attachments…" }
         let prepared = await Task.detached(priority: .userInitiated) {
             AttachmentPrep.prepare(attachments, window: window, store: store)
         }.value
         vm.activity = previous
-        let badges = zip(prepared.badges, prepared.attachments).map { badge, attachment in
+        // How each one actually goes, after the route's limits (a picture past them goes as its text).
+        let deliveries = AttachmentWire.deliveries(for: prepared.attachments, route: route)
+        let badges = zip(prepared.badges, deliveries).map { badge, delivery in
             var badge = badge
-            badge.label += " · " + AttachmentWire.delivery(attachment, route: route).label
+            badge.label += " · " + delivery.label
             return badge
         }
         vm.setAttachments(entryID: entryID, badges)
@@ -2574,9 +2654,7 @@ public final class AppTransport {
             return
         }
         let lower = arg.lowercased()
-        for verb in ["new ", "generate ", "create "] where lower.hasPrefix(verb) {
-            let goal = String(arg.dropFirst(verb.count)).trimmingCharacters(in: .whitespaces)
-            guard !goal.isEmpty else { break }
+        if let goal = Self.skillGenerationGoal(arg) {
             runTasks[vm.id] = Task { await generateSkillFromChat(vm, goal: goal) }
             return
         }
@@ -2635,12 +2713,25 @@ public final class AppTransport {
     /// Ask the model to write a skill (optionally from a chat, or improving one).
     public func generateSkill(goal: String, from vm: SessionVM?, improving: String? = nil) async throws -> GeneratedSkill {
         guard let profile = await resolveRoute(vm) else { throw LLMError.noModel }
+        // From a chat, its whole conversation goes to the model: only where that chat's turns may go.
+        let client = try conversationClient(for: vm, profile: profile)
         if let vm, transcripts[vm.id] == nil { hydrate(vm) }
         let conversation = vm.flatMap { transcripts[$0.id] } ?? []
         let request = SkillGenerationRequest(goal: goal, conversation: conversation,
                                              existingNames: skills(for: vm).map(\.name), improving: improving)
-        return try await SkillGenerator.generate(client: ProviderClients.make(profile),
-                                                 model: profile.model, request: request)
+        return try await SkillGenerator.generate(client: client, model: profile.model, request: request)
+    }
+
+    /// The goal of `/skill new|generate|create <goal>` (nil for the other `/skill` words) — a skill written from the
+    /// chat, which sends the conversation to the model.
+    nonisolated static func skillGenerationGoal(_ arg: String?) -> String? {
+        guard let arg else { return nil }
+        let lower = arg.lowercased()
+        for verb in ["new ", "generate ", "create "] where lower.hasPrefix(verb) {
+            let goal = String(arg.dropFirst(verb.count)).trimmingCharacters(in: .whitespaces)
+            return goal.isEmpty ? nil : goal
+        }
+        return nil
     }
 
     /// `/skill new …`: write a skill from this chat and queue it for approval.
@@ -2658,6 +2749,8 @@ public final class AppTransport {
             let warn = generated.issues.filter { $0.severity >= .warning }.map(\.message)
             vm.note("📝 Drafted skill **\(draft.name)** — \(draft.description)\nIt is not active yet: open **Skills** under the composer to review, edit and approve it."
                     + (warn.isEmpty ? "" : "\nNotes: " + warn.joined(separator: " ")))
+        } catch let refusal as SensitivityRefusal {
+            vm.note(refusal.message, role: .error)
         } catch {
             vm.note("Couldn't write the skill: \(Self.describe(error))", role: .error)
         }
@@ -2805,7 +2898,8 @@ public final class AppTransport {
         guard profile != (retryRoute[sessionID] ?? engineKeys[sessionID]?.profile) else { return nil }
         retryRoute[sessionID] = profile
         let unattended = vm.map(isUnattended) ?? false
-        return (mainClient(profile, backups: backupProfiles(unattended: unattended, excluding: profile.routeID), sessionID: sessionID),
+        return (mainClient(profile, backups: backupProfiles(unattended: unattended, excluding: profile.routeID,
+                                                            sensitive: vm?.sensitive ?? false), sessionID: sessionID),
                 profile.model)
     }
 
@@ -2813,13 +2907,15 @@ public final class AppTransport {
 
     /// The routes that take over when the main model fails before answering, with their keys. Unattended work
     /// leaves out the ones whose plans allow interactive use only.
-    func backupProfiles(unattended: Bool = false, excluding routeID: String? = nil) -> [ProviderProfile] {
-        config.backupRoutes.filter { (!unattended || !$0.isInteractiveOnly) && $0.routeID != routeID }.map { route in
+    func backupProfiles(unattended: Bool = false, excluding routeID: String? = nil, sensitive: Bool = false) -> [ProviderProfile] {
+        let routes = config.backupRoutes.filter { (!unattended || !$0.isInteractiveOnly) && $0.routeID != routeID }.map { route in
             var profile = route
             let key = config.apiKey(for: route)
             profile.apiKey = key.isEmpty ? nil : key
             return profile
         }
+        // A Sensitive chat falls over only to models it may use.
+        return sensitive ? SensitivityPolicy.admittedBackups(routes, shieldOn: shieldOn) : routes
     }
 
     /// Whether a chat is doing unattended work: a queue task, a `/goal` that keeps going without the user, or
@@ -3006,8 +3102,9 @@ public final class AppTransport {
     private func summarize(sessionID: String, plan: Compaction.Plan) async -> String? {
         let vm = sessions.first { $0.id == sessionID }
         await resolveRoute(vm)
-        guard let profile = engineKeys[sessionID]?.profile ?? chatRoute(vm).map(effective) else { return nil }
-        return await Compaction.summarize(client: ProviderClients.make(profile), plan: plan, model: profile.model)
+        guard let profile = engineKeys[sessionID]?.profile ?? chatRoute(vm).map(effective),
+              let client = try? conversationClient(for: vm, profile: profile) else { return nil }
+        return await Compaction.summarize(client: client, plan: plan, model: profile.model)
     }
 
     /// Rewrite the session's display + persisted log so the summarized part is
