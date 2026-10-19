@@ -12,6 +12,19 @@ prompt on first launch — right-click the app and choose **Open**, or run:
 xattr -d com.apple.quarantine /Applications/Vision.app
 ```
 
+## What's new in 0.16.2 — copy any prompt, long chats load a page at a time
+
+- **Copy any prompt or reply.** Hover a message for its copy button, right-click it for **Copy Prompt** or **Copy
+  Reply**, or click it and press **⇧⌘C**. A prompt copies exactly as you sent it, a big paste included; the Prompts
+  timeline has the same button on every row.
+- **Long chats open fast and stay put.** The transcript shows the newest 50 messages. **Load earlier messages** at
+  the top (or just scrolling up to it) adds the ones before, and what you were reading stays where it is.
+- **New output follows you only while you're at the end.** Scroll up to read and nothing moves under you; **Latest**
+  brings you back.
+- **Jump from Prompts finds any prompt**, however far back: the chat loads the messages around it and flashes it.
+- **Very long messages fold.** Anything over 40 lines shows its first lines with **Show more**; a huge one opens in
+  its own scrolling box.
+
 ## What's new in 0.16.1 — fixes from the 0.16.0 review
 
 - **Signing in to Guardian again renews the Guardian model routes too**, and signing out clears them, so chats on

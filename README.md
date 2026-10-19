@@ -431,6 +431,21 @@ unterminated fence while a response is still streaming.
 The composer sends on ↩ and inserts a newline on ⇧↩. The **+** menu attaches an image or a file (or drop
 files on the composer). Files the turn touched appear as chips that jump straight to the editor.
 
+**Copy any message.** Hover a prompt or a reply for its copy button, right-click it for **Copy Prompt** /
+**Copy Reply**, or click it and press **⇧⌘C** (Edit ▸ Copy Message — with nothing clicked, the last prompt you
+sent). A prompt copies exactly as it was sent: a big paste that went as a chip comes with it, and a `/goal`
+copies as the goal you wrote.
+
+### Long chats
+
+The transcript draws a page at a time. A chat opens on its newest 50 rows; **Load earlier messages · 1,950
+more above** at the top — or just scrolling up to it — adds the page above, and the row you were reading
+stays exactly where it was. At most 150 rows are drawn at once, so further back **Load newer messages** and
+**Latest · N newer** bring you down again. At the end, new output scrolls into view; scroll up to read and
+nothing moves under you until you come back. **Jump** from Prompts draws the page around that prompt, centres
+it and flashes it. A message over 40 lines shows its first 20 with **Show more**; opened, a very long one sits
+in a scrolling view of its own, so it never decides how the transcript scrolls.
+
 ### Attachments
 
 Vision reads every attachment itself, so a model server never gets a part it can't take: text, Markdown,
@@ -484,8 +499,9 @@ a plan**; drag its edge to resize it.
 **⇧⌘H** — or **Prompts** in the toolbar, or the line under the last result — lists every prompt the chat
 has sent, newest first under day headings: when, what, and how it ended (**Completed with results**,
 Completed, Finished with issues, Needs you, Failed, Stopped, Running, Queued), how long it took against its
-estimate, attempts and evidence. Search it; open a prompt to **Copy** it, **Add to composer** (a quote
-with when it ran and how it ended, to talk about it), **Jump** (the chat scrolls to it and flashes it) or
+estimate, attempts and evidence. Search it; hover a prompt to copy it (exactly as sent, pastes included), or
+open it to **Copy** it, **Add to composer** (a quote with when it ran and how it ended, to talk about it),
+**Jump** (the chat draws the page around it, scrolls to it and flashes it) or
 see its **Results** — timing, attempts, rounds, kind, the model and server it ran on, tokens, the evidence
 and the completion notes. **All Prompts** (⌥⇧⌘H) does the same across every chat on this Mac, filterable
 by outcome. The timeline is kept per chat in `prompt-timeline/<chat id>.json`; chats from before it existed
@@ -724,7 +740,7 @@ VisionMacApp/              SwiftUI
 swift test
 ```
 
-1,736 tests (1,498 on the harness core, 238 on the app host): the engine loop (tool round-trips, denials, iteration budget, usage accounting,
+1,771 tests (1,498 on the harness core, 273 on the app host): the engine loop (tool round-trips, denials, iteration budget, usage accounting,
 cancellation), permission containment, the Qwen XML fallback, glob, markdown, plugin interpolation
 and quoting, prompt assembly, editor-buffer conflict resolution, 34 over the terminal emulator, and 8
 that spawn a real shell on a real pty and assert on what lands on the screen — plus the fleet (server
@@ -746,6 +762,8 @@ uses, checked on the wire. Also: each model's request rules and the safety net a
 error bodies, Z.ai's errors and key diagnosis, each chat's own model with two chats at once, attachments read
 from real PDFs (text and scanned), Office files and pictures and the exact payload each kind of server gets,
 a 10,000-line paste sent in parts and queued with a task, the paste rule through AppKit's own paste path,
+the paged transcript (pages loading by scroll and by click, the reader's row kept in place, following the end,
+jumps) and Copy (a prompt exactly as sent, its pastes, goals and their rounds, ⇧⌘C),
 validation sending a goal back and the no-progress stop, screen control's planner and arbiter against a fake
 machine, OpenClaw import and export against made-up installs (and read-only against a real one), and the
 Guardian contract — browser sign-in with PKCE through the loopback, organizations, limits, refusals, the
