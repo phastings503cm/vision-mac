@@ -24,6 +24,8 @@ public enum SlashCommand: Equatable, Sendable {
     case queue
     /// The model servers subagents run on, how busy each is, and what is running.
     case agents
+    /// Show or limit which apps this chat may control ("only [apps]", "any", "default").
+    case control(String?)
     case help
 
     public struct Info: Sendable {
@@ -45,6 +47,7 @@ public enum SlashCommand: Equatable, Sendable {
         .init(usage: "/skill <name>|new <what>", summary: "Select/deselect a skill for this chat, or have the model write a new one"),
         .init(usage: "/queue", summary: "Start the task queue — it works queued tasks one at a time, unattended"),
         .init(usage: "/agents", summary: "Show the model servers subagents run on, how busy each is, and what is running now"),
+        .init(usage: "/control only [apps]|any|default", summary: "Limit this chat to controlling the apps it starts (and ones you name), or let it control any app"),
         .init(usage: "/help", summary: "List commands"),
     ]
 
@@ -64,6 +67,7 @@ public enum SlashCommand: Equatable, Sendable {
         case "/skill": return .skill(arg)
         case "/queue": return .queue
         case "/agents", "/fleet", "/servers": return .agents
+        case "/control": return .control(arg)
         case "/help", "/?", "/commands": return .help
         default: return nil
         }

@@ -123,7 +123,7 @@ public enum ComputerAccess: String, Sendable, Hashable, CaseIterable {
     public static func forTool(_ name: String) -> ComputerAccess? {
         switch name {
         case "screenshot", "list_windows", "screen_watch", "ui_tree", "inspect_process", "view_image": .observe
-        case "mouse", "keyboard", "focus_app": .control
+        case "mouse", "keyboard", "focus_app", "ui_action": .control
         default: nil
         }
     }
@@ -133,7 +133,7 @@ public enum ComputerAccess: String, Sendable, Hashable, CaseIterable {
         case .observe:
             "Screen access — the agent wants to look at your screen: screenshots of apps and windows, window titles, and process details. What it captures is sent to the model. Allowing covers the rest of this chat."
         case .control:
-            "Computer control — the agent wants to move the mouse, click, type, and bring apps to the front, acting as you. Allowing covers the rest of this chat. Press ⌘. to stop it at any time."
+            "Computer control — the agent wants to press buttons, type, click and bring apps to the front, acting as you. It works in the background when it can and waits its turn for your mouse otherwise. Allowing covers the rest of this chat. Press ⌘. to stop this chat, or ⌃⌥⌘. in any app to stop all control."
         }
     }
 }

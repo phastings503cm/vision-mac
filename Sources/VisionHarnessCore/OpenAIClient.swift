@@ -132,6 +132,7 @@ public struct OpenAIClient: LLMClient {
             throw certificateError(error, url: url)
         }
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            if let refusal = Self.guardianRefusal(http, body: data) { throw refusal }
             throw LLMError.http(http.statusCode, String(decoding: data, as: UTF8.self))
         }
         guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -347,6 +348,9 @@ public struct OpenAIClient: LLMClient {
             if http.statusCode == 413 {
                 throw LLMError.overflow(limit: 0, detail: "request too large for the server (HTTP 413)")
             }
+            // Guardian's proxy refusing with its structured body (a spent budget, a missing module): plain words, a
+            // dialog, and no retrying what can't change.
+            if let refusal = Self.guardianRefusal(http, body: errData) { throw refusal }
             // Z.ai's prompt-too-long business code.
             if ParameterRejection.businessCode(in: body) == "1261", KnownProvider.of(profile) == .zai {
                 throw LLMError.overflow(limit: 0, detail: "Z.ai: prompt too long (1261)")
@@ -496,6 +500,8 @@ public struct OpenAIClient: LLMClient {
 
         // An error reported mid-stream (vLLM: {"object":"error",…}; others:
         // {"error":{…}}) — surface it instead of ending with an empty reply.
+        // Guardian's proxy refusing mid-stream (a budget that ran out): its structured body.
+        if obj["choices"] == nil, obj["error"] is String, let refusal = Self.guardianRefusal(inBody: obj, data: data) { throw refusal }
         if obj["error"] != nil || obj["choices"] == nil, let (code, message) = Self.streamError(in: obj) {
             if let limit = Self.overflowLimit(in: message) {
                 throw LLMError.overflow(limit: limit, detail: message)
@@ -541,6 +547,7 @@ public struct OpenAIClient: LLMClient {
                         onText: @Sendable (String) -> Void) throws {
         guard let data = body.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        if obj["choices"] == nil, obj["error"] is String, let refusal = Self.guardianRefusal(inBody: obj, data: data) { throw refusal }
         if obj["choices"] == nil, let (code, message) = Self.streamError(in: obj) {
             if let limit = Self.overflowLimit(in: message) { throw LLMError.overflow(limit: limit, detail: message) }
             throw LLMError.http(code == 500 ? (status ?? 500) : code, message)
@@ -989,5 +996,27 @@ public enum ReasoningEcho {
         guard let state, state.hasPrefix(prefix) else { return nil }
         let text = String(state.dropFirst(prefix.count))
         return text.isEmpty ? nil : text
+    }
+}
+
+extension OpenAIClient {
+    /// A Guardian structured refusal (harness-api-contract.md, "Errors and limits") as an error the engine won't
+    /// retry (unless it is a short rate limit), reported for the app's dialog. Nil for any other server's error.
+    /// A refusal Guardian put inside a stream or a 200 body (`status` rides in the body there).
+    static func guardianRefusal(inBody object: [String: Any], data: Data) -> LLMError? {
+        let status = (object["status"] as? Int) ?? ((object["error"] as? String) == "rate_limited" ? 429 : 402)
+        guard let problem = GuardianProblem.parse(status: status, body: data) else { return nil }
+        GuardianProblems.report(problem)
+        return .rejected(status: status, message: problem.oneLine(), body: String(decoding: data.prefix(2_000), as: UTF8.self),
+                         permanent: !problem.isTransient)
+    }
+
+    static func guardianRefusal(_ response: HTTPURLResponse, body: Data) -> LLMError? {
+        var headers: [String: String] = [:]
+        for (key, value) in response.allHeaderFields { headers["\(key)"] = "\(value)" }
+        guard let problem = GuardianProblem.parse(status: response.statusCode, body: body, headers: headers) else { return nil }
+        GuardianProblems.report(problem)
+        return .rejected(status: response.statusCode, message: problem.oneLine(), body: String(decoding: body.prefix(2_000), as: UTF8.self),
+                         permanent: !problem.isTransient)
     }
 }

@@ -26,6 +26,12 @@ struct SettingsView: View {
             SkillsManagerView()
                 .tabItem { Label("Skills", systemImage: "graduationcap") }
                 .tag(SettingsTab.skills)
+            ComputerSettings()
+                .tabItem { Label("Computer", systemImage: "cursorarrow.click.2") }
+                .tag(SettingsTab.computer)
+            ImportExportSettings()
+                .tabItem { Label("Import & Export", systemImage: "arrow.left.arrow.right.square") }
+                .tag(SettingsTab.importExport)
             PluginSettings()
                 .tabItem { Label("Plugins", systemImage: "puzzlepiece.extension") }
                 .tag(SettingsTab.plugins)

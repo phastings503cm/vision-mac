@@ -20,7 +20,8 @@ import VisionHarnessCore
 //   --snapshot <folder>         where the PNGs go (or VISION_SNAPSHOT_DIR)
 //   --snapshot-scenes a,b       only these scenes (by default the README's: chat, code, setup, settings-models,
 //                               prompts, tasks, activity, all-prompts, code-focus, code-chat; and, only when named,
-//                               zai-guide, chat-kimi, settings-zai-route, chat-attachments and attachment-preview)
+//                               zai-guide, chat-kimi, settings-zai-route, chat-attachments, attachment-preview,
+//                               settings-computer, settings-import, settings-guardian-signin, settings-guardian, glow)
 //   --snapshot-live <profile>   run the chat for real first, on Amazon Bedrock with this AWS profile, and save what
 //                               happened as chat-transcript.json (the seeded chat is made from such a run)
 //   --snapshot-region <region>  the live run's Region (default us-west-2)
@@ -53,6 +54,15 @@ enum Snapshot {
         case attachments = "chat-attachments"
         /// The pasted-text chip opened: what the model will get, editable.
         case attachmentPreview = "attachment-preview"
+        /// Settings ▸ Computer: screen control in the background first, the waiting line, the global stop.
+        case computer = "settings-computer"
+        /// Settings ▸ Import & Export over a made-up OpenClaw in the throwaway home folder.
+        case importExport = "settings-import"
+        /// Settings ▸ Guardian signed out (the browser sign-in) and signed in (org, limits, vault).
+        case guardianSignIn = "settings-guardian-signin"
+        case guardian = "settings-guardian"
+        /// The machine-in-use glow's border and pill, with two chats sharing the Mac.
+        case glow
 
         /// What a plain `--snapshot` run takes (the README's pictures).
         static let standard: [Scene] = [.chat, .code, .setup, .models, .prompts, .tasks, .activity, .allPrompts,
@@ -247,9 +257,10 @@ enum Snapshot {
             window.makeKeyAndOrderFront(nil)
             await pause(scene == .code ? 3.0 : 1.5)
             let file = options.output.appendingPathComponent("\(scene.rawValue).png")
+            let shot = scene == .glow ? (glowWindow ?? window) : window
             do {
-                let image = try await capture(window)
-                try png(image, points: window.frame.size).write(to: file, options: .atomic)
+                let image = try await capture(shot)
+                try png(image, points: shot.frame.size).write(to: file, options: .atomic)
                 note("\(scene.rawValue): \(image.width)x\(image.height) → \(file.path)")
             } catch {
                 note("\(scene.rawValue): FAILED — \(error.localizedDescription)")
@@ -394,7 +405,52 @@ enum Snapshot {
                 await pause(2.0)
                 model.pendingAttachmentPreview = "pasted-text.txt"
             }
+        case .computer:
+            model.mode = .chat
+            model.settingsTab = .computer
+            model.showSettings = true
+        case .glow:
+            glowWindow = showGlowPreview()
+        case .guardianSignIn:
+            model.mode = .chat
+            model.settingsTab = .guardian
+            model.showSettings = true
+        case .guardian:
+            model.guardian.seedSnapshotAccount()
+            model.mode = .chat
+            model.settingsTab = .guardian
+            model.showSettings = true
+        case .importExport:
+            SnapshotSeed.writeOpenClaw(home: model.transport.skillLocations.home)
+            ImportExportSettings.previewOnAppear = true
+            model.mode = .chat
+            model.settingsTab = .importExport
+            model.showSettings = true
+            await pause(2.0)
         }
+    }
+
+    /// The glow drawn in a window of its own (the real one is a click-through panel over the whole screen, which a
+    /// window capture can't take): a dark desk, the border, and the pill as two chats sharing the Mac see it.
+    private static var glowWindow: NSWindow?
+
+    private static func showGlowPreview() -> NSWindow {
+        let size = NSSize(width: 1100, height: 300)
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.backgroundColor = NSColor(calibratedRed: 0.10, green: 0.11, blue: 0.13, alpha: 1)
+        let model = MachineGlowModel()
+        model.text = GlowStatus.pill(
+            control: ControlSnapshot(holder: ControlHolder(id: "a", chatID: "a", label: "Fix the Godot build"),
+                                     waiting: [ControlHolder(id: "b", chatID: "b", label: "File the expense report")]),
+            work: [])
+        window.contentView = NSHostingView(rootView: MachineGlowView(model: model)
+            .frame(width: size.width, height: size.height)
+            .background(Color(red: 0.10, green: 0.11, blue: 0.13)))
+        window.center()
+        window.orderFrontRegardless()
+        return window
     }
 
     /// Open the chat the pictures are about; the seeded one gets back what a stored chat doesn't keep.
@@ -415,6 +471,13 @@ enum Snapshot {
                let main = model.config.activeRoute {
                 model.transport.setRoute(main, for: vm)
             }
+        case .computer, .importExport, .guardianSignIn: model.showSettings = false
+        case .guardian:
+            model.showSettings = false
+            model.guardian.signOut()
+        case .glow:
+            glowWindow?.orderOut(nil)
+            glowWindow = nil
         case .code:
             model.mode = .chat
             setSidebarCollapsed(false, in: window)

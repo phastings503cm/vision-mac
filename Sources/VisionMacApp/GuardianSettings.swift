@@ -1,13 +1,22 @@
 import SwiftUI
+import AppKit
 import VisionHarnessCore
 
-/// Settings ▸ Guardian: sign in with the guardian.503cm.com login, and the
-/// syncs that follow from it — prompts (automatic on submit), skills both
-/// ways, chats exported and imported, code projects uploaded to the account's
-/// repo store.
+/// Settings ▸ Guardian: sign in with the guardian.503cm.com login — in the browser (Entra SSO, passwordless) or
+/// with email, password and 2FA — pick the organization, see the limits, and the syncs that follow: prompts
+/// (automatic on submit), skills both ways, chats exported and picked back, the vault's "Usable in Vision"
+/// secrets, code projects.
 struct GuardianSettings: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        GuardianSettingsForm(guardian: model.guardian)
+    }
+}
+
+struct GuardianSettingsForm: View {
+    @Environment(AppModel.self) private var model
+    @ObservedObject var guardian: GuardianService
 
     @State private var address = GuardianService.defaultURL
     @State private var email = ""
@@ -18,72 +27,22 @@ struct GuardianSettings: View {
     @State private var isSyncingSkills = false
     @State private var isExporting = false
     @State private var isImporting = false
+    @State private var chatPicker: [ChatChoice]?
+    @State private var showPassword = false
+
+    struct ChatChoice: Identifiable, Hashable {
+        var id: String
+        var title: String
+        var updatedAt: Date
+        var picked: Bool
+    }
 
     var body: some View {
         Form {
-            Section("Account") {
-                if model.guardian.isSignedIn {
-                    HStack {
-                        Image(systemName: "checkmark.seal.fill").foregroundStyle(Theme.successTint)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Signed in as \(model.guardian.accountEmail ?? "")")
-                            Text("Prompts you send in chats sync to Guardian's history automatically.")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button("Sign Out", role: .destructive) { model.guardian.signOut() }
-                    }
-                } else if model.guardian.pendingTwoFactorChallenge != nil {
-                    // A sign-in is waiting on the authenticator code.
-                    TextField("Email", text: $email)
-                        .autocorrectionDisabled()
-                    HStack {
-                        TextField("6-digit code", text: $twoFactorCode)
-                            .autocorrectionDisabled()
-                            .onSubmit { Task { await submitTwoFactor() } }
-                        Button {
-                            Task { await submitTwoFactor() }
-                        } label: {
-                            if signingIn { ProgressView().controlSize(.small) } else { Text("Verify") }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(signingIn || twoFactorCode.count != 6)
-                        if let status { Text(status).font(.caption).foregroundStyle(.secondary) }
-                    }
-                    Text("Enter the 6-digit code from your authenticator app. Codes rotate every 30 seconds.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Button("Start over") {
-                        model.guardian.cancelTwoFactor()
-                        twoFactorCode = ""
-                        status = nil
-                    }
-                    .font(.caption)
-                } else {
-                    TextField("Guardian address", text: $address)
-                        .autocorrectionDisabled()
-                    TextField("Email", text: $email)
-                        .autocorrectionDisabled()
-                    SecureField("Password", text: $password)
-                    HStack {
-                        Button {
-                            signingIn = true
-                            status = nil
-                            Task {
-                                let ok = await model.guardian.signIn(address: address, email: email, password: password)
-                                signingIn = false
-                                status = ok ? "Signed in." : (model.guardian.lastError ?? "Sign-in failed.")
-                                if ok { password = "" }
-                            }
-                        } label: {
-                            if signingIn { ProgressView().controlSize(.small) } else { Text("Sign In") }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(signingIn || email.isEmpty || password.isEmpty)
-                        if let status { Text(status).font(.caption).foregroundStyle(.secondary) }
-                    }
-                    Text("Your password is exchanged for a session token and never stored — the token lives in your Keychain and calls only guardian endpoints you sign in to.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
+            accountSection
+            if guardian.isSignedIn {
+                limitsSection
+                vaultSection
             }
 
             Section("Skills") {
@@ -97,11 +56,11 @@ struct GuardianSettings: View {
                     } label: {
                         if isSyncingSkills { ProgressView().controlSize(.small) } else { Text("Import skills from Guardian") }
                     }
-                    .disabled(!model.guardian.isSignedIn || isSyncingSkills)
+                    .disabled(!guardian.isSignedIn || isSyncingSkills)
                     Button("Deposit this project's skills") {
                         Task { await depositSkills() }
                     }
-                    .disabled(!model.guardian.isSignedIn)
+                    .disabled(!guardian.isSignedIn)
                 }
                 Text("A skill imported here is a copy; depositing publishes the project's .vision/skills to the account, where any Vision harness can take it.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -115,31 +74,332 @@ struct GuardianSettings: View {
                     } label: {
                         if isExporting { ProgressView().controlSize(.small) } else { Text("Export all chats to Guardian") }
                     }
-                    .disabled(!model.guardian.isSignedIn || isExporting)
-                    Button("Import a chat from Guardian…") {
+                    .disabled(!guardian.isSignedIn || isExporting)
+                    Button("Import chats from Guardian…") {
                         isImporting = true
-                        Task { await importChats() }
+                        Task { await loadChatChoices() }
                     }
-                    .disabled(!model.guardian.isSignedIn || isImporting)
+                    .disabled(!guardian.isSignedIn || isImporting)
                 }
-                Text("Exported chats appear in Guardian under your account; importing them back restores them into this app's chat list.")
+                Text("Exported chats appear in Guardian under your account; pick the ones to bring back into this app's chat list.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
-            Section("Code projects") {
-                Button("Upload the open project to Guardian") {
-                    Task { await uploadProject() }
-                }
-                .disabled(!model.guardian.isSignedIn || model.project == nil)
-                Text("The project's text files go to your account's private repo store — Guardian's own place for code, whatever GitHub it may or may not have — from where the AI Coders module can be pointed at it.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
+            projectsSection
 
             if let status {
                 Section { Text(status).font(.caption).foregroundStyle(.secondary) }
             }
         }
         .formStyle(.grouped)
+        .sheet(item: Binding(get: { chatPicker.map { ChatPickerItem(choices: $0) } }, set: { chatPicker = $0?.choices })) { item in
+            chatPickerSheet(item.choices)
+        }
+        .guardianProblemAlert(guardian)
+        .task {
+            if guardian.isSignedIn, guardian.account == nil { await guardian.refreshAccount() }
+        }
+    }
+
+    struct ChatPickerItem: Identifiable {
+        var choices: [ChatChoice]
+        var id: String { "chats" }
+    }
+
+    // MARK: Account
+
+    @ViewBuilder
+    private var accountSection: some View {
+        Section("Account") {
+            if guardian.isSignedIn {
+                HStack {
+                    Image(systemName: "checkmark.seal.fill").foregroundStyle(Theme.successTint)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Signed in as \(guardian.account?.name.map { "\($0) (\(guardian.accountEmail ?? ""))" } ?? guardian.accountEmail ?? "")")
+                        Text("Prompts you send in chats sync to Guardian's history automatically, with how each turn ended.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Refresh") { Task { await guardian.refreshAccount() } }
+                    Button("Sign Out", role: .destructive) { guardian.signOut() }
+                }
+                if let account = guardian.account, !account.orgs.isEmpty {
+                    Picker("Organization", selection: Binding(
+                        get: { guardian.orgID ?? account.activeOrg?.id ?? "" },
+                        set: { guardian.setOrg($0 == account.activeOrg?.id && guardian.orgID == nil ? nil : $0) })) {
+                        ForEach(account.orgs) { org in
+                            Text(org.name + (org.active == true ? " (default)" : "")).tag(org.id)
+                        }
+                    }
+                    Text("Vision works in this organization: its models, its limits, your access there. "
+                         + (account.modules.isEmpty ? "" : "Modules you have: \(account.modules.joined(separator: ", "))."))
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let error = guardian.lastError {
+                    Text(error).font(.caption).foregroundStyle(.orange)
+                }
+            } else if guardian.pendingTwoFactorChallenge != nil {
+                // A sign-in is waiting on the authenticator code.
+                TextField("Email", text: $email)
+                    .autocorrectionDisabled()
+                HStack {
+                    TextField("6-digit code", text: $twoFactorCode)
+                        .autocorrectionDisabled()
+                        .onSubmit { Task { await submitTwoFactor() } }
+                    Button {
+                        Task { await submitTwoFactor() }
+                    } label: {
+                        if signingIn { ProgressView().controlSize(.small) } else { Text("Verify") }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(signingIn || twoFactorCode.count != 6)
+                    if let status { Text(status).font(.caption).foregroundStyle(.secondary) }
+                }
+                Text("Enter the 6-digit code from your authenticator app. Codes rotate every 30 seconds.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Start over") {
+                    guardian.cancelTwoFactor()
+                    twoFactorCode = ""
+                    status = nil
+                }
+                .font(.caption)
+            } else {
+                TextField("Guardian address", text: $address)
+                    .autocorrectionDisabled()
+                HStack {
+                    if guardian.browserSignInRunning {
+                        ProgressView().controlSize(.small)
+                        Text("Finish signing in in the browser window that opened…").font(.callout)
+                        Spacer()
+                        Button("Cancel") { guardian.cancelBrowserSignIn() }
+                    } else {
+                        Button {
+                            status = nil
+                            guardian.startBrowserSignIn(address: address)
+                        } label: {
+                            Label("Sign In with Guardian in the Browser", systemImage: "safari")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        Spacer()
+                    }
+                }
+                Text("For Microsoft (Entra) sign-in and passwordless accounts: Guardian opens in your browser, you pick the organization there, and it hands this Mac a revocable token. Nothing is typed into \(AppIdentity.name).")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let error = guardian.lastError, !guardian.browserSignInRunning {
+                    Text(error).font(.caption).foregroundStyle(.orange)
+                }
+                DisclosureGroup("Or sign in with your email and password", isExpanded: $showPassword) {
+                    TextField("Email", text: $email)
+                        .autocorrectionDisabled()
+                    SecureField("Password", text: $password)
+                    HStack {
+                        Button {
+                            signingIn = true
+                            status = nil
+                            Task {
+                                let ok = await guardian.signIn(address: address, email: email, password: password)
+                                signingIn = false
+                                status = ok ? "Signed in." : (guardian.pendingTwoFactorChallenge != nil ? nil : (guardian.lastError ?? "Sign-in failed."))
+                                if ok || guardian.pendingTwoFactorChallenge != nil { password = "" }
+                            }
+                        } label: {
+                            if signingIn { ProgressView().controlSize(.small) } else { Text("Sign In") }
+                        }
+                        .disabled(signingIn || email.isEmpty || password.isEmpty)
+                        if let status { Text(status).font(.caption).foregroundStyle(.secondary) }
+                    }
+                    Text("Your password is exchanged for a session token and never stored — the token lives in your Keychain. Accounts with two-factor sign-in are asked for the code next.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    // MARK: Limits
+
+    private var limitsSection: some View {
+        Section("Limits") {
+            if guardian.limits.isEmpty {
+                Text("No spend or token limits are set for your account in this organization.")
+                    .font(.callout).foregroundStyle(.secondary)
+            } else {
+                ForEach(guardian.limits, id: \.self) { limit in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(limit.title)
+                            Spacer()
+                            Text(limit.usage ?? "—").foregroundStyle(.secondary)
+                        }
+                        if let fraction = limit.fraction {
+                            ProgressView(value: fraction)
+                                .tint(fraction >= 1 ? .red : fraction >= 0.8 ? .orange : .accentColor)
+                        }
+                        if let reset = limit.resetPhrase() {
+                            Text(reset.prefix(1).uppercased() + reset.dropFirst()).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+            Text("Set by your Guardian organization. When one runs out, chats stop with a message saying which limit and when it resets.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: Vault
+
+    private var vaultSection: some View {
+        Section("Guardian vault") {
+            if guardian.remoteSecrets.isEmpty {
+                HStack {
+                    Text("Secrets you mark “Usable in Vision” in Guardian can be used here, one at a time.")
+                        .font(.callout).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Show My Secrets") { Task { await guardian.loadSecrets() } }
+                }
+            } else {
+                ForEach(guardian.remoteSecrets) { secret in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(secret.name)
+                            Text("{{vault:\(GuardianService.vaultName(secret))}}" + (secret.description.map { " · \($0)" } ?? ""))
+                                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                        Spacer()
+                        if guardian.secretsInUse.contains(secret.id) {
+                            Button("Stop Using") { guardian.stopUsingSecret(secret) }
+                        } else {
+                            Button("Use in Vision") { Task { await guardian.useSecret(secret) } }
+                        }
+                    }
+                }
+            }
+            Text("Using a secret fetches its value from Guardian (which records each hand-out) and keeps it in memory for this run only — never on disk. Chats ask before their first use.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // MARK: Projects
+
+    private var projectsSection: some View {
+        Section("Code projects") {
+            HStack {
+                Button("Upload the open project to Guardian") {
+                    Task { await uploadProject() }
+                }
+                .disabled(!guardian.isSignedIn || model.project == nil)
+                Button("Show My Projects") { Task { await guardian.loadProjects() } }
+                    .disabled(!guardian.isSignedIn)
+            }
+            ForEach(guardian.remoteProjects) { project in
+                HStack {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(project.name)
+                        Text([project.fileCount.map { "\($0) files" }, project.updatedAt.map { "updated \($0.formatted(date: .abbreviated, time: .shortened))" },
+                              project.aiCoders == true ? "in AI Coders" : nil].compactMap { $0 }.joined(separator: " · "))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Download a Copy…") { Task { await download(project) } }
+                }
+            }
+            Text("The project's text files go to your account's private repo store, from where the AI Coders module can be pointed at it.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private func download(_ project: GuardianProject) async {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Download Here"
+        panel.message = "Choose where to put a copy of \(project.name)."
+        guard panel.runModal() == .OK, let folder = panel.url else { return }
+        if let root = await guardian.downloadProject(project, into: folder) {
+            status = "Downloaded \(project.name) to \((root.path as NSString).abbreviatingWithTildeInPath)."
+        }
+    }
+
+    // MARK: The chat picker
+
+    private func loadChatChoices() async {
+        defer { isImporting = false }
+        guard let client = guardian.client else { return }
+        do {
+            let remote = try await client.chats()
+            let local = Set(model.transport.sessions.map(\.id))
+            if remote.isEmpty {
+                status = "Guardian holds no exported chats yet."
+                return
+            }
+            chatPicker = remote.sorted { $0.updatedAt > $1.updatedAt }.map {
+                ChatChoice(id: $0.id, title: $0.title, updatedAt: $0.updatedAt, picked: false)
+            }.filter { !local.contains($0.id) }
+            if chatPicker?.isEmpty == true {
+                chatPicker = nil
+                status = "Every chat Guardian holds is already in this app."
+            }
+        } catch {
+            status = (error as? GuardianError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    private func chatPickerSheet(_ choices: [ChatChoice]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Import chats from Guardian").font(.headline).padding(14)
+            Divider()
+            List {
+                ForEach(choices) { choice in
+                    Toggle(isOn: Binding(
+                        get: { chatPicker?.first { $0.id == choice.id }?.picked ?? false },
+                        set: { on in
+                            if let index = chatPicker?.firstIndex(where: { $0.id == choice.id }) { chatPicker?[index].picked = on }
+                        })) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(choice.title.isEmpty ? "Untitled chat" : choice.title)
+                            Text(choice.updatedAt.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            .frame(minHeight: 260)
+            Divider()
+            HStack {
+                Button("Tick All") { chatPicker = chatPicker?.map { var c = $0; c.picked = true; return c } }
+                Spacer()
+                Button("Cancel") { chatPicker = nil }
+                Button("Import \(chatPicker?.filter(\.picked).count ?? 0) Chats") {
+                    let picked = chatPicker?.filter(\.picked) ?? []
+                    chatPicker = nil
+                    Task { await importChats(picked) }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled((chatPicker?.filter(\.picked).isEmpty) ?? true)
+            }
+            .padding(14)
+        }
+        .frame(width: 520, height: 420)
+    }
+
+    private func importChats(_ picked: [ChatChoice]) async {
+        guard let client = guardian.client else { return }
+        var imported = 0
+        do {
+            for chat in picked {
+                let payload = try await client.chat(id: chat.id)
+                Self.restoreChat(id: chat.id, title: chat.title, updatedAt: chat.updatedAt, payload: payload, transport: model.transport)
+                imported += 1
+            }
+            model.transport.reload()
+            status = "Imported \(imported) chat\(imported == 1 ? "" : "s") from Guardian."
+        } catch {
+            status = (error as? GuardianError)?.errorDescription ?? error.localizedDescription
+        }
     }
 
     // MARK: Actions
@@ -149,18 +409,18 @@ struct GuardianSettings: View {
         guard !twoFactorCode.isEmpty else { return }
         signingIn = true
         status = nil
-        let ok = await model.guardian.verifyTwoFactor(code: twoFactorCode)
+        let ok = await guardian.verifyTwoFactor(code: twoFactorCode)
         signingIn = false
         if ok {
             twoFactorCode = ""
             status = "Signed in."
         } else {
-            status = model.guardian.lastError ?? "That code didn't take — codes rotate every 30 seconds."
+            status = guardian.lastError ?? "That code didn't take — codes rotate every 30 seconds."
         }
     }
 
     private func syncSkillsDown() async {
-        guard let client = model.guardian.client else { return }
+        guard let client = guardian.client else { return }
         do {
             let remote = try await client.skills()
             let locations = model.transport.skillLocations
@@ -183,7 +443,7 @@ struct GuardianSettings: View {
     }
 
     private func depositSkills() async {
-        guard let client = model.guardian.client, let project = model.project else { return }
+        guard let client = guardian.client, let project = model.project else { return }
         let folder = AppPaths.projectFolder(project, "skills")
         let fileManager = FileManager.default
         guard let entries = try? fileManager.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isDirectoryKey]) else {
@@ -215,7 +475,7 @@ struct GuardianSettings: View {
     }
 
     private func exportChats() async {
-        guard let client = model.guardian.client else { return }
+        guard let client = guardian.client else { return }
         let log = model.transport.log
         let sessions = model.transport.sessions
         var exported = 0
@@ -235,27 +495,8 @@ struct GuardianSettings: View {
         isExporting = false
     }
 
-    private func importChats() async {
-        guard let client = model.guardian.client else { return }
-        do {
-            let remote = try await client.chats()
-            status = remote.isEmpty
-                ? "Guardian holds no exported chats yet."
-                : "Guardian holds \(remote.count) chat\(remote.count == 1 ? "" : "s") — importing the 20 most recent."
-            for chat in remote.prefix(20) {
-                let payload = try await client.chat(id: chat.id)
-                Self.restoreChat(id: chat.id, title: chat.title, updatedAt: chat.updatedAt, payload: payload,
-                                 transport: model.transport)
-            }
-            model.transport.reload()
-        } catch {
-            status = (error as? GuardianError)?.errorDescription ?? error.localizedDescription
-        }
-        isImporting = false
-    }
-
     private func uploadProject() async {
-        guard let client = model.guardian.client, let project = model.project else { return }
+        guard let client = guardian.client, let project = model.project else { return }
         var files: [String: String] = [:]
         if let enumerator = FileManager.default.enumerator(at: project, includingPropertiesForKeys: nil) {
             while let next = enumerator.nextObject() {
@@ -365,3 +606,27 @@ struct GuardianSettings: View {
     }
 
 }
+
+// MARK: - The dialog for Guardian's refusals
+
+extension View {
+    /// Show Guardian's structured refusals (a missing module or permission, a spent budget) as a dialog naming what
+    /// is missing and who can grant it, or which limit and when it resets.
+    func guardianProblemAlert(_ guardian: GuardianService) -> some View {
+        modifier(GuardianProblemAlert(guardian: guardian))
+    }
+}
+
+private struct GuardianProblemAlert: ViewModifier {
+    @ObservedObject var guardian: GuardianService
+
+    func body(content: Content) -> some View {
+        content.alert(guardian.problem?.title ?? "Guardian", isPresented: Binding(
+            get: { guardian.problem != nil }, set: { if !$0 { guardian.problem = nil } })) {
+            Button("OK") { guardian.problem = nil }
+        } message: {
+            Text(guardian.problem?.detail() ?? "")
+        }
+    }
+}
+

@@ -193,6 +193,10 @@ public final class CredentialVault: @unchecked Sendable {
     private var entries: [VaultEntry] = []
     /// Decrypted values by entry id, loaded from the store on first need.
     private var values: [String: String]?
+    /// Secrets held for this run of the app only — never written to vault.json or the Keychain (Guardian's
+    /// "Usable in Vision" secrets: memory-only on the device). They read like any other entry.
+    private var sessionEntries: [VaultEntry] = []
+    private var sessionValues: [String: String] = [:]
     /// Bumped on every change (the UI and the system prompt follow it).
     public private(set) var revision = 0
 
@@ -207,11 +211,56 @@ public final class CredentialVault: @unchecked Sendable {
 
     // MARK: Reading
 
-    public var all: [VaultEntry] { lock.withLock { entries.sorted { $0.name.lowercased() < $1.name.lowercased() } } }
-    public var isEmpty: Bool { lock.withLock { entries.isEmpty } }
+    public var all: [VaultEntry] {
+        lock.withLock { (entries + sessionEntries).sorted { $0.name.lowercased() < $1.name.lowercased() } }
+    }
+    public var isEmpty: Bool { lock.withLock { entries.isEmpty && sessionEntries.isEmpty } }
 
     public func entry(named name: String) -> VaultEntry? {
-        lock.withLock { entries.first { $0.name.caseInsensitiveCompare(name) == .orderedSame } }
+        lock.withLock {
+            entries.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+                ?? sessionEntries.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+        }
+    }
+
+    /// Whether an entry lives only for this run of the app (see `addSessionOnly`).
+    public func isSessionOnly(_ entry: VaultEntry) -> Bool {
+        lock.withLock { sessionEntries.contains { $0.id == entry.id } }
+    }
+
+    /// Hold a secret for this run of the app only: usable as `{{vault:NAME}}` and scrubbed from tool output like
+    /// any other, but never written to disk or the Keychain. Adding the same name again replaces the value. A name
+    /// a stored credential already has is refused.
+    @discardableResult
+    public func addSessionOnly(name: String, value: String, kind: VaultEntry.Kind = .apiKey, description: String = "",
+                               tags: [String] = [], username: String? = nil, url: String? = nil,
+                               access: VaultEntry.AgentAccess = .ask) throws -> VaultEntry {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Self.isValidName(name) else { throw VaultError.invalidName(name) }
+        guard !value.isEmpty else { throw VaultError.emptyValue }
+        return try lock.withLock {
+            guard !entries.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) else {
+                throw VaultError.duplicateName(name)
+            }
+            sessionEntries.removeAll { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+            let entry = VaultEntry(name: name, kind: kind, description: description, tags: Self.clean(tags),
+                                   username: username?.nilIfBlank, url: url?.nilIfBlank,
+                                   fingerprint: Self.fingerprint(value), access: access)
+            sessionEntries.append(entry)
+            sessionValues[entry.id] = value
+            revision += 1
+            return entry
+        }
+    }
+
+    /// Forget a session-only secret (or all of them, e.g. on signing out of Guardian).
+    public func removeSessionOnly(named name: String? = nil) {
+        lock.withLock {
+            let gone = sessionEntries.filter { name == nil || $0.name.caseInsensitiveCompare(name!) == .orderedSame }
+            for entry in gone { sessionValues[entry.id] = nil }
+            sessionEntries.removeAll { entry in gone.contains { $0.id == entry.id } }
+            if !gone.isEmpty { revision += 1 }
+        }
     }
 
     /// Entries matching every word of `query` (name, kind, description, tags,
@@ -224,6 +273,7 @@ public final class CredentialVault: @unchecked Sendable {
     /// The secret value (for the engine's substitution and the UI's reveal).
     public func value(for id: String) throws -> String? {
         try lock.withLock {
+            if let session = sessionValues[id] { return session }
             try loadValuesLocked()
             return values?[id]
         }
@@ -239,8 +289,12 @@ public final class CredentialVault: @unchecked Sendable {
     /// output. Empty (without touching the Keychain) when the vault is empty.
     public func valuesForRedaction() -> [(name: String, value: String)] {
         lock.withLock {
-            guard !entries.isEmpty, (try? loadValuesLocked()) != nil, let values else { return [] }
-            return entries.compactMap { e in values[e.id].map { (e.name, $0) } }
+            let session = sessionEntries.compactMap { e in sessionValues[e.id].map { (e.name, $0) } }
+            var stored: [(String, String)] = []
+            if !entries.isEmpty, (try? loadValuesLocked()) != nil, let values {
+                stored = entries.compactMap { e in values[e.id].map { (e.name, $0) } }
+            }
+            return (stored + session).map { (name: $0.0, value: $0.1) }
                 .filter { $0.value.count >= 4 }
                 .sorted { $0.value.count > $1.value.count }
         }
@@ -302,6 +356,12 @@ public final class CredentialVault: @unchecked Sendable {
 
     public func delete(id: String) throws {
         try lock.withLock {
+            if let j = sessionEntries.firstIndex(where: { $0.id == id }) {
+                sessionEntries.remove(at: j)
+                sessionValues[id] = nil
+                revision += 1
+                return
+            }
             guard let i = entries.firstIndex(where: { $0.id == id }) else { return }
             try loadValuesLocked()
             var newValues = values ?? [:]
@@ -315,6 +375,11 @@ public final class CredentialVault: @unchecked Sendable {
     /// Record that the agent used a credential.
     public func noteUse(_ name: String) {
         lock.withLock {
+            if let j = sessionEntries.firstIndex(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+                sessionEntries[j].lastUsedAt = .now
+                sessionEntries[j].useCount += 1
+                return
+            }
             guard let i = entries.firstIndex(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) else { return }
             entries[i].lastUsedAt = .now
             entries[i].useCount += 1

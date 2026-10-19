@@ -328,7 +328,9 @@ public struct AgentTool: ToolExecutor {
                 return [LLMMessage(role: .system, content: Compaction.summaryHeader + summary)] + plan.toKeep
             },
             vault: context.vault,
-            vaultGrants: context.vaultGrants
+            vaultGrants: context.vaultGrants,
+            // Same chat to the machine (its name, its scope), its own place in line for the mouse.
+            machineSeat: context.machine?.child()
         )
 
         let roster = context.roster

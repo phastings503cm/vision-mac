@@ -99,7 +99,7 @@ private func tempPNG(_ tag: String) -> URL {
 }
 
 /// Run a short helper binary (screencapture/osascript) capturing stdout.
-private func runBinary(_ path: String, _ args: [String], timeout: TimeInterval) async
+func runBinary(_ path: String, _ args: [String], timeout: TimeInterval) async
     -> (out: Data, err: Data, status: Int32) {
     await withCheckedContinuation { continuation in
         DispatchQueue.global(qos: .userInitiated).async {
@@ -301,24 +301,57 @@ public struct UITreeTool: ToolExecutor {
     public static let spec = ToolSpec(
         name: name,
         description: """
-            Dump an app's accessibility tree (buttons, text, menus, values, positions) \
-            by app/process name — the cheap text alternative to screenshots for NATIVE \
-            apps (dialogs, editors, tool windows). Godot's own window draws its whole \
-            UI with its renderer, so its tree is near-empty: use screenshot for the \
-            game/editor viewport, and this for native panels (open-file dialogs, etc.).
+            Dump an app's accessibility tree (buttons, fields, menus, values, positions) \
+            by app name — the cheap text alternative to screenshots for NATIVE apps, and \
+            the map for ui_action: every row starts with an element id like [w0.3.1] that \
+            ui_action acts on WITHOUT moving the user's mouse. include_menus adds the \
+            menu bar. Game engines (Godot) draw their own pixels, so their tree is \
+            near-empty: use screenshot for the viewport.
             """,
         parameters: """
-        {"type":"object","properties":{"app":{"type":"string","description":"Application/process name (e.g. 'Godot', 'Finder')"},"max_depth":{"type":"integer","description":"How deep to walk (default 3, max 6)"}},"required":["app"]}
+        {"type":"object","properties":{"app":{"type":"string","description":"Application/process name (e.g. 'TextEdit', 'Finder')"},"max_depth":{"type":"integer","description":"How deep to walk (default 4, max 10)"},"include_menus":{"type":"boolean","description":"Also list the menu bar (default false)"},"find":{"type":"string","description":"Only rows whose title/description/value contains this text"}},"required":["app"]}
         """
     )
 
-    public init() {}
+    public let backend: any MachineBackend
+    public init(backend: any MachineBackend = LiveMachineBackend()) { self.backend = backend }
 
     public func execute(args: JSONString, in context: ToolContext) async -> ToolResult {
         guard let app = Self.string(args, "app"), !app.isEmpty else {
             return .init(output: "Error: app is required.")
         }
-        let depth = min(6, max(1, Self.int(args, "max_depth", default: 3)))
+        let depth = min(10, max(1, Self.int(args, "max_depth", default: 4)))
+        let includeMenus = JSONArgs.dictionary(args)["include_menus"] as? Bool ?? false
+        guard backend.accessibilityTrusted else {
+            return await Self.appleScriptTree(app: app, depth: min(6, depth))
+        }
+        guard let target = backend.app(named: app) else {
+            return .init(output: "Error: no running app named '\(app)'. Check the name (list_windows / process_list / inspect_process).")
+        }
+        let walked = UIElementTree.walk(app: target.pid, backend: backend, maxDepth: depth, maxRows: 600,
+                                        includeMenus: includeMenus)
+        var rows = walked.rows
+        if let needle = Self.string(args, "find")?.lowercased(), !needle.isEmpty {
+            rows = rows.filter { row in
+                [row.info.title, row.info.label, row.info.value, row.info.identifier, row.info.help]
+                    .compactMap { $0?.lowercased() }.contains { $0.contains(needle) }
+            }
+        }
+        guard !rows.isEmpty else {
+            if backend.windows(app: target.pid).isEmpty && !includeMenus {
+                return .init(output: "'\(target.name)' has no windows to inspect (include_menus: true lists its menu bar).")
+            }
+            return .init(output: "'\(target.name)' exposes no UI elements\(Self.string(args, "find") != nil ? " matching that text" : "") — if it is a game engine or a canvas it draws its own pixels; use screenshot instead.")
+        }
+        var text = rows.map { String(repeating: "  ", count: $0.depth) + "[\($0.id)] " + $0.info.line() }
+            .joined(separator: "\n")
+        if text.count > 14_000 { text = String(text.prefix(14_000)) + "\n… [truncated at 14k chars — narrow with find or max_depth]" }
+        else if walked.truncated { text += "\n… [more elements — narrow with find or max_depth]" }
+        return .init(output: "Accessibility tree of \(target.name) (pid \(target.pid), depth \(depth)):\n\(text)\n\nAct on an element without the mouse: ui_action(app:\"\(target.name)\", element:\"<id>\", action:\"press\") — or find:\"<its title>\".")
+    }
+
+    /// The tree through System Events, when Accessibility isn't granted to this app (it may be to osascript).
+    static func appleScriptTree(app: String, depth: Int) async -> ToolResult {
         let escaped = app.replacingOccurrences(of: "\\", with: "\\\\")
                          .replacingOccurrences(of: "\"", with: "\\\"")
         // One osascript call walks the front window. Two AppleScript rules
@@ -402,14 +435,146 @@ public struct UITreeTool: ToolExecutor {
             case "ERROR_NO_WINDOWS":
                 return .init(output: "Error: '\(app)' is running but has no windows to inspect.")
             default:
-                return .init(output: "Error: could not read the accessibility tree of '\(app)': \(errText.prefix(200)). Grant Accessibility permission: System Settings → Privacy & Security → Accessibility → Vision.")
+                return .init(output: "Error: could not read the accessibility tree of '\(app)': \(errText.prefix(200)). Grant Accessibility permission: System Settings → Privacy & Security → Accessibility → \(AppIdentity.name).")
             }
         }
         guard !out.isEmpty else {
             return .init(output: "'\(app)' exposes no UI elements — it almost certainly draws its own pixels (a game engine window). Use screenshot instead.")
         }
         let capped = out.count > 12_000 ? String(out.prefix(12_000)) + "\n… [truncated at 12k chars]" : out
-        return .init(output: "Accessibility tree of '\(app)' (front window, depth \(depth)):\n\(capped)")
+        return .init(output: "Accessibility tree of '\(app)' (front window, depth \(depth); read through System Events because Accessibility isn't granted to \(AppIdentity.name) — without it ui_action can't act on these elements):\n\(capped)")
+    }
+}
+
+// MARK: - ui_action
+
+public struct UIActionTool: ToolExecutor {
+    public static let name = "ui_action"
+    public static let spec = ToolSpec(
+        name: name,
+        description: """
+            Act on a control in an app WITHOUT taking the user's mouse or keyboard \
+            (Accessibility): press a button, tick a checkbox, pick a menu item, fill a \
+            text field, focus or raise a window — the app can stay behind other windows \
+            and several chats can do this at once. Find the element with `element` (an \
+            id from ui_tree, e.g. "w0.3.1"), or `find` (its title/description/value) plus \
+            optional `role` ("button", "text field", "checkbox", "menu item"…), or `menu` \
+            ("File > Save As…") for a menu command. Actions: press (default), confirm, \
+            focus, raise, show_menu, set_value (replace a field's text with `value`), type \
+            (insert `value` at the caret), increment, decrement, open, cancel, pick. Prefer \
+            this over mouse/keyboard whenever the app is native.
+            """,
+        parameters: """
+        {"type":"object","properties":{"app":{"type":"string","description":"The app's name (e.g. 'TextEdit')"},"element":{"type":"string","description":"An element id from ui_tree, e.g. 'w0.3.1'"},"find":{"type":"string","description":"Text the element shows: its title, description or value"},"role":{"type":"string","description":"Narrow find to a kind: button, text field, checkbox, menu item, link, popup button…"},"menu":{"type":"string","description":"A menu command path, e.g. 'File > Save As…'"},"action":{"type":"string","enum":["press","confirm","focus","raise","show_menu","set_value","type","increment","decrement","open","cancel","pick"],"description":"Default press"},"value":{"type":"string","description":"Text for set_value / type"}},"required":["app"]}
+        """
+    )
+
+    public let backend: any MachineBackend
+    public init(backend: any MachineBackend = LiveMachineBackend()) { self.backend = backend }
+
+    public func execute(args: JSONString, in context: ToolContext) async -> ToolResult {
+        guard let appName = Self.string(args, "app"), !appName.isEmpty else {
+            return .init(output: "Error: app is required.")
+        }
+        let rawAction = (Self.string(args, "action") ?? "press").lowercased().replacingOccurrences(of: " ", with: "_")
+        guard let verb = ActionVerb(rawValue: rawAction == "menu" ? "show_menu" : rawAction) else {
+            return .init(output: "Error: unknown action '\(rawAction)'. Use press, confirm, focus, raise, show_menu, set_value, type, increment, decrement, open, cancel or pick.")
+        }
+        guard backend.accessibilityTrusted else {
+            return .init(output: "Error: Accessibility permission isn't granted to \(AppIdentity.name), so it can't act on controls directly. Ask the user to allow it in System Settings → Privacy & Security → Accessibility, or use mouse/keyboard (they wait their turn for the real mouse).")
+        }
+        guard let target = backend.app(named: appName) else {
+            return .init(output: "Error: no running app named '\(appName)'. list_windows shows what is open.")
+        }
+        let seat = context.machine ?? .detached()
+        let actions = MachineActions(backend: backend, seat: seat, ask: context.requestPermission)
+        let typing = verb == .setValue || verb == .typeText
+        if let refusal = await actions.admit(target, typing: typing, tool: Self.name) { return .init(output: refusal) }
+        let value = Self.string(args, "value")
+        if typing, value == nil { return .init(output: "Error: \(verb.rawValue) needs `value` (the text).") }
+
+        // Find the element.
+        var located: (handle: UIElementHandle, id: String)?
+        var alsoMatched: [String] = []
+        if let menu = Self.string(args, "menu"), !menu.isEmpty {
+            switch UIElementTree.menuItem(menu, app: target.pid, backend: backend) {
+            case .success(let handle): located = (handle, "menu \"\(menu)\"")
+            case .failure(let error): return .init(output: "Error: in \(target.name), \(error.message)")
+            }
+        } else if let id = Self.string(args, "element"), !id.isEmpty {
+            guard let path = UIElementTree.Path(id) else {
+                return .init(output: "Error: '\(id)' is not an element id — ids look like w0.3.1 (from ui_tree).")
+            }
+            guard let handle = UIElementTree.resolve(path, app: target.pid, backend: backend) else {
+                return .init(output: "Error: element \(id) isn't in \(target.name) any more (the window changed). Run ui_tree again.")
+            }
+            located = (handle, path.id)
+        } else if Self.string(args, "find") != nil || Self.string(args, "role") != nil {
+            let walked = UIElementTree.walk(app: target.pid, backend: backend, maxDepth: 12, maxRows: 3000, includeMenus: false)
+            let hits = UIElementTree.find(Self.string(args, "find"), role: Self.string(args, "role"),
+                                          action: verb.rawValue, in: walked.rows)
+            guard let best = hits.first else {
+                return .init(output: "Error: nothing in \(target.name)'s windows matches\(Self.string(args, "find").map { " \"\($0)\"" } ?? "")\(Self.string(args, "role").map { " (role \($0))" } ?? ""). ui_tree shows what is there; for a menu command use menu: \"File > …\".")
+            }
+            guard let handle = UIElementTree.Path(best.id).flatMap({ UIElementTree.resolve($0, app: target.pid, backend: backend) }) else {
+                return .init(output: "Error: the element moved while looking for it. Try again.")
+            }
+            located = (handle, best.id)
+            alsoMatched = hits.dropFirst().prefix(3).map { "[\($0.id)] \($0.info.line(includeFrame: false))" }
+        } else if verb == .raise || verb == .focus {
+            guard let window = backend.windows(app: target.pid).first else {
+                return .init(output: "Error: \(target.name) has no window to \(verb.rawValue).")
+            }
+            located = (window, "w0")
+        } else {
+            return .init(output: "Error: say which element: element (an id from ui_tree), find (its text, with an optional role) or menu (\"File > Save\").")
+        }
+        guard let (handle, id) = located else { return .init(output: "Error: no element.") }
+        let info = backend.info(handle)
+        if info.pid == backend.ownPID {
+            return .init(output: "Error: not acting on \(AppIdentity.name) itself — its windows hold the user's approvals and composer.")
+        }
+
+        seat.setActivity(.background(app: target.name))
+        defer { seat.setActivity(.idle) }
+        let failure: String?
+        switch verb {
+        case .focus:
+            failure = info.role == "AXWindow" ? backend.perform("AXRaise", on: handle) : backend.setFocused(handle)
+        case .setValue:
+            failure = backend.setValue(value ?? "", on: handle)
+        case .typeText:
+            if !info.focused { _ = backend.setFocused(handle) }
+            let before = backend.textState(of: handle)
+            let inserted = backend.insertText(value ?? "", into: handle)
+            if inserted == nil, MachineActions.insertionDidNothing(before: before, after: backend.textState(of: handle), inserted: value ?? "") {
+                failure = "the app ignored the text (use set_value to replace the whole field, or keyboard to type it)"
+            } else {
+                failure = inserted
+            }
+        case .raise:
+            // Raise the element's window (an element inside a window raises the window).
+            var window: UIElementHandle? = handle
+            var hops = 0
+            while let current = window, backend.info(current).role != "AXWindow", hops < 40 {
+                window = backend.parent(current)
+                hops += 1
+            }
+            failure = backend.perform("AXRaise", on: window ?? handle)
+        default:
+            if let action = verb.axAction, !info.actions.contains(action), !info.actions.isEmpty || verb != .press {
+                let offered = info.actions.compactMap(ElementInfo.verb)
+                return .init(output: "Error: \(ControlPlanner.describe(info)) [\(id)] in \(target.name) can't \(verb.rawValue)" + (offered.isEmpty ? "." : " — it can: " + offered.joined(separator: ", ") + "."))
+            }
+            failure = backend.perform(verb.axAction ?? "AXPress", on: handle)
+        }
+        if let failure {
+            return .init(output: "Error: couldn't \(verb.rawValue) \(ControlPlanner.describe(info)) [\(id)] in \(target.name): \(failure).")
+        }
+        var out = "\(MachineActions.pastTense(verb)) \(ControlPlanner.describe(info)) [\(id)] in \(target.name) through Accessibility — \(MachineActions.mouseFreeNote)."
+        if verb == .setValue || verb == .typeText { out += " (\(value?.count ?? 0) characters.)" }
+        if !alsoMatched.isEmpty { out += "\nAlso matched (use element: to pick one): " + alsoMatched.joined(separator: "; ") }
+        return .init(output: out + " Screenshot or ui_tree to check the result.")
     }
 }
 
@@ -454,7 +619,7 @@ public struct InspectProcessTool: ToolExecutor {
     }
 }
 
-// MARK: - mouse / keyboard / focus_app (control, via CGEvent)
+// MARK: - mouse / keyboard / focus_app (control: background first, the real mouse in turn)
 
 public struct MouseTool: ToolExecutor {
     public static let name = "mouse"
@@ -462,58 +627,35 @@ public struct MouseTool: ToolExecutor {
         name: name,
         description: """
             Click at screen coordinates (points, top-left origin): button=left/right/ \
-            middle, clicks=1 or 2 (double), or drag with to_x/to_y (press at x,y, move, \
-            release). Needs Accessibility permission for Vision. Coordinates come from \
-            screenshot/list_windows geometry. Screenshot after clicking to verify.
+            middle, clicks=1 or 2 (double), or drag with to_x/to_y. When the thing \
+            under the point is a native control (a button, checkbox, link, text field), \
+            the click is done through Accessibility and the user's pointer never moves; \
+            otherwise (a canvas, a game, a drag) it waits its turn for the real mouse — \
+            one chat at a time — and puts the user's pointer back. real_mouse: true \
+            forces the real pointer. Coordinates come from screenshot/list_windows/ \
+            ui_tree. Prefer ui_action for native controls. Screenshot to verify.
             """,
         parameters: """
-        {"type":"object","properties":{"x":{"type":"integer","description":"Screen x (points)"},"y":{"type":"integer","description":"Screen y (points)"},"button":{"type":"string","enum":["left","right","middle"],"description":"Default left"},"clicks":{"type":"integer","description":"1 default, 2 for double-click"},"to_x":{"type":"integer","description":"Drag release x"},"to_y":{"type":"integer","description":"Drag release y"}},"required":["x","y"]}
+        {"type":"object","properties":{"x":{"type":"integer","description":"Screen x (points)"},"y":{"type":"integer","description":"Screen y (points)"},"button":{"type":"string","enum":["left","right","middle"],"description":"Default left"},"clicks":{"type":"integer","description":"1 default, 2 for double-click"},"to_x":{"type":"integer","description":"Drag release x"},"to_y":{"type":"integer","description":"Drag release y"},"real_mouse":{"type":"boolean","description":"Use the real pointer even when the control could be pressed directly (default false)"}},"required":["x","y"]}
         """
     )
 
-    public init() {}
+    public let backend: any MachineBackend
+    public init(backend: any MachineBackend = LiveMachineBackend()) { self.backend = backend }
 
     public func execute(args: JSONString, in context: ToolContext) async -> ToolResult {
         let x = Self.double(args, "x", default: -1), y = Self.double(args, "y", default: -1)
         guard x >= 0, y >= 0 else { return .init(output: "Error: x and y are required (points from screenshot/list_windows).") }
         let button = (Self.string(args, "button") ?? "left").lowercased()
+        guard ["left", "right", "middle"].contains(button) else {
+            return .init(output: "Error: button must be left, right or middle.")
+        }
         let clicks = max(1, min(2, Self.int(args, "clicks", default: 1)))
-        guard let source = CGEventSource(stateID: .hidSystemState) else {
-            return .init(output: "Error: cannot create an event source (is the session headless?).")
-        }
-        let point = CGPoint(x: x, y: y)
-        let cgButton: CGMouseButton = button == "right" ? .right : button == "middle" ? .center : .left
-        let (down, up): (CGEventType, CGEventType) = button == "right"
-            ? (.rightMouseDown, .rightMouseUp)
-            : button == "middle" ? (.otherMouseDown, .otherMouseUp) : (.leftMouseDown, .leftMouseUp)
-
-        func post(_ type: CGEventType, _ at: CGPoint) {
-            CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: at, mouseButton: cgButton)?
-                .post(tap: .cghidEventTap)
-        }
-
-        if let toX = Optional(Self.double(args, "to_x", default: -1)), toX >= 0,
-           let toY = Optional(Self.double(args, "to_y", default: -1)), toY >= 0 {
-            // Drag: press, several intermediate moves (some apps track them), release.
-            post(down, point)
-            let steps = 6
-            for step in 1...steps {
-                let t = Double(step) / Double(steps)
-                post(.mouseMoved, CGPoint(x: x + (toX - x) * t, y: y + (toY - y) * t))
-                try? await Task.sleep(nanoseconds: 15_000_000)
-            }
-            post(up, CGPoint(x: toX, y: toY))
-            return .init(output: "Dragged (\(Int(x)),\(Int(y))) → (\(Int(toX)),\(Int(toY))).")
-        }
-
-        post(.mouseMoved, point)
-        try? await Task.sleep(nanoseconds: 40_000_000)
-        for click in 0..<clicks {
-            post(down, point)
-            post(up, point)
-            if click < clicks - 1 { try? await Task.sleep(nanoseconds: 60_000_000) }
-        }
-        return .init(output: "Clicked \(button)\(clicks > 1 ? " ×\(clicks)" : "") at (\(Int(x)),\(Int(y))). Screenshot to verify.")
+        let toX = Self.double(args, "to_x", default: -1), toY = Self.double(args, "to_y", default: -1)
+        let dragTo: CGPoint? = toX >= 0 && toY >= 0 ? CGPoint(x: toX, y: toY) : nil
+        let forceReal = JSONArgs.dictionary(args)["real_mouse"] as? Bool ?? false
+        let actions = MachineActions(backend: backend, seat: context.machine ?? .detached(), ask: context.requestPermission)
+        return await actions.click(at: CGPoint(x: x, y: y), button: button, clicks: clicks, dragTo: dragTo, forceReal: forceReal)
     }
 }
 
@@ -522,20 +664,25 @@ public struct KeyboardTool: ToolExecutor {
     public static let spec = ToolSpec(
         name: name,
         description: """
-            Type into the frontmost app: text=literal string, and/or keys like \
+            Type and press keys in an app: text=literal string, and/or keys like \
             ["cmd+s"] ["return"] ["ctrl+c"] ["esc"] ["up","down"] ["cmd+shift+t"] \
             ["cmd+,"] with modifiers cmd/ctrl/alt/shift joined by + (a comma works \
             too). Keys are a–z, 0–9, punctuation, enter/tab/esc/space/delete, arrows, \
-            home/end/pgup/pgdn, f1–f20. `app` activates that app first (the reliable \
-            pattern: keyboard(app:"Godot", keys:["f5"])). Refused into terminal \
-            emulators and Vision itself — that route would bypass the shell permission gate.
+            home/end/pgup/pgdn, f1–f20. With `app`, the text and keys go to that app \
+            IN THE BACKGROUND — it stays behind the user's windows and the user's \
+            keyboard is not used (text goes into its focused field). Without `app`, \
+            they go to the app in front. foreground: true brings the app forward and \
+            uses the real keyboard (it waits its turn — one chat at a time) for apps \
+            that only take keys in front. Refused into terminal emulators and Vision \
+            itself — that route would bypass the shell permission gate.
             """,
         parameters: """
-        {"type":"object","properties":{"text":{"type":"string","description":"Literal text to type"},"keys":{"type":"array","items":{"type":"string"},"description":"Key combos, e.g. ['cmd+s','return']"},"app":{"type":"string","description":"Activate this app first (name)"}},"required":[]}
+        {"type":"object","properties":{"text":{"type":"string","description":"Literal text to type"},"keys":{"type":"array","items":{"type":"string"},"description":"Key combos, e.g. ['cmd+s','return']"},"app":{"type":"string","description":"The app to type into (name); default the app in front"},"foreground":{"type":"boolean","description":"Bring the app forward and use the real keyboard (default false)"}},"required":[]}
         """
     )
 
-    public init() {}
+    public let backend: any MachineBackend
+    public init(backend: any MachineBackend = LiveMachineBackend()) { self.backend = backend }
 
     /// Ask System Events for the frontmost GUI process: (name, pid). A plain
     /// osascript call keeps VisionHarnessCore AppKit-free; costs ~50 ms.
@@ -573,70 +720,10 @@ public struct KeyboardTool: ToolExecutor {
                 }
             }
         }
-
-        // Terminal-guard: resolve the *destination* app and refuse TTYs and Vision.
-        var targetName = "frontmost app"
-        if let app = Self.string(args, "app"), !app.isEmpty {
-            targetName = app
-            let quoted = app.replacingOccurrences(of: "\"", with: "\\\"")
-            // set frontmost (System Events) only touches *running* processes —
-            // unlike `tell application … activate`, which can launch a copy.
-            let activated = await runBinary("/usr/bin/osascript", [
-                "-e", "tell application \"System Events\" to set frontmost of process \"\(quoted)\" to true",
-            ], timeout: 10)
-            guard activated.status == 0 else {
-                return .init(output: "Error: '\(app)' is not running or cannot be focused: \(String(decoding: activated.err, as: UTF8.self).prefix(200))")
-            }
-            try? await Task.sleep(nanoseconds: 350_000_000)
-            let front = await Self.frontmostProcess()
-            if let refusal = Self.guardRefusal(front: front, requested: app) {
-                return .init(output: refusal)
-            }
-        } else {
-            let front = await Self.frontmostProcess()
-            if let refusal = Self.guardRefusal(front: front, requested: nil) {
-                return .init(output: refusal)
-            }
-        }
-
-        guard let source = CGEventSource(stateID: .hidSystemState) else {
-            return .init(output: "Error: cannot create an event source.")
-        }
-        var typed = 0, pressed = 0
-        if let text = Self.string(args, "text"), !text.isEmpty {
-            // Unicode string injection: layout-independent, handles any scalar.
-            for chunk in text.splitChunked(size: 20) {
-                var utf16 = Array(chunk.utf16)
-                if let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true) {
-                    down.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
-                    down.post(tap: .cghidEventTap)
-                }
-                if let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) {
-                    var empty = [UInt16]()
-                    up.keyboardSetUnicodeString(stringLength: 0, unicodeString: &empty)
-                    up.post(tap: .cghidEventTap)
-                }
-                typed += chunk.count
-                try? await Task.sleep(nanoseconds: 8_000_000)
-            }
-        }
-        for combo in combos {
-            var flags = CGEventFlags(rawValue: 0)
-            if combo.cmd { flags.insert(.maskCommand) }
-            if combo.ctrl { flags.insert(.maskControl) }
-            if combo.alt { flags.insert(.maskAlternate) }
-            if combo.shift { flags.insert(.maskShift) }
-            for down in [true, false] {
-                if let event = CGEvent(keyboardEventSource: source, virtualKey: combo.code, keyDown: down) {
-                    event.flags = flags
-                    event.post(tap: .cghidEventTap)
-                }
-            }
-            pressed += 1
-            try? await Task.sleep(nanoseconds: 20_000_000)
-        }
-        guard typed > 0 || pressed > 0 else { return .init(output: "Error: give text and/or keys.") }
-        return .init(output: "Typed \(typed) characters and \(pressed) key combo(s) into \(targetName). Screenshot to verify.")
+        let foreground = JSONArgs.dictionary(args)["foreground"] as? Bool ?? false
+        let actions = MachineActions(backend: backend, seat: context.machine ?? .detached(), ask: context.requestPermission)
+        return await actions.type(text: Self.string(args, "text"), combos: combos, appName: Self.string(args, "app"),
+                                  foreground: foreground)
     }
 
     // MARK: key mapping
@@ -688,9 +775,17 @@ public struct KeyboardTool: ToolExecutor {
 
     struct Combo: Equatable { var key: String; var cmd = false, ctrl = false, alt = false, shift = false }
 
-    struct ResolvedCombo: Equatable {
-        var code: CGKeyCode
-        var cmd = false, ctrl = false, alt = false, shift = false
+    public struct ResolvedCombo: Equatable, Sendable {
+        public var code: CGKeyCode
+        public var cmd = false, ctrl = false, alt = false, shift = false
+
+        public init(code: CGKeyCode, cmd: Bool = false, ctrl: Bool = false, alt: Bool = false, shift: Bool = false) {
+            self.code = code
+            self.cmd = cmd
+            self.ctrl = ctrl
+            self.alt = alt
+            self.shift = shift
+        }
     }
 
     struct ComboError: Error, Equatable { var message: String }
@@ -754,28 +849,21 @@ public struct FocusAppTool: ToolExecutor {
     public static let name = "focus_app"
     public static let spec = ToolSpec(
         name: name,
-        description: "Bring an application to the front by name (before screenshotting a game that renders behind other windows, or before keyboard/mouse input).",
+        description: "Bring an application to the front by name — it takes the user's focus, so it waits its turn for the controls (one chat at a time). Usually not needed: screenshot(window:) captures a window behind others, keyboard(app:) and ui_action work on apps in the background, and ui_action(action:\"raise\") raises a window without activating the app.",
         parameters: """
         {"type":"object","properties":{"app":{"type":"string","description":"Application name (e.g. 'Godot')"}},"required":["app"]}
         """
     )
 
-    public init() {}
+    public let backend: any MachineBackend
+    public init(backend: any MachineBackend = LiveMachineBackend()) { self.backend = backend }
 
     public func execute(args: JSONString, in context: ToolContext) async -> ToolResult {
         guard let app = Self.string(args, "app"), !app.isEmpty else {
             return .init(output: "Error: app is required.")
         }
-        let quoted = app.replacingOccurrences(of: "\"", with: "\\\"")
-        let result = await runBinary("/usr/bin/osascript", [
-            "-e", "tell application \"System Events\" to set frontmost of process \"\(quoted)\" to true",
-        ], timeout: 10)
-        guard result.status == 0 else {
-            let why = String(decoding: result.err, as: UTF8.self).prefix(160)
-            return .init(output: "Error: '\(app)' is not running or not focusable (\(why)). process_list/inspect_process to check; process_start or `open -a \"\(app)\"` to launch it.")
-        }
-        try? await Task.sleep(nanoseconds: 300_000_000)
-        return .init(output: "Focused \(app).")
+        let actions = MachineActions(backend: backend, seat: context.machine ?? .detached(), ask: context.requestPermission)
+        return await actions.focus(appName: app)
     }
 }
 
@@ -834,21 +922,5 @@ extension ToolExecutor {
         if let d = dict[key] as? Double { return d }
         if let i = dict[key] as? Int { return Double(i) }
         return def
-    }
-}
-
-extension String {
-    /// Chunk for unicode keyboard injection (events carry ~20 utf16 units well).
-    fileprivate func splitChunked(size: Int) -> [String] {
-        var chunks: [String] = []
-        var current = ""
-        var count = 0
-        for character in self {
-            current.append(character)
-            count += String(character).utf16.count
-            if count >= size { chunks.append(current); current = ""; count = 0 }
-        }
-        if !current.isEmpty { chunks.append(current) }
-        return chunks
     }
 }

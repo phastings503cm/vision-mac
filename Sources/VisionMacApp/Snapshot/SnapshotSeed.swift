@@ -273,3 +273,42 @@ final class SnapshotPlanBackend: PlanGuideBackend {
     func sayHello(route: ProviderProfile) async throws -> String { "Hello!" }
     func open(_ url: URL) {}
 }
+// MARK: - A made-up OpenClaw for Settings ▸ Import & Export
+
+extension SnapshotSeed {
+    /// A small OpenClaw install in the throwaway home folder: a few skills, memory, keys (made up) and model servers.
+    static func writeOpenClaw(home: URL) {
+        let state = home.appendingPathComponent(".openclaw")
+        func write(_ relative: String, _ text: String) {
+            let url = state.appendingPathComponent(relative)
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? text.write(to: url, atomically: true, encoding: .utf8)
+        }
+        write("openclaw.json", """
+        {
+          gateway: { auth: { mode: "token", token: "demo-Gateway-Token-0001" } },
+          agents: { defaults: { model: { primary: "spark/qwen3.8-27b" } }, entries: { main: {} } },
+          env: { vars: { LEDGER_API_KEY: "demo-Ledger-Key-7781", SMTP_PASSWORD: "demo-Mail-Pass-31" } },
+          models: { providers: {
+            spark: { baseUrl: "http://spark.local:8000/v1", api: "openai-completions", apiKey: "demo-Spark-Key-4410",
+                     models: [{ id: "qwen3.8-27b", contextWindow: 262144 }] },
+            "amazon-bedrock": { baseUrl: "https://bedrock-runtime.us-west-2.amazonaws.com", api: "bedrock-converse-stream" },
+          } },
+          channels: { telegram: { enabled: true } },
+        }
+        """)
+        write("workspace/MEMORY.md", "# Memory\n- Release notes go out on Fridays.\n- The ledger CLI is the source of truth for categories.\n")
+        write("workspace/USER.md", "Works on the ledger app; prefers short answers.\n")
+        write("workspace/SOUL.md", "Be direct and kind.\n")
+        write("workspace/AGENTS.md", "Use the release-notes skill for changelogs.\n")
+        for (day, text) in [("2026-10-16", "Fixed the CSV import test."), ("2026-10-17", "Drafted 0.3.0 notes."), ("2026-10-18", "Added --by-category.")] {
+            write("workspace/memory/\(day).md", text + "\n")
+        }
+        write("workspace/skills/release-notes/SKILL.md", "---\nname: release-notes\ndescription: Draft release notes from merged changes\n---\nRead the log, group by area.\n")
+        write("workspace/skills/csv-cleanup/SKILL.md", "---\nname: csv-cleanup\ndescription: Normalise bank CSV exports\n---\nUse the script.\n")
+        write("workspace/skills/csv-cleanup/clean.py", "print('clean')\n")
+        write("skills/weather/SKILL.md", "---\nname: weather\ndescription: Forecasts for a city\n---\nAsk wttr.in.\n")
+        write("cron/jobs.json", #"{"jobs":[{"id":"daily-summary"}]}"#)
+    }
+}
+

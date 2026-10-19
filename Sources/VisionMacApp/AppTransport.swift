@@ -74,13 +74,16 @@ public final class AppTransport {
     /// (tool-call ids repeat across turns and chats: "call-0", "xml-0").
     @ObservationIgnored private var gates: [String: (cont: CheckedContinuation<Bool, Never>, sessionID: String)] = [:]
     /// Screen/computer approvals per chat, kept across engine rebuilds.
-    @ObservationIgnored private var computerGrants: [String: ComputerGrants] = [:]
+    @ObservationIgnored var computerGrants: [String: ComputerGrants] = [:]
     /// Server-reported context ceilings (from overflow errors), which a later
     /// probe of the advertised window must not raise again.
     @ObservationIgnored private var overflowCeiling: [String: Int] = [:]
     /// Outstanding "don't sleep" activities, by token.
     @ObservationIgnored private var awakeActivities: [UUID: NSObjectProtocol] = [:]
-    @ObservationIgnored var runTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored var runTasks: [String: Task<Void, Never>] = [:] {
+        // A chat's turn ended (finished, failed or stopped): it gives the real mouse and keyboard back.
+        didSet { for id in oldValue.keys where runTasks[id] == nil { machineTurnEnded(id) } }
+    }
     @ObservationIgnored private let basePrompt: String
     /// Route ID → context window (tokens) learned from a server probe.
     /// Observed, so the context gauge redraws the moment a probe lands.
@@ -125,12 +128,22 @@ public final class AppTransport {
     /// True while a computer-use tool of the selected session (any session,
     /// actually — the glow is about the machine, not a chat) is on the machine:
     /// observing it or controlling it. The glow controller watches this.
-    public private(set) var machineInUse = false {
-        didSet { MachineGlowController.shared.setActive(machineInUse) }
+    public internal(set) var machineInUse = false {
+        didSet { if oldValue != machineInUse { MachineGlowController.shared.setActive(machineInUse) } }
     }
     /// Tools that touch the machine; a running one of these lights the glow.
-    private static let machineTools = ["screenshot", "list_windows", "screen_watch", "ui_tree",
-                                       "inspect_process", "view_image", "mouse", "keyboard", "focus_app"]
+    static let machineTools = ["screenshot", "list_windows", "screen_watch", "ui_tree", "ui_action",
+                               "inspect_process", "view_image", "mouse", "keyboard", "focus_app"]
+    /// Each chat's seat at the machine (its place in line for the real mouse, its scope), kept across engine
+    /// rebuilds like its computer grants. See AppTransport+Machine.swift.
+    @ObservationIgnored var machineSeats: [String: MachineSeat] = [:]
+    /// The chats with a machine tool running right now (what the glow's pill names).
+    @ObservationIgnored var machineWork: [String: MachineWork] = [:]
+    /// The control arbiter as last seen (who has the real mouse, who waits).
+    public internal(set) var controlSnapshot = ControlSnapshot.idle
+    /// The status lines this file put on chats (so it only clears its own).
+    @ObservationIgnored var machineStatusLines: [String: String] = [:]
+    @ObservationIgnored var controlObserver: UUID?
 
     // MARK: - Task queue
 
@@ -271,6 +284,7 @@ public final class AppTransport {
         for chatID in queue.chatsWithQueuedTasks { chatTasksPaused[chatID] = ChatTaskRules.pausedAtLaunch }
         config.onRoutesChanged = { [weak self] in self?.refreshFleet() }
         refreshFleet()
+        observeControlArbiter()
     }
 
     public var selected: SessionVM? {
@@ -358,6 +372,7 @@ public final class AppTransport {
         engines[id] = nil
         engineKeys[id] = nil
         computerGrants[id] = nil
+        machineSeats[id] = nil
         vaultGrants[id] = nil
         backgroundPools.removeValue(forKey: id)?.stopAll()
         agentQueuedCount[id] = nil
@@ -1100,7 +1115,8 @@ public final class AppTransport {
             fleet: fleet,
             roster: roster(for: sessionID),
             agentTypes: agentCatalog(for: vm),
-            fleetHome: home
+            fleetHome: home,
+            machineSeat: machineSeat(for: sessionID, vm: vm)
         )
         engines[sessionID] = engine
         return engine
@@ -1431,6 +1447,9 @@ public final class AppTransport {
 
         case .agents:
             agentsCommand(vm)
+
+        case .control(let arg):
+            vm.note(setControlScope(vm, argument: arg))
 
         case .goal(let goal):
             pinRouteIfUnset(vm)
@@ -2258,8 +2277,8 @@ public final class AppTransport {
             if vm.retry != nil { vm.retry = nil }
             vm.clearReasoning()
             vm.startTool(id: id, name: name, preview: preview)
-            // A computer-use tool is on the machine: light the glow.
-            if Self.machineTools.contains(name) { machineInUse = true }
+            // A computer-use tool is on the machine: light the glow and name the chat in it.
+            if Self.machineTools.contains(name) { machineToolStarted(name, in: vm) }
             // A tool call means the plan is settled (the model has moved to
             // work); a question-only turn settles on its prose instead.
             phasesPlanSettled(vm)
@@ -2269,10 +2288,7 @@ public final class AppTransport {
             phasesStep(vm, text: "\(Theme.toolLabel(name)) \(vm.entries.last(where: { $0.id == id })?.tool?.preview ?? summary)"
                            + (ok ? "" : " — failed"))
             // The machine tool ended: if no other one is running, dim the glow.
-            if Self.machineTools.contains(name), vm.runningTool == nil,
-               !sessions.contains(where: { $0.id != vm.id && $0.runningTool.map({ Self.machineTools.contains($0.name) }) == true }) {
-                machineInUse = false
-            }
+            if Self.machineTools.contains(name) { machineToolFinished(in: vm) }
             if name == "propose_skill", ok, output.contains("Saved draft") {
                 refreshDrafts()
                 vm.note("📝 The agent drafted a skill. It is not active until you approve it — open **Skills** under the composer (or Settings ▸ Skills) to review it.")
@@ -2518,6 +2534,8 @@ public final class AppTransport {
             chatTasksPaused[id] = ChatTaskRules.pauseReason(for: .stopped)
         }
         resolveAllGates(for: id, with: false)
+        // Out of line for the real mouse, and the controls back, for the chat and its subagents.
+        Task { await ControlArbiter.shared.release(chatID: id) }
         runTasks[id]?.cancel()
         // Stop means everything the agent is doing in this chat.
         backgroundPools[id]?.stopAll()

@@ -27,7 +27,10 @@ struct VisionMacApp: App {
                 .environment(model)
                 .frame(minWidth: 900, minHeight: 560)
                 .task {
-                    if Snapshot.isActive { await Snapshot.drive(model) }
+                    if Snapshot.isActive { await Snapshot.drive(model); return }
+                    // ⌃⌥⌘. from any app: stop all AI control of the Mac.
+                    let transport = model.transport
+                    GlobalStopHotKey.shared.register { transport.stopMachineControl() }
                 }
         }
         .windowToolbarStyle(.unified)
@@ -105,6 +108,10 @@ struct AppCommands: Commands {
             Button("Stop All Agents") { model.stopAll() }
                 .keyboardShortcut(".", modifiers: [.command, .shift])
                 .disabled(!model.anythingRunning)
+            // The same as ⌃⌥⌘., which works from any app (GlobalStopHotKey).
+            Button("Stop All Computer Control (\(GlobalStopHotKey.display) from any app)") {
+                model.transport.stopMachineControl()
+            }
             Divider()
             Button("Memory & Skills…") { model.showMemoryAndSkills = true }
                 .keyboardShortcut("m", modifiers: [.command, .shift])
@@ -189,6 +196,8 @@ struct RootView: View {
             }
             .toolbar { toolbar }
         }
+        // Guardian's refusals met in a chat (a spent budget, a module that's off) as a dialog.
+        .guardianProblemAlert(model.guardian)
         .inspector(isPresented: $model.showQueuePanel) {
             QueueView()
                 .environment(model)

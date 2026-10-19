@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import VisionHarnessCore
 
 // MARK: - The harness's Guardian connection
@@ -27,19 +28,49 @@ public final class GuardianService: ObservableObject {
     /// Set by AppModel after both are constructed.
     public weak var transport: AppTransport?
 
+    /// GET /api/harness/me: the account, its organizations, modules, permissions and limits.
+    @Published public private(set) var account: GuardianAccount?
+    /// GET /api/harness/limits.
+    @Published public private(set) var limits: [GuardianLimit] = []
+    /// The organization calls act in (x-guardian-org); nil = the account's active one.
+    @Published public private(set) var orgID: String?
+    /// A browser sign-in is waiting for the person to finish it in the browser.
+    @Published public private(set) var browserSignInRunning = false
+    /// Secrets the person marked "Usable in Vision" in Guardian (names only), and which are in use this run.
+    @Published public private(set) var remoteSecrets: [GuardianVaultSecret] = []
+    @Published public private(set) var secretsInUse: Set<String> = []
+    /// The person's code projects in Guardian.
+    @Published public private(set) var remoteProjects: [GuardianProject] = []
+    /// The dialog to show: a structured refusal (what is missing, or which limit and when it resets).
+    @Published public var problem: GuardianProblem?
+    private var lastShown: (id: String, at: Date)?
+    private var browserTask: Task<Void, Never>?
+    private let secrets: any SecretStore
+
     /// Prompts already pushed, so a prompt is never synced twice.
     private var pushedPromptIDs: Set<String> = []
     private let pushedFile: URL
 
-    public init(appSupport: URL, secrets: any SecretStore = AppSecrets.keychain) {
+    /// Makes the HTTP client (tests hand in a scripted transport).
+    let transportOverride: GuardianClient.Transport?
+
+    func makeClient(_ address: String, session: GuardianSession? = nil) throws -> GuardianClient {
+        try GuardianClient(baseURL: address.isEmpty ? Self.defaultURL : address, session: session, transport: transportOverride)
+    }
+
+    public init(appSupport: URL, secrets: any SecretStore = AppSecrets.keychain, transport: GuardianClient.Transport? = nil) {
+        self.secrets = secrets
+        self.transportOverride = transport
         pushedFile = appSupport.appendingPathComponent("guardian-pushed-prompts.json")
         let address = secrets.read(service: AppIdentity.KeychainService.guardian, account: "address")
             ?? Self.defaultURL
         if let token = secrets.read(service: AppIdentity.KeychainService.guardian, account: "token"), !token.isEmpty {
             let email = secrets.read(service: AppIdentity.KeychainService.guardian, account: "email") ?? ""
-            client = try? GuardianClient(baseURL: address.isEmpty ? Self.defaultURL : address,
-                                         session: GuardianSession(userID: email, email: email, name: nil, token: token))
+            client = try? makeClient(address, session: GuardianSession(userID: email, email: email, name: nil, token: token))
             accountEmail = email.isEmpty ? nil : email
+            let org = secrets.read(service: AppIdentity.KeychainService.guardian, account: "org")
+            orgID = org?.isEmpty == false ? org : nil
+            client?.orgID = orgID
         }
         if let data = try? Data(contentsOf: pushedFile),
            let ids = try? JSONDecoder().decode([String].self, from: data) {
@@ -56,7 +87,7 @@ public final class GuardianService: ObservableObject {
         pendingTwoFactorChallenge = nil
         pendingTwoFactorEmail = nil
         do {
-            let guardian = try GuardianClient(baseURL: address)
+            let guardian = try makeClient(address)
             let session: GuardianSession
             do {
                 session = try await guardian.signIn(email: email, password: password)
@@ -106,13 +137,192 @@ public final class GuardianService: ObservableObject {
         secrets.write(session.email, service: AppIdentity.KeychainService.guardian, account: "email")
         secrets.write(address, service: AppIdentity.KeychainService.guardian, account: "address")
         client = guardian
-        accountEmail = session.email
+        accountEmail = session.email.isEmpty ? nil : session.email
+        guardian.orgID = orgID
         // The shared ETA cache: what the org's harnesses learned blends
         // into this Mac's cache, so its first estimates start smart.
         Task { [weak self] in
             guard let transport = self?.transport else { return }
             try? await guardian.syncEtas(into: transport.phaseRunner)
         }
+        Task { [weak self] in await self?.refreshAccount() }
+    }
+
+    /// A sign-in finished elsewhere (the setup wizard's Guardian page): the connection uses it too, so prompts,
+    /// limits and the vault work without signing in twice.
+    public func adopt(_ session: GuardianSession, address: String, orgID org: String? = nil) {
+        guard let guardian = try? makeClient(address, session: session) else { return }
+        if let org { setOrg(org, refresh: false) }
+        try? completeSignIn(guardian, session: session, address: guardian.baseURL.absoluteString, secrets: secrets)
+    }
+
+    // MARK: Browser sign-in (Entra SSO, passwordless)
+
+    /// Sign in through the browser: Guardian's consent page (the person picks the org there), back to a loopback
+    /// address on this Mac, the code exchanged with PKCE. Returns true once signed in.
+    @discardableResult
+    public func signInWithBrowser(address: String) async -> Bool {
+        lastError = nil
+        pendingTwoFactorChallenge = nil
+        browserSignInRunning = true
+        defer { browserSignInRunning = false }
+        do {
+            let guardian = try makeClient(address)
+            let device = Host.current().localizedName ?? "Mac"
+            let (session, org) = try await guardian.signInWithBrowser(device: "\(AppIdentity.name) on \(device)") { url in
+                await MainActor.run { _ = NSWorkspace.shared.open(url) }
+            }
+            if let org { setOrg(org, refresh: false) }
+            try completeSignIn(guardian, session: session, address: guardian.baseURL.absoluteString, secrets: secrets)
+            if session.email.isEmpty {
+                // The token exchange may not name the person: /me does.
+                if let me = try? await guardian.me() {
+                    accountEmail = me.email
+                    secrets.write(me.email, service: AppIdentity.KeychainService.guardian, account: "email")
+                }
+            }
+            return true
+        } catch {
+            lastError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            return false
+        }
+    }
+
+    /// Start the browser sign-in without waiting (the settings button); `cancelBrowserSignIn` stops waiting.
+    public func startBrowserSignIn(address: String) {
+        browserTask?.cancel()
+        browserTask = Task { [weak self] in _ = await self?.signInWithBrowser(address: address) }
+    }
+
+    public func cancelBrowserSignIn() {
+        browserTask?.cancel()
+        browserTask = nil
+        browserSignInRunning = false
+    }
+
+    // MARK: Account, organization, limits
+
+    /// Read /me and /limits again. A sign-in Guardian no longer accepts is dropped with a plain message.
+    public func refreshAccount() async {
+        guard let client else { return }
+        do {
+            let me = try await client.me()
+            account = me
+            if !me.email.isEmpty, accountEmail != me.email {
+                accountEmail = me.email
+                secrets.write(me.email, service: AppIdentity.KeychainService.guardian, account: "email")
+            }
+            if !me.limits.isEmpty { limits = me.limits }
+            if let fetched = try? await client.limits() { limits = fetched }
+            // An org that isn't the account's any more falls back to the default one.
+            if let orgID, !me.orgs.isEmpty, !me.orgs.contains(where: { $0.id == orgID }) { setOrg(nil, refresh: false) }
+        } catch GuardianError.unauthorized {
+            lastError = GuardianError.unauthorized.errorDescription
+            signOut(secrets: secrets)
+        } catch {
+            lastError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    /// Act in another organization (x-guardian-org on every call), and read the account again.
+    public func setOrg(_ id: String?, refresh: Bool = true) {
+        orgID = id?.isEmpty == true ? nil : id
+        client?.orgID = orgID
+        secrets.write(orgID, service: AppIdentity.KeychainService.guardian, account: "org")
+        // The model proxy works in the same organization: Guardian routes carry the header too.
+        if let config = transport?.config {
+            for index in config.providers.indices where config.providers[index].kind == .guardian {
+                var headers = config.providers[index].customHeaders ?? [:]
+                headers["x-guardian-org"] = orgID
+                if config.providers[index].customHeaders ?? [:] != headers {
+                    config.providers[index].customHeaders = headers.isEmpty ? nil : headers
+                }
+            }
+        }
+        remoteSecrets = []
+        remoteProjects = []
+        if refresh { Task { [weak self] in await self?.refreshAccount() } }
+    }
+
+    /// Show a structured refusal as a dialog (the same one twice within half a minute shows once).
+    public func show(_ problem: GuardianProblem) {
+        if let lastShown, lastShown.id == problem.id, Date().timeIntervalSince(lastShown.at) < 30 { return }
+        lastShown = (problem.id, Date())
+        self.problem = problem
+    }
+
+    // MARK: Vault (opt-in per secret, memory-only)
+
+    public func loadSecrets() async {
+        guard let client else { return }
+        do { remoteSecrets = try await client.vaultSecrets() } catch { report(error) }
+    }
+
+    /// The vault name a Guardian secret is used under here.
+    static func vaultName(_ secret: GuardianVaultSecret) -> String {
+        let cleaned = OpenClawReader.sanitize(secret.envKey?.isEmpty == false ? secret.envKey! : secret.name)
+        return cleaned == "OPENCLAW_SECRET" ? "GUARDIAN_SECRET" : cleaned
+    }
+
+    /// Reveal one secret (Guardian audits it) and hold it for this run only: usable as {{vault:NAME}}, ask-first,
+    /// never written to disk or the Keychain.
+    public func useSecret(_ secret: GuardianVaultSecret) async {
+        guard let client, let vault = transport?.vault else { return }
+        do {
+            let value = try await client.revealSecret(id: secret.id)
+            let kind: VaultEntry.Kind = switch (secret.itemType ?? secret.kind)?.lowercased() {
+            case "password", "login": .password
+            case "token", "oauth": .token
+            case "api_key", "apikey", "key": .apiKey
+            default: .other
+            }
+            try vault.addSessionOnly(name: Self.vaultName(secret), value: value, kind: kind,
+                                     description: (secret.description.map { $0 + " " } ?? "") + "From Guardian — this run of \(AppIdentity.name) only.",
+                                     tags: ["guardian"] + (secret.service.map { [$0] } ?? []), access: .ask)
+            secretsInUse.insert(secret.id)
+            transport?.vaultDidChange()
+        } catch {
+            report(error)
+        }
+    }
+
+    public func stopUsingSecret(_ secret: GuardianVaultSecret) {
+        transport?.vault.removeSessionOnly(named: Self.vaultName(secret))
+        secretsInUse.remove(secret.id)
+        transport?.vaultDidChange()
+    }
+
+    // MARK: Projects
+
+    public func loadProjects() async {
+        guard let client else { return }
+        do { remoteProjects = try await client.projects() } catch { report(error) }
+    }
+
+    /// Write a project's files from Guardian into `folder` (a new subfolder named after it). Returns the folder.
+    public func downloadProject(_ project: GuardianProject, into folder: URL) async -> URL? {
+        guard let client else { return nil }
+        do {
+            let manifest = try await client.project(id: project.id)
+            let root = folder.appendingPathComponent(SkillNaming.slug(manifest.name).isEmpty ? "guardian-project" : manifest.name,
+                                                     isDirectory: true)
+            for (path, text) in manifest.files {
+                let segments = path.split(separator: "/")
+                guard !segments.isEmpty, !segments.contains(where: { $0 == ".." || $0 == "." }), !path.hasPrefix("/") else { continue }
+                let file = root.appendingPathComponent(path)
+                try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try text.write(to: file, atomically: true, encoding: .utf8)
+            }
+            return root
+        } catch {
+            report(error)
+            return nil
+        }
+    }
+
+    private func report(_ error: Error) {
+        if case GuardianError.problem = error { return }   // the dialog says it
+        lastError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
     }
 
     /// Abandon a sign-in that's waiting on its 2FA code.
@@ -127,6 +337,38 @@ public final class GuardianService: ObservableObject {
         secrets.write(nil, service: AppIdentity.KeychainService.guardian, account: "email")
         client = nil
         accountEmail = nil
+        account = nil
+        limits = []
+        remoteSecrets = []
+        remoteProjects = []
+        // Secrets revealed for this run go with the sign-in.
+        if !secretsInUse.isEmpty {
+            transport?.vault.removeSessionOnly(named: nil)
+            secretsInUse = []
+            transport?.vaultDidChange()
+        }
+    }
+
+    // MARK: Snapshot mode
+
+    /// A made-up signed-in account for the README pictures (no network: every call answers 503).
+    func seedSnapshotAccount() {
+        let offline: GuardianClient.Transport = { _ in GuardianHTTPResponse(data: Data(#"{"error":"offline"}"#.utf8), status: 503, headers: [:]) }
+        client = try? GuardianClient(baseURL: Self.defaultURL,
+                                     session: GuardianSession(userID: "u1", email: "sam@503cm.com", name: "Sam Rivera", token: "snapshot"),
+                                     transport: offline)
+        accountEmail = "sam@503cm.com"
+        let week = Date().addingTimeInterval(4 * 86_400 + 3_600)
+        account = GuardianAccount(userID: "u1", email: "sam@503cm.com", name: "Sam Rivera",
+                                  orgs: [GuardianOrg(id: "o1", name: "503CM", active: true), GuardianOrg(id: "o2", name: "Cyticorp")],
+                                  modules: ["chat", "insights", "automations", "ai-coders"], permissions: ["chat.use"], limits: [])
+        limits = [GuardianLimit(kind: "spend", window: "week", used: 31.4, max: 50, unit: "usd", resetsAt: week),
+                  GuardianLimit(kind: "tokens", window: "day", used: 1_640_000, max: 2_000_000, unit: "tokens",
+                                resetsAt: Date().addingTimeInterval(5 * 3_600)),
+                  GuardianLimit(kind: "requests", window: "run", used: 1, max: 3, unit: "streams")]
+        remoteSecrets = [GuardianVaultSecret(id: "s1", name: "Freshdesk", envKey: "FRESHDESK_API_KEY", service: "freshdesk", itemType: "api_key"),
+                         GuardianVaultSecret(id: "s2", name: "Ledger API", envKey: "LEDGER_API_KEY", itemType: "api_key")]
+        secretsInUse = ["s1"]
     }
 
     // MARK: Prompt sync (item 4)
@@ -138,14 +380,18 @@ public final class GuardianService: ObservableObject {
     @discardableResult
     public func syncPrompts(_ records: [SessionVMPrompt]) async -> Int {
         guard let client else { return 0 }
-        let pending = records.filter { !pushedPromptIDs.contains($0.id) }
+        // A prompt goes up on submit, and again once its outcome is known (Guardian dedupes on text and time and
+        // keeps the outcome); each (prompt, outcome) pair is sent once.
+        let pending = records.filter { !pushedPromptIDs.contains($0.pushKey) }
         guard !pending.isEmpty else { return 0 }
         let prompts = pending.map {
-            GuardianPrompt(text: $0.text, at: $0.at, outcome: $0.outcome, source: $0.chatID)
+            GuardianPrompt(text: $0.text, at: $0.at, outcome: $0.outcome, source: "vision-mac", chatID: $0.chatID,
+                           chatTitle: $0.chatTitle, project: $0.project, model: $0.model,
+                           durationSeconds: $0.durationSeconds, runID: $0.runID)
         }
         do {
             let accepted = try await client.pushPrompts(prompts)
-            for record in pending { pushedPromptIDs.insert(record.id) }
+            for record in pending { pushedPromptIDs.insert(record.pushKey) }
             persistPushed()
             return accepted
         } catch {
@@ -162,13 +408,28 @@ public final class GuardianService: ObservableObject {
         public var at: Date
         public var outcome: String?
         public var chatID: String
-        public init(id: String, text: String, at: Date, outcome: String?, chatID: String) {
+        public var chatTitle: String?
+        public var project: String?
+        public var model: String?
+        public var durationSeconds: Double?
+        public var runID: String?
+        public init(id: String, text: String, at: Date, outcome: String?, chatID: String, chatTitle: String? = nil,
+                    project: String? = nil, model: String? = nil, durationSeconds: Double? = nil, runID: String? = nil) {
             self.id = id
             self.text = text
             self.at = at
             self.outcome = outcome
             self.chatID = chatID
+            self.chatTitle = chatTitle
+            self.project = project
+            self.model = model
+            self.durationSeconds = durationSeconds
+            self.runID = runID
         }
+
+        /// What "already sent" is keyed on: the prompt, and the outcome it was sent with (a bare id = on submit,
+        /// the key earlier builds wrote).
+        var pushKey: String { outcome.map { "\(id)|\($0)" } ?? id }
     }
 
     private func persistPushed() {

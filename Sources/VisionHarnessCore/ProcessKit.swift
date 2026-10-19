@@ -345,6 +345,8 @@ public struct ProcessStartTool: ToolExecutor {
                                           cols: cols, rows: rows) else {
             return .init(output: "Error: could not start the process (forkpty failed).")
         }
+        // What this chat starts is its own to control (a chat limited to its own apps may drive it).
+        context.machine?.noteSpawned(pid: process.pid)
         // One shared "tool" cursor for the agent loop: whatever a read (or this
         // first-output peek) reported is consumed, so no bytes are ever sent
         // to the model twice — the token budget for a chatty process stays

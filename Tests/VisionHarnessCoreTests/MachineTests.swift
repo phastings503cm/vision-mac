@@ -290,7 +290,7 @@ final class MachineRegistryWiringTests: XCTestCase {
         XCTAssertEqual(Set(processNames), ["process_start", "process_read", "process_write",
                                            "process_stop", "process_list"])
         let machineNames = ToolRegistry.machineTools().map(\.name)
-        XCTAssertEqual(Set(machineNames), ["screenshot", "list_windows", "screen_watch", "ui_tree",
+        XCTAssertEqual(Set(machineNames), ["screenshot", "list_windows", "screen_watch", "ui_tree", "ui_action",
                                            "inspect_process", "mouse", "keyboard", "focus_app", "view_image"])
         // Every machine tool is classified, so the Engine gates it.
         for name in machineNames {

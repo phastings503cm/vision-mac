@@ -366,6 +366,18 @@ struct SetupWizard: View {
                                 .autocorrectionDisabled()
                         }
                     }
+                    GridRow {
+                        Text("").frame(width: 70)
+                        HStack(spacing: 8) {
+                            Button {
+                                Task { await runBrowserSignIn() }
+                            } label: {
+                                Label("Sign in with the browser instead", systemImage: "safari")
+                            }
+                            .disabled(probe == .running)
+                            Text("Microsoft (Entra) or passwordless accounts").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
                 } else if allowsKey {
                     GridRow {
                         Text("API key").frame(width: 70, alignment: .trailing)
@@ -916,6 +928,8 @@ struct SetupWizard: View {
                 apiKey = session.token          // saved to the Keychain by saveProvider()
                 probe = .ok(models.count)
                 if modelID.isEmpty, let first = models.first { modelID = first }
+                // One sign-in serves both: the model route and the Guardian connection (prompts, limits, vault).
+                model.guardian.adopt(session, address: guardian.baseURL.absoluteString)
             } catch {
                 discovered = []
                 probe = .failed(AppTransport.describe(error))
@@ -931,6 +945,28 @@ struct SetupWizard: View {
         } catch {
             discovered = []
             probe = .failed(AppTransport.describe(error))
+        }
+    }
+
+    /// Guardian through the browser (Entra SSO, passwordless): the consent page, a loopback redirect, PKCE.
+    private func runBrowserSignIn() async {
+        probe = .running
+        do {
+            let guardian = try GuardianClient(baseURL: host.isEmpty ? GuardianService.defaultURL : host)
+            let device = Host.current().localizedName ?? "Mac"
+            let (session, org) = try await guardian.signInWithBrowser(device: "\(AppIdentity.name) on \(device)") { url in
+                await MainActor.run { _ = NSWorkspace.shared.open(url) }
+            }
+            guardianChallenge = nil
+            let models = try await guardian.models().map(\.id)
+            discovered = models.sorted()
+            apiKey = session.token
+            probe = .ok(models.count)
+            if modelID.isEmpty, let first = models.first { modelID = first }
+            model.guardian.adopt(session, address: guardian.baseURL.absoluteString, orgID: org)
+        } catch {
+            discovered = []
+            probe = .failed((error as? LocalizedError)?.errorDescription ?? AppTransport.describe(error))
         }
     }
 

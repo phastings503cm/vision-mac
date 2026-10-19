@@ -11,7 +11,7 @@ enum WorkspaceMode: String, CaseIterable, Identifiable {
     var icon: String { self == .chat ? "bubble.left.and.bubble.right" : "chevron.left.forwardslash.chevron.right" }
 }
 
-enum SettingsTab: Hashable { case general, models, spark, guardian, skills, computer, plugins, editor }
+enum SettingsTab: Hashable { case general, models, spark, guardian, skills, computer, importExport, plugins, editor }
 
 /// The right column's tabs: the chat's tasks (its current plan first, then what is queued) and its Prompts timeline.
 enum RunPanelTab: String, CaseIterable, Identifiable {
@@ -106,6 +106,7 @@ final class AppModel {
         }
         // A prompt sent while signed into Guardian lands in the account's
         // prompt history (the service deduplicates).
+        let transportRef = transport
         transport.guardianSync = { record, chatID in
             // Sent when the prompt starts and again with its outcome when it ends (Guardian keys prompts by
             // user + text + time, so the second send carries the outcome onto the same notebook row).
@@ -120,10 +121,21 @@ final class AppModel {
                 case .unknown: return nil
                 }
             }()
-            let key = record.outcome.isOpen ? record.id : record.id + "#final"
-            Task { await guardian.syncPrompts([
-                .init(id: key, text: record.text, at: record.at, outcome: outcome, chatID: chatID),
-            ]) }
+            Task { @MainActor in
+                // The chat's name, project and model ride along (Guardian's Prompt Notebook shows them). The service
+                // sends each (prompt, outcome) pair once, so the start and the end land on the same notebook row.
+                let vm = transportRef.sessions.first { $0.id == chatID }
+                await guardian.syncPrompts([
+                    .init(id: record.id, text: record.text, at: record.at, outcome: outcome, chatID: chatID,
+                          chatTitle: vm?.title, project: vm?.projectName,
+                          model: record.model ?? transportRef.modelID(for: vm),
+                          durationSeconds: outcome == nil ? nil : record.durationSeconds, runID: record.turnID),
+                ])
+            }
+        }
+        // Guardian's structured refusals (a missing module, a spent budget) become a dialog, wherever they came from.
+        GuardianProblems.setHandler { problem in
+            Task { @MainActor in guardian.show(problem) }
         }
         // Requests to models that aren't private go through the sensitive-data shield: the user's settings, and
         // every secret in the Credentials Vault.

@@ -57,18 +57,40 @@ public struct GuardianModel: Codable, Hashable, Sendable, Identifiable {
 
 /// One synced prompt-history entry (item 4: the notebook Guardian keeps).
 public struct GuardianPrompt: Codable, Hashable, Sendable {
+    /// Guardian's row id (on prompts read back; nil on the way up).
+    public var id: String?
     public var text: String
     public var at: Date
     /// How the turn it came from ended, in Guardian's own words.
     public var outcome: String?
-    /// The chat it belonged to on the harness side (a string either side can name).
+    /// Where it came from: "vision-mac" for this app.
     public var source: String?
+    public var chatID: String?
+    public var chatTitle: String?
+    public var project: String?
+    public var model: String?
+    public var durationSeconds: Double?
+    public var runID: String?
 
-    public init(text: String, at: Date = .now, outcome: String? = nil, source: String? = nil) {
+    public init(id: String? = nil, text: String, at: Date = .now, outcome: String? = nil, source: String? = nil,
+                chatID: String? = nil, chatTitle: String? = nil, project: String? = nil, model: String? = nil,
+                durationSeconds: Double? = nil, runID: String? = nil) {
+        self.id = id
         self.text = text
         self.at = at
         self.outcome = outcome
         self.source = source
+        self.chatID = chatID
+        self.chatTitle = chatTitle
+        self.project = project
+        self.model = model
+        self.durationSeconds = durationSeconds
+        self.runID = runID
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, text, at, outcome, source, chatTitle, project, model, durationSeconds
+        case chatID = "chatId", runID = "runId"
     }
 }
 
@@ -93,6 +115,8 @@ public enum GuardianError: LocalizedError, Equatable {
     /// JWT from Guardian — complete the sign-in with `verifyTwoFactor`.
     case twoFactorRequired(String)
     case unauthorized          // token expired or revoked
+    /// A structured refusal (403 forbidden, 402/429 limits): what is missing, or which limit, in plain words.
+    case problem(GuardianProblem)
     case server(String)
     case network(String)
 
@@ -106,6 +130,8 @@ public enum GuardianError: LocalizedError, Equatable {
             "This Guardian account uses two-factor sign-in. Enter the 6-digit code from your authenticator app."
         case .unauthorized:
             "The Guardian sign-in has expired — sign in again to keep using it."
+        case .problem(let problem):
+            problem.oneLine()
         case .server(let detail):
             "Guardian had a problem: \(detail)"
         case .network(let detail):
@@ -124,7 +150,15 @@ public final class GuardianClient: @unchecked Sendable {
 
     /// The HTTP layer.
     public typealias Transport = @Sendable (URLRequest) async throws -> GuardianHTTPResponse
-    private let transport: Transport
+    let transport: Transport
+
+    private let stateLock = NSLock()
+    private var _orgID: String?
+    /// The organization calls act in (`x-guardian-org`); nil = the account's active/default org.
+    public var orgID: String? {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _orgID }
+        set { stateLock.lock(); _orgID = newValue?.isEmpty == true ? nil : newValue; stateLock.unlock() }
+    }
 
     public init(baseURL: String, session: GuardianSession? = nil, transport: Transport? = nil) throws {
         guard let url = URL(string: baseURL.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "/"))),
@@ -163,7 +197,9 @@ public final class GuardianClient: @unchecked Sendable {
         let data = try await post(path: "/api/auth/login", body: Body(email: email, password: password, client: "vision-harness"),
                                   token: nil)
         struct Response: Decodable {
-            struct User: Decodable { var id: String; var email: String; var name: String? }
+            /// `{id, email, name}` or Guardian's session shape `{userId, email, name}` — every field optional, so
+            /// one shape missing a field never loses the token beside it.
+            struct User: Decodable { var id: String?; var userId: String?; var email: String?; var name: String? }
             var token: String?
             var user: User?
             /// Guardian's own login shape: `{ok, session:{userId, email}, token}`.
@@ -196,7 +232,7 @@ public final class GuardianClient: @unchecked Sendable {
         let user = decoded?.user ?? decoded?.session
         let email = user?.email ?? decoded?.email ?? email
         let newSession = GuardianSession(
-            userID: user?.id ?? decoded?.id ?? email,
+            userID: user?.id ?? user?.userId ?? decoded?.id ?? email,
             email: email,
             name: user?.name ?? decoded?.name,
             token: token, issuedAt: issued)
@@ -254,6 +290,9 @@ public final class GuardianClient: @unchecked Sendable {
 
     public func signOut() { session = nil }
 
+    /// Take a session obtained another way (the browser sign-in's token exchange).
+    public func adopt(_ newSession: GuardianSession) { session = newSession }
+
     // MARK: Models (the proxy)
 
     /// What the Guardian account may run, through the proxy.
@@ -285,15 +324,11 @@ public final class GuardianClient: @unchecked Sendable {
     /// or not, the caller decides when: the app syncs on submit when signed in.
     @discardableResult
     public func pushPrompts(_ prompts: [GuardianPrompt]) async throws -> Int {
-        struct Body: Encodable { var prompts: [Prompt] }
-        struct Prompt: Encodable {
-            var text: String
-            var at: Date
-            var outcome: String?
-            var source: String?
-        }
-        let body = Body(prompts: prompts.map {
-            .init(text: $0.text, at: $0.at, outcome: $0.outcome, source: $0.source)
+        struct Body: Encodable { var prompts: [GuardianPrompt] }
+        let body = Body(prompts: prompts.map { prompt in
+            var up = prompt
+            up.id = nil
+            return up
         })
         let data = try await post(path: "/api/harness/prompts", body: body, token: session?.token)
         struct Response: Decodable { var accepted: Int? }
@@ -303,28 +338,13 @@ public final class GuardianClient: @unchecked Sendable {
 
     /// The prompt history Guardian holds for this account — the notebook,
     /// browsable in Guardian and from the harness.
-    public func prompts(limit: Int = 200) async throws -> [GuardianPrompt] {
-        struct Response: Decodable {
-            struct Prompt: Decodable {
-                var text: String
-                var at: Date
-                var outcome: String?
-                var source: String?
-            }
-            var prompts: [Prompt]?
-        }
-        var parts = URLComponents(url: baseURL.appendingPathComponent("api/harness/prompts"), resolvingAgainstBaseURL: false)!
-        parts.queryItems = [URLQueryItem(name: "limit", value: String(limit))]
-        var request = URLRequest(url: parts.url!)
-        if let token = session?.token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-        let response = try await transport(request)
-        let data = response.data
-        let status = response.status
-        try Self.check(status, data: data)
+    public func prompts(limit: Int = 200, before: Date? = nil) async throws -> [GuardianPrompt] {
+        struct Response: Decodable { var prompts: [GuardianPrompt]? }
+        var query = [URLQueryItem(name: "limit", value: String(limit))]
+        if let before { query.append(URLQueryItem(name: "before", value: ISO8601DateFormatter().string(from: before))) }
+        let data = try await get(path: "/api/harness/prompts", query: query)
         let decoded = try Self.decoder.decode(Response.self, from: data)
-        return (decoded.prompts ?? []).map {
-            GuardianPrompt(text: $0.text, at: $0.at, outcome: $0.outcome, source: $0.source)
-        }
+        return decoded.prompts ?? []
     }
 
     // MARK: Skills
@@ -452,7 +472,7 @@ public final class GuardianClient: @unchecked Sendable {
 
     // MARK: Wire helpers
 
-    private static let decoder: JSONDecoder = {
+    static let decoder: JSONDecoder = {
         let d = JSONDecoder()
         d.dateDecodingStrategy = .custom { decoder in
             let container = try decoder.singleValueContainer()
@@ -468,43 +488,59 @@ public final class GuardianClient: @unchecked Sendable {
         return d
     }()
 
-    private static let encoder: JSONEncoder = {
+    static let encoder: JSONEncoder = {
         let e = JSONEncoder()
         e.dateEncodingStrategy = .iso8601
         return e
     }()
 
-    private func get(path: String) async throws -> Data {
-        var request = URLRequest(url: baseURL.appendingPathComponent(path))
-        if let token = session?.token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+    func get(path: String, query: [URLQueryItem] = []) async throws -> Data {
+        var url = baseURL.appendingPathComponent(path)
+        if !query.isEmpty, var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            parts.queryItems = query
+            url = parts.url ?? url
+        }
+        var request = URLRequest(url: url)
+        decorate(&request, token: session?.token)
         let response = try await transport(request)
-        let data = response.data
-        let status = response.status
-        try Self.check(status, data: data)
-        return data
+        try Self.check(response.status, data: response.data, headers: response.headers)
+        return response.data
     }
 
-    private func post<B: Encodable>(path: String, body: B, token: String?) async throws -> Data {
+    func post<B: Encodable>(path: String, body: B, token: String?) async throws -> Data {
         var request = URLRequest(url: baseURL.appendingPathComponent(path))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        decorate(&request, token: token)
         request.httpBody = try Self.encoder.encode(body)
         let response = try await transport(request)
-        let data = response.data
-        let status = response.status
-        try Self.check(status, data: data)
-        return data
+        try Self.check(response.status, data: response.data, headers: response.headers)
+        return response.data
     }
 
-    /// Status → error, with the body's message when Guardian sent one.
-    static func check(_ status: Int, data: Data) throws {
+    /// The bearer token and the chosen organization, on every call that has them.
+    func decorate(_ request: inout URLRequest, token: String?) {
+        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        if let orgID { request.setValue(orgID, forHTTPHeaderField: "x-guardian-org") }
+    }
+
+    /// Status → error, with the body's message when Guardian sent one. Structured refusals (403, 402, 429) become
+    /// `.problem` and are reported for the app's dialog.
+    static func check(_ status: Int, data: Data, headers: [String: String] = [:]) throws {
         guard !(200...299).contains(status) else { return }
         struct Body: Decodable { var error: String?; var message: String? }
         let detail = (try? JSONDecoder().decode(Body.self, from: data))
-            .flatMap { $0.error ?? $0.message }
+            .flatMap { $0.message ?? $0.error }
+        if status != 401, let problem = GuardianProblem.parse(status: status, body: data, headers: headers) {
+            GuardianProblems.report(problem)
+            throw GuardianError.problem(problem)
+        }
         switch status {
-        case 401, 403: throw GuardianError.unauthorized
+        case 401: throw GuardianError.unauthorized
+        case 403:
+            let problem = GuardianProblem(status: 403, error: "forbidden", message: detail)
+            GuardianProblems.report(problem)
+            throw GuardianError.problem(problem)
         case 400, 422: throw GuardianError.invalidCredentials(detail ?? "The request was refused.")
         default: throw GuardianError.server(detail ?? "HTTP \(status)")
         }

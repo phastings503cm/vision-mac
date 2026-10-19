@@ -1,13 +1,23 @@
 import AppKit
 import SwiftUI
+import VisionHarnessCore
 
 // MARK: - "Machine in use by Vision AI"
 //
 // While the agent is driving this Mac — moving the mouse, typing, bringing apps
 // forward — the edges of the whole screen glow and a small label says who is
-// at the controls. The glow is a floating, click-through panel covering the
-// screen: it can never take input itself, and ⌘. (stop the agent) is the way
-// to end it, as the control prompt already says.
+// at the controls: which chat has the real mouse (and how many wait), or that
+// chats are working in the background and the mouse is free (see GlowStatus).
+// The glow is a floating, click-through panel covering the screen: it can
+// never take input itself; ⌘. stops a chat and ⌃⌥⌘. stops all AI control
+// from any app.
+
+/// What the pill says; the view follows it while the panel is up.
+@MainActor
+@Observable
+final class MachineGlowModel {
+    var text = GlowStatus.pill(control: .idle, work: [])
+}
 
 /// Owns the overlay panel and follows the transport's `machineInUse` flag.
 @MainActor
@@ -16,6 +26,12 @@ final class MachineGlowController {
 
     private var panel: NSPanel?
     private var hideTask: Task<Void, Never>?
+    let model = MachineGlowModel()
+
+    /// The pill's text: who has the mouse, who waits, or that the AI works in the background.
+    func setText(_ text: String) {
+        if model.text != text { model.text = text }
+    }
 
     /// Show the glow while `active`; remove it (with a small linger) once not.
     func setActive(_ active: Bool) {
@@ -35,6 +51,8 @@ final class MachineGlowController {
     }
 
     private func show() {
+        // No app running (unit tests): nothing to draw on.
+        guard NSApp != nil else { return }
         let screen = NSScreen.main ?? NSScreen.screens.first
         let frame = screen?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let panel = NSPanel(contentRect: frame,
@@ -47,7 +65,7 @@ final class MachineGlowController {
         panel.ignoresMouseEvents = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         panel.hasShadow = false
-        panel.contentView = NSHostingView(rootView: MachineGlowView())
+        panel.contentView = NSHostingView(rootView: MachineGlowView(model: model))
         panel.orderFrontRegardless()
         self.panel = panel
     }
@@ -63,9 +81,8 @@ final class MachineGlowController {
 /// label bottom-center. Drawn with almost no layer cost (a stroked gradient
 /// and one text), refreshed by its own timeline so the shimmer moves.
 struct MachineGlowView: View {
+    let model: MachineGlowModel
     @State private var shimmer: Bool = false
-
-    private static let text = "machine in use by Vision AI"
 
     var body: some View {
         ZStack {
@@ -83,7 +100,7 @@ struct MachineGlowView: View {
                 .padding(6)
                 .shadow(color: Color(red: 0.20, green: 0.95, blue: 0.55).opacity(0.65), radius: 10)
 
-            Label(Self.text, systemImage: "visionpro")
+            Label(model.text, systemImage: "visionpro")
                 .font(.system(size: 13, weight: .semibold, design: .rounded))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 14)
