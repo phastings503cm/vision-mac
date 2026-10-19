@@ -12,6 +12,33 @@ prompt on first launch — right-click the app and choose **Open**, or run:
 xattr -d com.apple.quarantine /Applications/Vision.app
 ```
 
+## What's new in 0.16.7 — your chat's model leads its own team of subagents
+
+- **Each chat's model is the primary for its own subagents.** Tick **Subagent** on any other model in
+  **Settings ▸ AI Models** — a second DGX Spark, Amazon Bedrock, a plan, the Anthropic API, Guardian's models,
+  Claude Code — and a chat can hand side tasks to it. A chat never uses its own model's machine as a subagent
+  server, so a chat on Bedrock can use your Spark and a chat on the Spark can use Bedrock. **Primary** in Settings
+  is now simply the model new chats start with.
+- **The model picks where each task runs.** The `agent` tool lists the chat's subagent servers with what matters
+  for choosing — provider, model, context size, private or not, cost (your own box, a subscription, per token, or
+  Guardian), a speed hint, pictures, how many at a time — and `agent` and `delegate` take a `server`. A picked
+  server that's busy is waited for up to 2 minutes, then another one runs the task and the result says so; a name
+  that isn't on the list is refused before anything starts. Without `server`, the least busy one runs it. How busy
+  each server is comes back in results, so the tool list stays the same and the prompt cache holds.
+- **Claude Code can be a subagent server.** Each task runs as one `claude -p` job in the chat's folder, on your
+  Claude plan, under the chat's permission setting; its report comes back like any subagent's, Stop stops it, and a
+  plan at its limit is left alone until it resets. **Guardian's models** get their own **Subagent** ticks (while
+  signed in) and always use your current sign-in.
+- **Sensitive data stays where it may go.** Guardian and Bedrock in your account count as private for `sensitive`
+  tasks; Claude Code never does and is never in a Sensitive chat's list; plans for interactive use only aren't
+  offered to `/goal` or the queue.
+- **You can see where each task went and why** — picked by the primary, set by its agent type, least busy, or a
+  fallback with its reason — in **Background activity**, the plan's step chips, the subagent log and `/agents`,
+  which now shows the chat's own list and what it can't use.
+- **Your settings carry over.** Every route ticked **Subagent** stays ticked. One change: a route that is the
+  primary *and* ticked now also serves chats on other models (before, the tick did nothing while it was the
+  primary), and making another route the primary no longer ticks the old one for you.
+
 ## What's new in 0.16.6 — Claude Code with your Claude subscription
 
 - **A chat can run on Claude Code.** If you have a Claude Pro or Max plan and the `claude` command on this Mac,

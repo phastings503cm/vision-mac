@@ -107,9 +107,9 @@ The **model menu** under the composer shows the model in use and its window, and
 **Each chat keeps its own model.** The model is stored with the chat, so two projects open at once — or two
 chats in one — each talk to their own server: their turns, retries, `/goal` rounds, compaction, `/context`,
 and their subagents' fallback all use it, whatever another chat picks. A new chat starts with what its
-project's chats last used (else the primary); **Make This the Primary** in the menu is the explicit way to
-change the default for new projects and the fleet's main server. If a chat's model is removed or switched
-off, the chat says so and moves to the primary.
+project's chats last used (else the primary); **Make This the Primary (for new chats)** in the menu is the
+explicit way to change that default. Each chat's own model also leads that chat's subagents (below). If a
+chat's model is removed or switched off, the chat says so and moves to the primary.
 
 ### Thinking
 
@@ -237,8 +237,8 @@ very small models will flail.
 | Switch | Meaning |
 |---|---|
 | **On** | Vision may use it. Switched off, it stays in the list but is never used. |
-| **Primary** | Answers you — the conductor. Exactly one. |
-| **Subagent** | Takes side tasks from the primary, in parallel: the `agent`, `delegate` and background agents. |
+| **Primary** | The model new chats and projects start with. Exactly one. |
+| **Subagent** | Takes side tasks from any chat's model, in parallel: the `agent`, `delegate` and background agents. Any kind of route — your own boxes, plans, Bedrock, the Anthropic API, Guardian's models, Claude Code. |
 | **Backup** | Takes over a turn when the primary doesn't answer. |
 | **Private** | May see sensitive data; the others get it masked (next section). |
 
@@ -247,13 +247,26 @@ OpenAI-compatible server; **Test All** asks every model whether it answers and s
 row. The model menu in the toolbar and under the composer groups them the same way and makes any of them
 the primary in one click.
 
-- **Subagents** run on the subagent servers, least busy first and several at a time (the count is set per
-  server), while the primary carries on. When every subagent server is busy, subagents may use the
-  primary too (a checkbox turns that off). A server that stops answering is skipped for a minute and its
-  task moves to another one (told, if the task had already changed things, to look before repeating a
+- **Each chat's model leads its own team.** A chat's subagents may run on every route ticked **Subagent**
+  except what runs on that chat's own machine — so a chat on Bedrock can hand side tasks to your Spark, and a
+  chat on the Spark to Bedrock. A Sensitive chat leaves out what it may not use (Claude Code always), an
+  unattended run (`/goal`, the queue) leaves out plans for interactive use only, and Guardian's models need you
+  signed in. `/agents` shows a chat's own list, and what it can't use and why.
+- **The chat's model can choose.** The `agent` tool lists the chat's subagent servers — provider, model,
+  context size, private or not, cost (your own box, a subscription, per token, or your organisation's
+  Guardian), a speed hint, pictures, how many at a time — and `agent`/`delegate` take a `server` to pick one.
+  A picked server that is busy is waited for up to 2 minutes; after that (or if it can't take the task) another
+  server runs it and the result says so. Without `server`, the least busy one runs it. How busy each server is
+  comes back with every result, so the tool list itself stays the same and the model's prompt cache holds.
+- When every subagent server is busy, subagents may use **the chat's own model** too (a checkbox turns that
+  off). A server that stops answering is skipped for a minute (a Claude plan at its limit until it resets) and
+  its task moves to another one (told, if the task had already changed things, to look before repeating a
   step). With a single server, a subagent waits out an outage as long as the main agent does.
-- **A new primary** keeps the previous one working as a subagent server when a fleet is running, so two
-  Sparks and Bedrock are still three servers afterwards, in different roles.
+- **Claude Code as a subagent server:** each task is one `claude -p` job in the chat's folder, on your Claude
+  plan, under the chat's permission setting (Plan only for a read-only agent type); its report comes back like
+  any subagent's, with the tool calls it made, and Stop stops it. **Guardian's models** are ticked in
+  **Settings ▸ AI Models ▸ Guardian** (while signed in) and use your sign-in as it is at that moment.
+- **A new primary** changes only what new chats start with — no route's **Subagent** tick changes.
 - **Backups.** If the primary fails before it has said anything — unreachable, timed out, key refused,
   model gone, rate-limited, a server error — the same request goes to each backup in order, and the chat
   says so: "Spark didn't answer (the server refused the connection), so this turn ran on Kimi Code." For
@@ -261,14 +274,16 @@ the primary in one click.
   usual retries take over. A reply that has started is never switched mid-way, and subagents don't use
   backups — the fleet already moves their tasks.
 - One self-hosted machine counts as one subagent server however many of its models are listed (a Spark
-  serves one model at a time), and editing a route never makes it the primary.
+  serves one model at a time): a chat uses the first of them. Each Guardian model, Bedrock model and Claude
+  Code model is a server of its own. Editing a route never makes it the primary.
 - Each subagent server is asked which model it is serving *right now*, so a Spark that swapped models is
   still used correctly. A hosted service such as Bedrock serves every model at once, so a cheaper Bedrock
   model can take the side tasks while a stronger one leads.
 - The bar above the composer shows where the running subagents are ("Spark 2 ×2 · Amazon Bedrock").
   A count is printed only when two or more subagents share a server, so a lone Bedrock agent is just
   "Amazon Bedrock". Expanded, the bar shows what each is doing, on which model; `/agents` lists the servers
-  with how busy each is, and **Background activity** (⌥⌘A, below) shows every agent in every chat.
+  with how busy each is, and **Background activity** (⌥⌘A, below) shows every agent in every chat, where it runs
+  and why there (picked by the primary, set by its agent type, least busy, or a fallback and its reason).
 - A subagent on another route sends **that route's** temperature, output limit and thinking level (none set =
   its provider's default) — never the main chat's, which a Kimi or GLM server would refuse. A hosted worker
   whose key can't list models is still used with the model it is configured for. When a subagent doesn't run
@@ -301,9 +316,9 @@ Vault are always masked. **Try it** shows exactly what a
 model that isn't private would receive. Pictures and files that aren't plain text (a PDF, say) can't be
 checked; the chat says so the first time it sends one to a model that isn't private.
 
-When there are subagent servers, the primary is told which are private and to describe tasks for the
-others in general terms. A task marked `sensitive` runs only on a private server; if none can take it, the
-model is told to do it itself.
+When there are subagent servers, the chat's model is told which are private (your own hardware, Guardian, and
+Bedrock in your AWS account; Claude Code never) and to describe tasks for the others in general terms. A task
+marked `sensitive` runs only on a private server; if none can take it, the model is told to do it itself.
 
 ### Sensitive chats
 
