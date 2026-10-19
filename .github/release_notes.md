@@ -36,7 +36,8 @@ xattr -d com.apple.quarantine /Applications/Vision.app
 - **Huge pastes.** A paste over 400 lines or 20,000 characters becomes a
   "Pasted text" chip you can open and edit, the message box stays responsive,
   long messages collapse in the transcript with **Show all**, and the transcript
-  scrolls freely.
+  scrolls freely. `/goal` with a big paste runs as a goal, the paste going with
+  its first round (sent, queued or sent again from Prompts).
 - **Prompts.** ⇧⌘H shows every prompt a chat sent and how it ended — completed,
   finished with issues, needs you, failed, stopped — with its duration against
   the estimate, the model it ran on and its evidence; **Copy**, **Add to
@@ -62,16 +63,20 @@ xattr -d com.apple.quarantine /Applications/Vision.app
 - **Screen control takes turns.** Clicks and typing go through Accessibility or
   straight to the target app first, so your mouse stays yours; when a chat needs
   the real mouse it waits its turn (and for you to stop moving it), the glow's
-  pill says who has it, and ⌃⌥⌘. stops every chat at once. `/control only <App>`
-  limits a chat to the apps it opened.
+  pill says who has it, and ⌃⌥⌘. stops every chat at once — subagents included,
+  in the foreground or the background, and typing stops mid-text. `/control
+  only <App>` limits a chat to the apps it opened.
 - **Import & Export with OpenClaw.** Settings ▸ Import & Export brings the local
   OpenClaw's skills, memory, keys and model servers into Vision, and sends
-  Vision's back (keys only after you confirm).
+  Vision's back (keys only after you confirm; Guardian secrets used for this
+  run never leave memory).
 - **Guardian sign-in, finished.** Sign in through the browser (Entra SSO,
   passwordless), pick the organization, see your limits and when they reset,
   use your "Usable in Vision" vault secrets, and upload or download code
-  projects (never `.env` files or keys). A refusal is a dialog that says what is
-  missing and who can grant it. Prompts go to your Guardian notebook masked
+  projects (never `.env` files or keys; a copy goes into a new folder, never over
+  one that is there). Signing in again renews Guardian's models too, and **Use
+  Guardian's Models** adds them after a browser sign-in. A refusal is a dialog
+  that says what is missing and who can grant it (background syncs stay quiet). Prompts go to your Guardian notebook masked
   (vault secrets always, and what the sensitive-data shield masks), with how
   they ended — or switch that off in Settings ▸ Guardian.
 

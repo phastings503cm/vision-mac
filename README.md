@@ -724,7 +724,7 @@ VisionMacApp/              SwiftUI
 swift test
 ```
 
-1,718 tests (1,490 on the harness core, 228 on the app host): the engine loop (tool round-trips, denials, iteration budget, usage accounting,
+1,736 tests (1,498 on the harness core, 238 on the app host): the engine loop (tool round-trips, denials, iteration budget, usage accounting,
 cancellation), permission containment, the Qwen XML fallback, glob, markdown, plugin interpolation
 and quoting, prompt assembly, editor-buffer conflict resolution, 34 over the terminal emulator, and 8
 that spawn a real shell on a real pty and assert on what lands on the screen — plus the fleet (server
