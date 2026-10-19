@@ -12,6 +12,25 @@ prompt on first launch — right-click the app and choose **Open**, or run:
 xattr -d com.apple.quarantine /Applications/Vision.app
 ```
 
+## What's new in 0.16.4 — MCP servers, undo a turn's file changes, and Sensitive chats
+
+- **MCP servers.** **Settings ▸ MCP Servers** connects Vision to Model Context Protocol servers — a program it
+  starts, or a URL — and their tools join every chat. **Import** brings in the servers you already set up in
+  Claude Code, Claude Desktop and Cursor. Keys and tokens go into the Keychain, not the settings file. Every call
+  asks first unless you trust the server; `/mcp` lists them in a chat. A project's own servers arrive switched
+  off, showing exactly what they run, until you turn them on.
+- **See and undo what a turn changed.** When a turn ends, **Files changed (N)** lists the files the agent wrote —
+  with its shell commands' changes too, in a git repository — and shows each one's diff. **Rewind this turn…** puts
+  them back as they were and removes the files it created; it says first which ones changed again since, and leaves
+  alone a file that changes while you decide. `/rewind` or **Session ▸ Rewind…** lists the chat's recent turns; an
+  older turn's changes are also under its prompt in **Prompts**. The model is told which files went back.
+- **Sensitive chats.** Mark a chat **Sensitive** (the menu under the composer, **Session ▸ Sensitive Chat** or
+  `/sensitive on`) and it talks only to private models — your own hardware, Guardian, Amazon Bedrock in your AWS
+  account — or to other models only through the shield, which masks what it detects before sending. Claude Code,
+  which reads your files itself, is never used for it. The strip at the top says what that means for the chat's
+  model, the model menu greys out the ones it can't use, and its backups, subagents, `/compact`, skills written
+  from it and tasks it queues follow the same rule. A project can start all its chats Sensitive.
+
 ## What's new in 0.16.3 — DeepSeek, Claude with an API key, and Guardian's models in every chat
 
 - **DeepSeek has its own card.** Choose **DeepSeek — API key** in the wizard (or **Settings ▸ AI Models ▸ Add ▸

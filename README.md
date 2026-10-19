@@ -669,10 +669,14 @@ Protocol](https://modelcontextprotocol.io) servers, and each server's tools join
   this project's — and the project's `.mcp.json`), Claude Desktop (`claude_desktop_config.json`) and Cursor
   (`~/.cursor/mcp.json`, the project's `.cursor/mcp.json`). Nothing starts while you look; the same server
   in two apps is offered once; one Vision already has is greyed out. A server marked SSE is imported as
-  Streamable HTTP with a note (many offer both).
+  Streamable HTTP with a note (many offer both). A project's own servers (`.mcp.json`, `.cursor/mcp.json`)
+  come unchecked unless you approved them in Claude Code, show the full command they run, and arrive
+  switched off — turn one on once you've checked it.
 - **Secrets stay in the Keychain.** Environment variables and HTTP headers (tokens, API keys) are kept
   there, one item each — `mcp-servers.json` in the app's data folder holds only their names. `${NAME}` and
-  `${NAME:-default}` are filled in from your environment when the server starts, as Claude Code does.
+  `${NAME:-default}` are filled in from your environment when the server starts, as Claude Code does (a
+  name Vision doesn't have is left to your login shell). Import warns about a variable you don't have and
+  a key written in plain text in a command line.
 - **Every call asks first** (the usual permission card, naming the server, the tool and its arguments)
   unless the chat has Full access or you trust the server: *Read-only tools without asking* (tools the
   server marks read-only) or *All tools without asking*. Tools can be switched off one by one.
@@ -694,6 +698,10 @@ recorded.
   those later changes away, **Rewind Only the Others** leaves them.
 - **`/rewind`** (or **Session ▸ Rewind…**) lists the chat's recent turns that changed files; `/rewind 2`
   asks to undo the second. A rewind is a turn of its own, so it can be rewound too.
+- A rewind looks at each file again just before writing it: one that changed after you confirmed is left
+  as it is and said so. A turn that's still running can't be rewound.
+- A prompt's results (in **Prompts**) keep its **Files changed** with the same Rewind, so an older turn's
+  changes stay findable; right-click a file for **Open in Editor**.
 - The model is told with your next message which files went back, so it re-reads them.
 - Contents are kept once however many turns keep them (by SHA-256, under `checkpoints/` in the app's data
   folder), for 30 days and at most 1 GB — the oldest go first. Files over 16 MB aren't kept, so a turn that
@@ -785,6 +793,9 @@ VisionHarnessCore/         the harness. No AppKit, no SwiftUI — headlessly tes
   ChatTasks.swift          chat tasks' rules; which plan step a subagent works
   MachineControl/          screen control: the planner, the arbiter (taking turns), the seat, Accessibility
   OpenClaw/                reading a local OpenClaw; import and export
+  MCP/                     the MCP client: stdio and Streamable HTTP servers, their tools, import from other apps
+  Checkpoints/             what each turn changed (file tools, git for shell), Rewind, line diffs
+  SensitivityPolicy.swift  Sensitive chats: which models may see them, in one place
   GuardianHarnessAPI.swift browser sign-in (PKCE), /me, limits, vault, projects; GuardianProblems: refusals
 
 VisionMacApp/              SwiftUI
@@ -798,6 +809,9 @@ VisionMacApp/              SwiftUI
   SensitiveDataSettings.swift  Settings › AI Models › Sensitive data
   SwapperSettings.swift    Settings › Model Servers: the Swapper boxes
   ChatRoutes.swift         each chat's own model
+  MCPSettings.swift        Settings › MCP Servers: the list, the editor, the import sheet
+  CheckpointViews.swift    "Files changed (N)", diffs, the Rewind sheet
+  SensitivityViews.swift   the Sensitive strip and menu
   RunPanel.swift           the right column: Tasks and Prompts; All Prompts; Results
   ActivityMenu.swift       background activity
   ProjectStatusPanel.swift code mode's project status beside the chat
@@ -823,7 +837,7 @@ VisionMacApp/              SwiftUI
 swift test
 ```
 
-1,805 tests (1,529 on the harness core, 276 on the app host): the engine loop (tool round-trips, denials, iteration budget, usage accounting,
+1,842 tests (1,556 on the harness core, 286 on the app host): the engine loop (tool round-trips, denials, iteration budget, usage accounting,
 cancellation), permission containment, the Qwen XML fallback, glob, markdown, plugin interpolation
 and quoting, prompt assembly, editor-buffer conflict resolution, 34 over the terminal emulator, and 8
 that spawn a real shell on a real pty and assert on what lands on the screen — plus the fleet (server
@@ -845,7 +859,12 @@ uses, checked on the wire. Also: each model's request rules and the safety net a
 error bodies, Z.ai's errors and key diagnosis, DeepSeek's thinking switch, reasoning echo and errors (its real
 401 bodies pinned), the Anthropic Messages API against a scripted server (the request, thinking, caching,
 replay, server-side fallback, every error, and a request's shared room for pictures and PDFs), Guardian's
-models in every chat's menu (read at launch, on Refresh, signed out and back in), each chat's own model with
+models in every chat's menu (read at launch, on Refresh, signed out and back in), MCP servers over stdio and
+Streamable HTTP against scripted servers (tools, resources, a server that fails to start, import from Claude Code, Claude
+Desktop and Cursor, secrets kept out of the file), checkpoints and Rewind (the file tools, a shell
+command's changes through git — eol filters and odd paths included — conflicts, a file changed after the
+confirmation), Sensitive chats (each kind of model, backups, subagents, /compact and skills refused, the flag
+carried by tasks and imports), each chat's own model with
 two chats at once, attachments read from real PDFs (text and scanned), Office files and pictures and the exact
 payload each kind of server gets, a 10,000-line paste sent in parts and queued with a task, the paste rule
 through AppKit's own paste path, the paged transcript (pages loading by scroll and by click, the reader's row
@@ -877,6 +896,9 @@ Verified on macOS 14+ / Apple Silicon:
   stubbed HTTP, fake model servers, a scripted Guardian built to its contract); the Swapper client was also run
   against a local Swapper 2.0 demo. The first run against real AWS, a real Kimi, Z.ai, DeepSeek or Anthropic
   key, real vLLM/llama.cpp with a PDF, the live Guardian, and a real second box is yours.
+- **MCP was run only against scripted servers** (a `sh` program, a stubbed HTTP server): no real `npx`
+  server through a real login shell yet. Legacy SSE-only servers don't connect, and there's no OAuth sign-in
+  for HTTP servers that need one (paste a token as a header).
 - **Screen control through Accessibility can't run in the test process** (macOS doesn't trust it); its
   decisions — which route, who waits, who has the mouse — are tested, and the live paths need a person.
 - **The shield masks what it recognises** — the patterns above and your own terms — not every name or
