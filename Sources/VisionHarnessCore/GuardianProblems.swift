@@ -337,7 +337,13 @@ public enum GuardianProblems {
         lock.lock(); self.handler = handler; lock.unlock()
     }
 
+    /// Set while a call runs in the background (the prompt notebook's sync, the ETA samples): a refusal there is
+    /// kept as the call's error, never a dialog — the person didn't ask for it, and it would come back on every prompt.
+    /// (`GuardianProblems.$quiet.withValue(true) { … }`.)
+    @TaskLocal public static var quiet = false
+
     public static func report(_ problem: GuardianProblem) {
+        if quiet { return }
         lock.lock(); let handler = self.handler; lock.unlock()
         handler?(problem)
     }

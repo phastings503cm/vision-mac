@@ -157,7 +157,7 @@ public final class GuardianService: ObservableObject {
         // into this Mac's cache, so its first estimates start smart.
         Task { [weak self] in
             guard let transport = self?.transport else { return }
-            try? await guardian.syncEtas(into: transport.phaseRunner)
+            try? await GuardianProblems.$quiet.withValue(true) { try await guardian.syncEtas(into: transport.phaseRunner) }
         }
         Task { [weak self] in await self?.refreshAccount() }
     }
@@ -464,8 +464,10 @@ public final class GuardianService: ObservableObject {
     /// each prompt text+time pair is pushed once. Called after a send when
     /// the user is signed in, and from Settings ("Sync now").
     /// - Returns: how many prompts went up on this call.
+    /// `background` (the sync on every prompt's start and end): a refusal is kept in `lastError`, not shown as a
+    /// dialog. Settings' "Sync now" is the person's own action and shows it.
     @discardableResult
-    public func syncPrompts(_ records: [SessionVMPrompt]) async -> Int {
+    public func syncPrompts(_ records: [SessionVMPrompt], background: Bool = false) async -> Int {
         guard let client else { return 0 }
         // A prompt goes up on submit, and again once its outcome is known (Guardian dedupes on text and time and
         // keeps the outcome); each (prompt, outcome) pair is sent once.
@@ -477,7 +479,9 @@ public final class GuardianService: ObservableObject {
                            durationSeconds: $0.durationSeconds, runID: $0.runID)
         }
         do {
-            let accepted = try await client.pushPrompts(prompts)
+            let accepted = background
+                ? try await GuardianProblems.$quiet.withValue(true) { try await client.pushPrompts(prompts) }
+                : try await client.pushPrompts(prompts)
             for record in pending { pushedPromptIDs.insert(record.pushKey) }
             persistPushed()
             return accepted
@@ -548,7 +552,7 @@ public final class GuardianService: ObservableObject {
         let kind = TurnPhaseState.TaskKind(rawValue: kindRawValue)
         Task { @MainActor [kind] in
             guard let kind, let client = self.client else { return }
-            try? await client.pushEtaSamples([(kind, scope, seconds)])
+            try? await GuardianProblems.$quiet.withValue(true) { try await client.pushEtaSamples([(kind, scope, seconds)]) }
         }
     }
 }

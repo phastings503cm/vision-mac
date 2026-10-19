@@ -142,7 +142,7 @@ final class AppModel {
                     chatTitle: vm?.title, project: vm?.projectName,
                     model: record.model ?? transportRef.modelID(for: vm),
                     durationSeconds: outcome == nil ? nil : record.durationSeconds, runID: record.turnID)
-                await guardian.syncPrompts([prompt.masked(by: ProviderClients.shield?.detector())])
+                await guardian.syncPrompts([prompt.masked(by: ProviderClients.shield?.detector())], background: true)
             }
         }
         // Guardian's structured refusals (a missing module, a spent budget) become a dialog, wherever they came from.

@@ -231,6 +231,29 @@ final class GuardianServiceTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("outside.txt").path))
     }
 
+    /// The notebook sync on every prompt start and end (and the ETA samples) never raise the refusal dialog: a 403
+    /// there is kept as the service's error. "Sync now" in Settings, the person's own action, still shows it.
+    func testBackgroundSyncsKeepRefusalsQuiet() async throws {
+        final class Shown: @unchecked Sendable {
+            private let lock = NSLock()
+            private var items: [String] = []
+            func add(_ s: String) { lock.lock(); items.append(s); lock.unlock() }
+            var values: [String] { lock.lock(); defer { lock.unlock() }; return items }
+        }
+        let shown = Shown()
+        GuardianProblems.setHandler { shown.add($0.reason ?? $0.error) }
+        defer { GuardianProblems.setHandler(nil) }
+        try await signIn()
+        wire.routes["POST /api/harness/prompts"] = (403, #"{"error":"forbidden","reason":"module_disabled","needed":"Prompt notebook","message":"The prompt notebook is turned off for your account in 503CM."}"#)
+        let prompt = GuardianService.SessionVMPrompt(id: "p1", text: "fix the build", at: Date(), outcome: nil, chatID: "c1")
+        let sent = await service.syncPrompts([prompt], background: true)
+        XCTAssertEqual(sent, 0)
+        XCTAssertTrue(shown.values.isEmpty, "no dialog for a sync the person didn't ask for")
+        XCTAssertNotNil(service.lastError)
+        _ = await service.syncPrompts([prompt])
+        XCTAssertEqual(shown.values, ["module_disabled"], "Settings' Sync now shows it")
+    }
+
     func testAnExpiredSignInIsDroppedWithAPlainMessage() async throws {
         try await signIn()
         wire.routes["GET /api/harness/me"] = (401, #"{"error":"unauthorized","message":"revoked"}"#)
