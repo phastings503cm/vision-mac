@@ -47,8 +47,9 @@ public struct ZipArchive: Sendable {
         return try read(entry)
     }
 
-    public func read(_ entry: Entry) throws -> Data {
-        guard entry.size <= Self.maxEntrySize else { throw ZipError.tooLarge(entry.name) }
+    /// The bytes of `entry`, refused past `limit` (a chat export's conversations.json may pass the default).
+    public func read(_ entry: Entry, limit: Int = ZipArchive.maxEntrySize) throws -> Data {
+        guard entry.size <= limit else { throw ZipError.tooLarge(entry.name) }
         let local = entry.localHeaderOffset
         guard local >= 0, local + 30 <= data.count, u32(local) == 0x04034B50 else {
             throw ZipError.damaged("no local header for \(entry.name)")
