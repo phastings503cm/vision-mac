@@ -20,6 +20,11 @@ struct SeenRequest: Sendable {
     let messages: [[String: String]]
     /// The server the request went to (the fake serves every host), for tests with several servers.
     var host: String = ""
+    /// The model settings the request carried (nil / false = not sent).
+    var temperature: Double? = nil
+    var maxTokens: Int? = nil
+    var reasoning: Bool = false
+    var model: String? = nil
     var lastUser: String { messages.last(where: { $0["role"] == "user" })?["content"] ?? "" }
     var allUserText: String { messages.filter { $0["role"] == "user" }.compactMap { $0["content"] }.joined(separator: "\n") }
     /// The request is answering a user message (not a tool result).
@@ -61,7 +66,10 @@ final class FakeModelServer: URLProtocol, @unchecked Sendable {
             if let c = m["content"] as? String { out["content"] = c }
             return out
         }
-        let seen = SeenRequest(messages: messages, host: request.url?.host ?? "")
+        let seen = SeenRequest(messages: messages, host: request.url?.host ?? "",
+                               temperature: obj["temperature"] as? Double, maxTokens: obj["max_tokens"] as? Int,
+                               reasoning: obj["reasoning_effort"] != nil || obj["chat_template_kwargs"] != nil,
+                               model: obj["model"] as? String)
         Self.lock.lock()
         Self._seen.append(seen)
         let index = Self._seen.count

@@ -162,7 +162,7 @@ public final class SessionVM: Identifiable {
     /// A run started, moved or ended: add it or replace it (the roster keeps them in start order).
     public func upsertAgent(_ run: AgentRun) {
         if let index = agentRuns.firstIndex(where: { $0.id == run.id }) {
-            agentRuns[index] = run
+            agentRuns[index] = merged(run, over: agentRuns[index])
         } else if !run.id.isEmpty {
             agentRuns.append(run)
         }
@@ -191,45 +191,32 @@ public final class SessionVM: Identifiable {
     /// Whether the phases run at all for this chat (off: a plain question gets no ceremony).
     public var phasesEnabled = true
 
-    /// The user prompts sent in this chat, with when they landed and where their results live.
-    /// Backs the prompt timeline (Prompt History); oldest first.
+    /// The prompts sent in this chat, oldest first, with how each ended — the Prompts timeline. Read from (and saved
+    /// to) the chat's timeline file by `AppTransport` (`loadPromptHistory`); a chat from before the timeline existed
+    /// is backfilled from its transcript once.
     public var promptHistory: [PromptRecord] = []
+    /// `promptHistory` has been read from disk (or backfilled).
+    public var promptHistoryLoaded = false
+    /// The record of the prompt the chat is working on now.
+    public var currentPromptID: String?
+    /// The transcript row "Jump" just scrolled to: drawn highlighted for a moment.
+    public var flashEntryID: String?
+    /// Tokens the current (or last) prompt has used, across its rounds.
+    public var turnPromptTokens = 0
+    public var turnCompletionTokens = 0
 
-    public struct PromptRecord: Identifiable, Hashable, Sendable {
-        public let id: String
-        public var text: String
-        public var at: Date
-        /// The turn-phase turn these results belong to (nil for a plain question that never phased).
-        public var turnID: String?
-        /// How the turn ended, for the timeline row's chip.
-        public var outcome: Outcome
+    /// The record of the prompt in progress.
+    public var currentPrompt: PromptRecord? {
+        guard let currentPromptID else { return nil }
+        return promptHistory.last { $0.id == currentPromptID }
+    }
 
-        public enum Outcome: Hashable, Sendable {
-            case none                  // still working / never finished
-            case completed(evidence: Int)
-            case blocked(reason: String)
-            case failed(reason: String)
-            case stopped
-
-            public var label: String {
-                switch self {
-                case .none: "working…"
-                case .completed: "completed"
-                case .blocked: "needs you"
-                case .failed: "failed"
-                case .stopped: "stopped"
-                }
-            }
-        }
-
-        public init(id: String = UUID().uuidString, text: String, at: Date = .now,
-                    turnID: String? = nil, outcome: Outcome = .none) {
-            self.id = id
-            self.text = text
-            self.at = at
-            self.turnID = turnID
-            self.outcome = outcome
-        }
+    /// Keep a run's plan step when an update from the roster arrives without one.
+    private func merged(_ incoming: AgentRun, over existing: AgentRun?) -> AgentRun {
+        guard let existing else { return incoming }
+        var run = incoming
+        if run.assignment == nil { run.assignment = existing.assignment }
+        return run
     }
 
     /// Whether the chat has anything for the plan panel.

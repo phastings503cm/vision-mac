@@ -107,6 +107,9 @@ enum SnapshotSeed {
             (.assistant, "Each model has requests-per-minute and tokens-per-minute quotas per Region; a global inference profile spreads requests over several Regions and draws on its own quota. You can see and request increases in Service Quotas."),
         ])
 
+        let timelines = PromptTimelineStore(directory: AppPaths.support.appendingPathComponent("prompt-timeline", isDirectory: true))
+        for (chatID, records) in otherTimelines(now: now) { timelines.save(chatID, records) }
+
         guard live == nil, let transcript = transcript else { return }
         let start = now.addingTimeInterval(-transcript.duration - 120)
         let entries = transcript.entries(startingAt: start)
@@ -162,11 +165,8 @@ enum SnapshotSeed {
                                 detail: "Default output byte-identical to the pre-change baseline.", at: finished.addingTimeInterval(-9)))
         state.beginResults(summary: "Validated against the plan: 6 of 6 steps done.", at: finished)
         vm.turnPhase = state
-        vm.promptHistory = [
-            .init(text: "What does ledger report output today?", at: start.addingTimeInterval(-3 * 3_600),
-                  turnID: "older", outcome: .completed(evidence: 1)),
-            .init(text: prompt, at: start, turnID: "seeded-turn", outcome: .completed(evidence: 3)),
-        ]
+        vm.promptHistory = promptRecords(chatID: vm.id, start: start, finished: finished, state: state)
+        vm.promptHistoryLoaded = true
     }
 
     /// The seeded chat (made from a live run's `chat-transcript.json`).

@@ -1,7 +1,8 @@
 # assets
 
 `screenshot.png` is referenced from the top of the project README, and `screenshots/` holds the
-other scenes it links to (the chat with the plan panel, the setup wizard, Settings ▸ AI Models).
+other scenes it links to (the chat with its tasks, a busy chat's tasks, the Prompts timeline, all prompts,
+background activity, code mode's chat-first layouts, the setup wizard, Settings ▸ AI Models).
 `logo/` holds the app icon (`AppIcon.icns`), the in-app logo (`logo.png`), and the source `logo.svg`;
 `bundle.sh` copies the first two into the app bundle.
 
@@ -15,8 +16,9 @@ ScreenCaptureKit and never touches your settings, chats or Keychain:
 .build/debug/Vision --snapshot /tmp/vision-shots --snapshot-scenes chat,code
 ```
 
-`chat`, `code`, `setup` and `settings-models` come out as 2x PNGs, over a made-up workspace
-(the seeded "ledger" project). `cp /tmp/vision-shots/code.png assets/screenshot.png` and copy the
+`chat`, `code`, `setup`, `settings-models`, `prompts`, `tasks`, `activity`, `all-prompts`, `code-focus` and
+`code-chat` come out as 2x PNGs, over a made-up workspace (the seeded "ledger" project; the tasks, activity and
+code-focus scenes stage a /goal at work with subagents on two servers and three prompts queued after it). `cp /tmp/vision-shots/code.png assets/screenshot.png` and copy the
 others into `assets/screenshots/`. `--snapshot-live <aws-profile>` first runs a real agent turn and
 seeds the chat from what happened (see `assets/screenshots/seed-from-live-run.py`).
 

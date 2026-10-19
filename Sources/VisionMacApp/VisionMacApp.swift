@@ -120,15 +120,41 @@ struct AppCommands: Commands {
             Button("Code Mode") { model.mode = .code }
                 .keyboardShortcut("2", modifiers: .command)
             Divider()
-            Button(model.config.planPanelOpen ? "Hide Plan" : "Show Plan") { model.togglePlan() }
-                .keyboardShortcut("p", modifiers: [.command, .shift])
-            Button("Toggle File Tree") { model.code.showTree.toggle() }
-                .keyboardShortcut("b", modifiers: .command)
-            Button("Toggle Terminal") {
+            Button(model.config.planPanelOpen && model.runPanelTab == .tasks ? "Hide Tasks" : "Show Tasks") {
+                model.toggleRunPanel(.tasks)
+            }
+            .keyboardShortcut("p", modifiers: [.command, .shift])
+            Button(model.config.planPanelOpen && model.runPanelTab == .prompts ? "Hide Prompts" : "Show Prompts") {
+                model.toggleRunPanel(.prompts)
+            }
+            .keyboardShortcut("h", modifiers: [.command, .shift])
+            Button("All Prompts…") { model.showAllPrompts = true }
+                .keyboardShortcut("h", modifiers: [.command, .shift, .option])
+            Button("Background Activity") { model.showActivity.toggle() }
+                .keyboardShortcut("a", modifiers: [.command, .option])
+            Divider()
+            Button(model.code.showTree ? "Hide File Tree" : "Show File Tree") {
+                model.mode = .code
+                model.code.toggleTree()
+            }
+            .keyboardShortcut("b", modifiers: .command)
+            Button(model.code.editorVisible ? "Hide Editor" : "Show Editor") {
+                model.mode = .code
+                model.code.toggleEditor()
+            }
+            .keyboardShortcut("e", modifiers: [.command, .option])
+            .disabled(model.project == nil)
+            Button(model.code.terminalVisible ? "Hide Terminal" : "Show Terminal") {
                 model.mode = .code
                 model.code.toggleTerminal()
             }
             .keyboardShortcut("`", modifiers: .control)
+            .disabled(model.project == nil)
+            Button(model.code.isChatFocus ? "Show Files and Editor" : "Chat and Project Status Only") {
+                model.mode = .code
+                model.code.toggleChatFocus()
+            }
+            .keyboardShortcut(.return, modifiers: [.command, .option])
             .disabled(model.project == nil)
         }
 
@@ -179,6 +205,12 @@ struct RootView: View {
         }
         .sheet(isPresented: $model.showVault) {
             VaultView().environment(model)
+        }
+        .sheet(isPresented: $model.showAllPrompts) {
+            AllPromptsView().environment(model)
+        }
+        .sheet(item: $model.resultsRecord) { record in
+            PromptResultsView(record: record).environment(model)
         }
         .sheet(item: $model.bedrockGuide) { request in
             BedrockGuideView(request: request, appModel: model).environment(model)
@@ -291,11 +323,24 @@ struct RootView: View {
 
         ToolbarItem {
             Button {
-                model.togglePlan()
+                model.toggleRunPanel(.tasks)
             } label: {
-                Label("Plan", systemImage: "checklist")
+                Label("Tasks", systemImage: "checklist")
             }
-            .help(model.config.planPanelOpen ? "Hide the plan (⇧⌘P)" : "Show the plan (⇧⌘P)")
+            .help("This chat's tasks (⇧⌘P): what it is doing now — the plan, its steps and who works each — then what is queued after it")
+        }
+
+        ToolbarItem {
+            Button {
+                model.toggleRunPanel(.prompts)
+            } label: {
+                Label("Prompts", systemImage: "clock.arrow.circlepath")
+            }
+            .help("Prompts (⇧⌘H): every prompt this chat has sent and how it ended — copy, quote, jump to it, see its results. All chats: ⌥⇧⌘H")
+        }
+
+        ToolbarItem {
+            ActivityToolbarButton()
         }
 
         ToolbarItem {

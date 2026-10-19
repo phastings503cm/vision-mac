@@ -26,10 +26,26 @@ public struct AgentRun: Identifiable, Sendable, Hashable {
     public var finishedAt: Date?
     /// Its final report (or the failure), once it is over.
     public var report: String?
+    /// The task it was given (the start of it), for its log.
+    public var prompt: String?
+    /// The route (model server) it actually runs on — always set once it has one, even when there was no choice —
+    /// and the model id it sends its requests to. What the background-activity menu shows, so "is the subagent really
+    /// on the model I configured?" has an answer.
+    public var route: String?
+    public var model: String?
+    /// Why it runs where it does when that isn't where it was asked to ("asked for spark-2 — not a subagent server").
+    public var placement: String?
+    /// The plan step it is working (see `PlanAssignment`).
+    public var assignment: String?
+    /// Tokens its model calls used (known when it finishes).
+    public var promptTokens: Int = 0
+    public var completionTokens: Int = 0
+    /// What it did, stamped: started, where it runs, each tool call, how it ended. Bounded.
+    public var log: [AgentRunLine] = []
 
     public init(id: String, description: String, agentType: String, isBackground: Bool, startedAt: Date,
                 server: String? = nil, status: AgentRunStatus = .running, activity: String = "starting",
-                steps: Int = 0, finishedAt: Date? = nil, report: String? = nil) {
+                steps: Int = 0, finishedAt: Date? = nil, report: String? = nil, prompt: String? = nil) {
         self.id = id
         self.description = description
         self.agentType = agentType
@@ -41,12 +57,33 @@ public struct AgentRun: Identifiable, Sendable, Hashable {
         self.steps = steps
         self.finishedAt = finishedAt
         self.report = report
+        self.prompt = prompt
+    }
+
+    /// "Qwen3-Coder-30B on DGX Spark" — the model and where; nil until it has a server.
+    public var placementLabel: String? {
+        switch (model, route ?? server) {
+        case let (model?, route?): "\(model) on \(route)"
+        case let (nil, route?): route
+        case let (model?, nil): model
+        default: nil
+        }
     }
 
     public var isRunning: Bool { status == .running }
 
     public func elapsed(at now: Date = Date()) -> TimeInterval {
         (finishedAt ?? now).timeIntervalSince(startedAt)
+    }
+}
+
+/// One stamped line of a subagent's log.
+public struct AgentRunLine: Sendable, Hashable {
+    public var at: Date
+    public var text: String
+    public init(at: Date, text: String) {
+        self.at = at
+        self.text = text
     }
 }
 
@@ -82,11 +119,13 @@ public final class AgentRoster: @unchecked Sendable {
 
     /// Register a new run; its id.
     @discardableResult
-    public func begin(description: String, agentType: String, background: Bool) -> String {
+    public func begin(description: String, agentType: String, background: Bool, prompt: String? = nil) -> String {
         let run: AgentRun = lock.withLock {
             counter += 1
-            let run = AgentRun(id: "a\(counter)", description: description, agentType: agentType,
-                               isBackground: background, startedAt: now())
+            let at = now()
+            var run = AgentRun(id: "a\(counter)", description: description, agentType: agentType,
+                               isBackground: background, startedAt: at, prompt: prompt.map { String($0.prefix(2_000)) })
+            run.log.append(AgentRunLine(at: at, text: "Started (\(agentType)\(background ? ", in the background" : ""))"))
             runs.append(run)
             // Keep the list bounded: the oldest finished runs go first.
             while runs.count > Self.retained, let old = runs.firstIndex(where: { !$0.isRunning }) {
@@ -112,15 +151,55 @@ public final class AgentRoster: @unchecked Sendable {
         update(id) { var run = $0; run.server = label; return run }
     }
 
-    /// What the run is doing now; `step` counts it as a tool call.
+    /// Where it runs now: the route, the model, and — when that isn't where it was asked to run — why.
+    public func setPlacement(_ id: String, route: String, model: String, note: String? = nil) {
+        let at = now()
+        update(id) { run in
+            var run = run
+            let moved = run.route != nil && run.route != route
+            run.route = route
+            run.model = model
+            if let note { run.placement = note }
+            run.log.append(AgentRunLine(at: at, text: (moved ? "Moved to " : "Running on ") + "\(model) · \(route)"
+                                        + (note.map { " — \($0)" } ?? "")))
+            Self.trim(&run)
+            return run
+        }
+    }
+
+    /// The plan step it works (set by the host when it starts).
+    public func setAssignment(_ id: String, _ step: String?) {
+        guard let step, !step.isEmpty else { return }
+        update(id) { var run = $0; run.assignment = step; return run }
+    }
+
+    /// Tokens a finished model run used.
+    public func addTokens(_ id: String, prompt: Int, completion: Int) {
+        guard prompt > 0 || completion > 0 else { return }
+        update(id) { run in
+            var run = run
+            run.promptTokens += prompt
+            run.completionTokens += completion
+            return run
+        }
+    }
+
+    /// What the run is doing now; `step` counts it as a tool call (and writes it to the run's log).
     public func note(_ id: String, _ activity: String, step: Bool = false) {
+        let at = now()
         update(id) { run in
             guard run.isRunning else { return run }
             var run = run
             run.activity = activity
             if step { run.steps += 1 }
+            if step || run.log.last?.text != activity { run.log.append(AgentRunLine(at: at, text: activity)) }
+            Self.trim(&run)
             return run
         }
+    }
+
+    private static func trim(_ run: inout AgentRun) {
+        if run.log.count > 200 { run.log.removeFirst(run.log.count - 200) }
     }
 
     public func finish(_ id: String, status: AgentRunStatus, report: String) {
@@ -136,6 +215,9 @@ public final class AgentRoster: @unchecked Sendable {
             case .stopped: run.activity = "stopped"
             default: run.activity = "failed"
             }
+            run.log.append(AgentRunLine(at: finishedAt, text: status == .done ? "Finished — report delivered"
+                                        : status == .stopped ? "Stopped" : "Failed: \(String(report.prefix(200)))"))
+            Self.trim(&run)
             return run
         }
     }

@@ -86,6 +86,12 @@ struct ChatView: View {
                     }
                     ForEach(session.entries) { entry in
                         EntryRow(entry: entry, session: session)
+                            .padding(session.flashEntryID == entry.id ? 4 : 0)
+                            .background(session.flashEntryID == entry.id ? Color.accentColor.opacity(0.16) : Color.clear,
+                                        in: RoundedRectangle(cornerRadius: Theme.corner))
+                            .overlay(RoundedRectangle(cornerRadius: Theme.corner)
+                                .strokeBorder(session.flashEntryID == entry.id ? Color.accentColor.opacity(0.7) : Color.clear,
+                                              lineWidth: 1.5))
                             .id(entry.id)
                     }
                     // The live turn-phase card sits under the newest entry
@@ -97,7 +103,7 @@ struct ChatView: View {
                             .id("phase-\(phase.turnID)")
                     }
                     if !session.running, session.promptHistory.count > 1 {
-                        PromptHistoryView(session: session)
+                        PromptsLink(session: session)
                             .padding(.leading, Theme.gutter)
                     }
                     if session.running, session.entries.last?.tool?.isFinished ?? true {
@@ -113,10 +119,17 @@ struct ChatView: View {
                 .frame(maxWidth: Theme.maxTranscriptWidth, alignment: .leading)
                 .frame(maxWidth: .infinity)
             }
-            .onChange(of: session.entries.count) { _, _ in scroll(proxy) }
-            .onChange(of: lastEntryLength) { _, _ in scroll(proxy) }
+            .onChange(of: session.entries.count) { _, _ in
+                if session.flashEntryID == nil { scroll(proxy) }
+            }
+            .onChange(of: lastEntryLength) { _, _ in
+                if session.flashEntryID == nil { scroll(proxy) }
+            }
             .onChange(of: session.id) { _, _ in
                 proxy.scrollTo(bottomAnchor, anchor: .bottom)
+            }
+            .onChange(of: model.promptJump) { _, jump in
+                handleJump(jump, proxy: proxy)
             }
             .onAppear {
                 proxy.scrollTo(bottomAnchor, anchor: .bottom)
@@ -124,13 +137,36 @@ struct ChatView: View {
                 // repeat once the run loop has caught up.
                 Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 120_000_000)
-                    proxy.scrollTo(bottomAnchor, anchor: .bottom)
+                    if model.promptJump?.sessionID == session.id {
+                        handleJump(model.promptJump, proxy: proxy)
+                    } else {
+                        proxy.scrollTo(bottomAnchor, anchor: .bottom)
+                    }
                 }
             }
         }
     }
 
     private let bottomAnchor = "transcript-bottom"
+
+    /// "Jump" from the Prompts timeline: scroll to the prompt's row and flash it.
+    private func handleJump(_ jump: PromptJump?, proxy: ScrollViewProxy) {
+        guard let jump, jump.sessionID == session.id else { return }
+        model.promptJump = nil
+        guard let record = session.promptHistory.first(where: { $0.id == jump.recordID }) else { return }
+        guard let entryID = transport.entryID(for: record, in: session) else {
+            transport.broadcast("That prompt is no longer in the transcript — the conversation was compacted since. Its text and results are still in Prompts.")
+            return
+        }
+        session.flashEntryID = entryID
+        withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(entryID, anchor: .center) }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_600_000_000)
+            if session.flashEntryID == entryID {
+                withAnimation(.easeOut(duration: 0.4)) { session.flashEntryID = nil }
+            }
+        }
+    }
 
     /// Streaming text changes the last entry without changing the count.
     private var lastEntryLength: Int {
@@ -204,7 +240,7 @@ struct ChatView: View {
                 .disabled(session.running)
 
                 ComposerField(text: $draft, height: $composerHeight,
-                              isEnabled: !session.running, onSubmit: send)
+                              isEnabled: true, onSubmit: send, onAddToTasks: addToTasks)
                     .frame(height: composerHeight)
                     .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.corner))
                     .overlay(
@@ -213,6 +249,13 @@ struct ChatView: View {
                     )
 
                 if session.running {
+                    Button(action: addToTasks) {
+                        Image(systemName: "text.badge.plus")
+                            .frame(width: 22, height: 22)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .help("Add to this chat's tasks (↩) — it starts by itself when the current work finishes")
                     Button {
                         transport.stopSession(session.id)
                     } label: {
@@ -290,12 +333,31 @@ struct ChatView: View {
     }
 
     private func send() {
+        // While the agent works, ↩ queues the prompt as the chat's next task instead of refusing it.
+        if session.running || model.transport.runTasks[session.id] != nil {
+            addToTasks()
+            return
+        }
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty || !attachments.isEmpty, !session.running else { return }
+        guard !text.isEmpty || !attachments.isEmpty else { return }
         let payload = attachments
         draft = ""
         attachments = []
         model.send(text, in: session, attachments: payload)
+    }
+
+    /// Queue the draft as this chat's next task (⌘↩, or ↩ while the agent works): it runs after what is running and
+    /// what is already queued, by itself.
+    private func addToTasks() {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        guard attachments.isEmpty else {
+            transport.broadcast("A queued task can't carry attachments — send it when the agent is free, or remove the attachments.")
+            return
+        }
+        guard transport.addChatTask(text, sessionID: session.id) != nil else { return }
+        draft = ""
+        composerHeight = ComposerField.minHeight
     }
 
     /// The queued attachments as removable chips.
@@ -382,6 +444,8 @@ struct ComposerField: NSViewRepresentable {
     @Binding var height: CGFloat
     var isEnabled: Bool
     var onSubmit: () -> Void
+    /// ⌘↩: add the draft to the chat's tasks.
+    var onAddToTasks: (() -> Void)?
 
     static let minHeight: CGFloat = 32
     static let maxHeight: CGFloat = 180
@@ -451,6 +515,10 @@ struct ComposerField: NSViewRepresentable {
             let flags = NSApp.currentEvent?.modifierFlags ?? []
             if flags.contains(.shift) || flags.contains(.option) {
                 textView.insertNewlineIgnoringFieldEditor(nil)
+                return true
+            }
+            if flags.contains(.command), let add = parent.onAddToTasks {
+                add()
                 return true
             }
             parent.onSubmit()
@@ -912,21 +980,25 @@ struct PhaseCard: View {
                 chevron
                 phaseChip(.results)
                 Spacer()
-                if state.phase != .results { runtime }
+                if !state.isOver { runtime }
             }
             .padding(.horizontal, 10)
             .padding(.top, 10)
             .padding(.bottom, 8)
 
-            switch state.phase {
-            case .planning:
-                planningBody
-            case .execution:
-                executionBody
-            case .validation:
-                validationBody
-            case .results:
-                resultsBody
+            if let reason = state.endedReason {
+                endedBody(reason)
+            } else {
+                switch state.phase {
+                case .planning:
+                    planningBody
+                case .execution:
+                    executionBody
+                case .validation:
+                    validationBody
+                case .results:
+                    resultsBody
+                }
             }
         }
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.corner))
@@ -936,7 +1008,7 @@ struct PhaseCard: View {
         )
         .task(id: state.phase) {
             // One timer per phase: the runtime line and the pulsing badge.
-            while !Task.isCancelled, state.phase != .results {
+            while !Task.isCancelled, !state.isOver {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 tick = Date()
                 pulse.toggle()
@@ -953,11 +1025,10 @@ struct PhaseCard: View {
     }
 
     private func phaseChip(_ phase: TurnPhaseState.Phase) -> some View {
-        let isLive = phase == state.phase
-        let isDone = state.phase == .results ||
-            (state.phase == .validation && phase == .planning) ||
-            (state.phase == .validation && phase == .execution && false) ||
-            (state.phase == .results && phase != .results)
+        let isLive = phase == state.phase && state.endedReason == nil
+        let order: [TurnPhaseState.Phase] = [.planning, .execution, .validation, .results]
+        let isDone = state.phase == .results
+            || (order.firstIndex(of: phase) ?? 0) < (order.firstIndex(of: state.phase) ?? 0)
         return HStack(spacing: 4) {
             if isLive, state.phase != .planning {
                 Circle()
@@ -975,14 +1046,15 @@ struct PhaseCard: View {
             Text(phase.label)
                 .font(.system(size: 10.5, weight: isLive ? .semibold : .regular))
                 .foregroundStyle(isLive ? .primary : (isDone ? Theme.successTint : .secondary))
+                .lineLimit(1)
         }
+        .fixedSize()
     }
 
     private var runtime: some View {
         Group {
             if let start = state.startedAt {
-                let elapsed = Int(Date().timeIntervalSince(start))
-                Text("runtime \(elapsed)m\(elapsed % 60 < 10 ? "0" : "")\(elapsed % 60)s")
+                Text("runtime \(Date().timeIntervalSince(start).formattedDuration)")
                     .font(Theme.mono(10))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
@@ -991,10 +1063,12 @@ struct PhaseCard: View {
     }
 
     private var outline: Color {
+        if state.endedReason != nil { return Theme.hairline }
+        if state.phase == .results, state.lastValidationFailure != nil { return Theme.noticeTint.opacity(0.5) }
         switch state.phase {
-        case .planning: Color.accentColor.opacity(0.35)
-        case .execution, .validation: Theme.successTint.opacity(0.4)
-        case .results: Theme.successTint.opacity(0.55)
+        case .planning: return Color.accentColor.opacity(0.35)
+        case .execution, .validation: return Theme.successTint.opacity(0.4)
+        case .results: return Theme.successTint.opacity(0.55)
         }
     }
 
@@ -1106,15 +1180,36 @@ struct PhaseCard: View {
 
     // MARK: Results
 
+    /// Stopped, failed, or waiting on the person: the card says so and stops animating.
+    private func endedBody(_ reason: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 7) {
+            Image(systemName: reason.hasPrefix("Paused") ? "pause.circle" : reason.hasPrefix("Stopped") ? "stop.circle" : "xmark.circle")
+                .font(.system(size: 11))
+                .foregroundStyle(reason.hasPrefix("Stopped") ? Color.secondary : Theme.noticeTint)
+            Text(reason)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer()
+            if let finished = state.finishedAt {
+                Text(finished, style: .time).font(Theme.mono(10)).foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.bottom, 10)
+    }
+
     private var resultsBody: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let issues = state.lastValidationFailure != nil
+        return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Image(systemName: "checkmark.circle.fill")
+                Image(systemName: issues ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
                     .font(.system(size: 13))
-                    .foregroundStyle(Theme.successTint)
-                Text("Completed with results")
+                    .foregroundStyle(issues ? Theme.noticeTint : Theme.successTint)
+                Text(issues ? "Finished with issues" : state.evidence.isEmpty ? "Completed" : "Completed with results")
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Theme.successTint)
+                    .foregroundStyle(issues ? Theme.noticeTint : Theme.successTint)
                 Spacer()
                 if let finished = state.finishedAt {
                     Text(finished, style: .time)
@@ -1155,121 +1250,27 @@ struct PhaseCard: View {
     }
 }
 
-/// A chat's prompts so far, with their outcomes and a way to reuse one: the
-/// prompt timeline. Click a row to expand it; copy it, drop it back into the
-/// composer to talk about it, and jump to the results card it produced.
-struct PromptHistoryView: View {
+/// Under the last result: how many prompts this chat has sent, and the way to the Prompts timeline.
+private struct PromptsLink: View {
     @Environment(AppModel.self) private var model
     let session: SessionVM
-    @State private var expandedID: String?
-    @State private var jumpTarget: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let count = session.promptHistory.count
+        let failed = session.promptHistory.filter { $0.outcome == .failed || $0.outcome == .stopped }.count
+        Button {
+            model.runPanelTab = .prompts
+            model.config.planPanelOpen = true
+        } label: {
             HStack(spacing: 6) {
                 Image(systemName: "clock.arrow.circlepath")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                Text("Prompt history — \(session.promptHistory.count) prompt\(session.promptHistory.count == 1 ? "" : "s") in this chat")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Spacer()
+                Text("\(count) prompts in this chat" + (failed > 0 ? " · \(failed) didn't finish" : "") + " — open Prompts (⇧⌘H)")
             }
-            ForEach(session.promptHistory) { record in
-                row(record)
-            }
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
         }
-    }
-
-    @ViewBuilder
-    private func row(_ record: SessionVM.PromptRecord) -> some View {
-        let isExpanded = expandedID == record.id
-        VStack(alignment: .leading, spacing: 0) {
-            Button {
-                withAnimation(.easeOut(duration: 0.12)) { expandedID = isExpanded ? nil : record.id }
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "person.crop.circle")
-                        .font(.system(size: 11))
-                        .foregroundStyle(Theme.userTint)
-                    Text(record.text)
-                        .font(.system(size: 11.5))
-                        .lineLimit(isExpanded ? nil : 1)
-                        .multilineTextAlignment(.leading)
-                    Spacer(minLength: 4)
-                    outcomeChip(record)
-                    Text(record.at, style: .time)
-                        .font(Theme.mono(9.5))
-                        .foregroundStyle(.tertiary)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(.tertiary)
-                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                }
-                .padding(6)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            if isExpanded {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(record.text)
-                        .font(.system(size: 11))
-                        .textSelection(.enabled)
-                        .padding(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Theme.surface.opacity(0.7), in: RoundedRectangle(cornerRadius: 6))
-                    HStack(spacing: 10) {
-                        Button("Copy") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(record.text, forType: .string)
-                        }
-                        Button("Reuse in composer") {
-                            model.pendingComposerText = record.text
-                        }
-                        if record.turnID != nil {
-                            Button("Show its results") { jumpTarget = record.turnID }
-                        }
-                        Spacer()
-                    }
-                    .font(Theme.metaFont)
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.tint)
-                }
-                .padding(.leading, 24)
-                .padding(.trailing, 8)
-                .padding(.bottom, 8)
-            }
-        }
-        .background(isExpanded ? Theme.surface.opacity(0.5) : Color.clear,
-                    in: RoundedRectangle(cornerRadius: 6))
-    }
-
-    @ViewBuilder
-    private func outcomeChip(_ record: SessionVM.PromptRecord) -> some View {
-        switch record.outcome {
-        case .none:
-            Label("working", systemImage: "hourglass")
-                .font(.system(size: 9.5))
-                .foregroundStyle(.secondary)
-        case .completed(let evidence):
-            Label(evidence > 0 ? "completed · \(evidence) evidence" : "completed",
-                  systemImage: "checkmark.circle.fill")
-                .font(.system(size: 9.5))
-                .foregroundStyle(Theme.successTint)
-        case .blocked:
-            Label("needs you", systemImage: "pause.circle")
-                .font(.system(size: 9.5))
-                .foregroundStyle(Theme.noticeTint)
-        case .failed:
-            Label("failed", systemImage: "xmark.circle")
-                .font(.system(size: 9.5))
-                .foregroundStyle(Theme.errorTint)
-        case .stopped:
-            Label("stopped", systemImage: "stop.circle")
-                .font(.system(size: 9.5))
-                .foregroundStyle(.secondary)
-        }
+        .buttonStyle(.plain)
+        .help("Every prompt this chat has sent, how each ended, its results — copy, quote, jump to it")
     }
 }
 

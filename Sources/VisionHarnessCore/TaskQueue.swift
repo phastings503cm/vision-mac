@@ -90,6 +90,10 @@ public struct QueueTask: Identifiable, Codable, Hashable, Sendable {
     /// last choice).
     public var routeID: String?
     public var thinking: String?
+    /// A chat task: queued with "Add to tasks" in this chat, it runs there as the chat's next prompt once the chat is
+    /// free — interactively, in order, after whatever the chat is doing. Nil = a task of the unattended queue, which
+    /// the queue runner works as a goal. The queue runner never takes a chat task.
+    public var chatID: String?
     public var log: [QueueLogLine]
 
     public init(id: String = UUID().uuidString,
@@ -128,13 +132,22 @@ public struct QueueTask: Identifiable, Codable, Hashable, Sendable {
         details.isEmpty ? title : "\(title)\n\n\(details)"
     }
 
+    /// What a chat task sends when its turn comes: the prompt exactly as it was written (kept in `details`; the
+    /// title is its first line).
+    public var promptText: String {
+        details.isEmpty ? title : details
+    }
+
+    /// A chat task (see `chatID`).
+    public var isChatTask: Bool { chatID != nil }
+
     public mutating func appendLog(_ kind: QueueLogLine.Kind, _ text: String, at: Date = .now) {
         log.append(QueueLogLine(at: at, kind: kind, text: text))
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, title, details, status, enteredAt, startedAt, finishedAt, rounds
-        case promptTokens, completionTokens, sessionID, cwd, workFolder, routeID, thinking, log
+        case promptTokens, completionTokens, sessionID, cwd, workFolder, routeID, thinking, chatID, log
     }
 
     /// Tolerant decoding: a missing field (a file from an older or newer
@@ -157,6 +170,7 @@ public struct QueueTask: Identifiable, Codable, Hashable, Sendable {
         workFolder = try c.decodeIfPresent(String.self, forKey: .workFolder)
         routeID = try? c.decodeIfPresent(String.self, forKey: .routeID)
         thinking = try? c.decodeIfPresent(String.self, forKey: .thinking)
+        chatID = try? c.decodeIfPresent(String.self, forKey: .chatID)
         log = (try? c.decodeIfPresent([QueueLogLine].self, forKey: .log)) ?? []
     }
 }
@@ -186,12 +200,50 @@ public struct TaskQueue: Codable, Hashable, Sendable {
     public func task(_ id: String) -> QueueTask? { tasks.first { $0.id == id } }
     public func index(of id: String) -> Int? { tasks.firstIndex { $0.id == id } }
 
-    /// The next task to work: the first `.queued` item.
-    public var nextTask: QueueTask? { tasks.first { $0.status == .queued } }
+    /// The next task the queue runner works: the first `.queued` item of the unattended queue (chat tasks run in
+    /// their chats, never here).
+    public var nextTask: QueueTask? { tasks.first { $0.status == .queued && $0.chatID == nil } }
 
-    public var runningTask: QueueTask? { tasks.first { $0.status == .running } }
-    public var hasRunning: Bool { tasks.contains { $0.status == .running } }
-    public var queuedCount: Int { tasks.count(where: { $0.status == .queued }) }
+    public var runningTask: QueueTask? { tasks.first { $0.status == .running && $0.chatID == nil } }
+    public var hasRunning: Bool { tasks.contains { $0.status == .running && $0.chatID == nil } }
+    /// Tasks waiting in the unattended queue.
+    public var queuedCount: Int { tasks.count(where: { $0.status == .queued && $0.chatID == nil }) }
+
+    /// Just the unattended queue (what the Task Queue panel and its runner see).
+    public var unattended: TaskQueue { TaskQueue(tasks: tasks.filter { $0.chatID == nil }) }
+
+    // MARK: Chat tasks
+
+    /// A chat's tasks in order: running first, then the queued ones as they will run, then the finished ones
+    /// (newest first).
+    public func chatTasks(_ chatID: String) -> [QueueTask] {
+        let mine = tasks.filter { $0.chatID == chatID }
+        let running = mine.filter { $0.status == .running }
+        let queued = mine.filter { $0.status == .queued }
+        let done = mine.filter { $0.status != .running && $0.status != .queued }
+            .sorted { ($0.finishedAt ?? $0.enteredAt) > ($1.finishedAt ?? $1.enteredAt) }
+        return running + queued + done
+    }
+
+    /// The chat task to start next in `chatID`, if any is waiting.
+    public func nextChatTask(_ chatID: String) -> QueueTask? {
+        tasks.first { $0.chatID == chatID && $0.status == .queued }
+    }
+
+    /// The chat task running in `chatID`, if one is.
+    public func runningChatTask(_ chatID: String) -> QueueTask? {
+        tasks.first { $0.chatID == chatID && $0.status == .running }
+    }
+
+    /// Chat tasks waiting in `chatID`.
+    public func queuedChatTaskCount(_ chatID: String) -> Int {
+        tasks.count(where: { $0.chatID == chatID && $0.status == .queued })
+    }
+
+    /// Every chat that has chat tasks waiting.
+    public var chatsWithQueuedTasks: Set<String> {
+        Set(tasks.compactMap { $0.status == .queued ? $0.chatID : nil })
+    }
     public var completeCount: Int { tasks.count(where: { $0.status == .complete }) }
 
     /// All log lines across all tasks, oldest first — the queue's global log.
@@ -267,6 +319,45 @@ public extension TaskQueue {
         self[t.id] = t
     }
 
+    /// Queue a prompt as a chat task: it runs in `chatID` as that chat's next prompt once everything before it is
+    /// done (at the front: before the chat's other waiting tasks). The title is the prompt's first line.
+    @discardableResult
+    mutating func addChatTask(_ prompt: String, chatID: String, atFront: Bool = false,
+                              cwd: String? = nil, workFolder: String? = nil) -> QueueTask {
+        let text = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let first = text.split(separator: "\n", omittingEmptySubsequences: true).first.map(String.init) ?? text
+        var title = first.trimmingCharacters(in: .whitespaces)
+        if title.count > 80 { title = String(title.prefix(79)) + "…" }
+        if title.isEmpty { title = "Untitled task" }
+        var task = QueueTask(title: title, details: text, cwd: (cwd?.isEmpty ?? true) ? nil : cwd)
+        if task.cwd == nil, let workFolder, !workFolder.isEmpty { task.workFolder = workFolder }
+        task.chatID = chatID
+        task.sessionID = chatID
+        let ahead = queuedChatTaskCount(chatID)
+        task.appendLog(.entered, "Added to the chat's tasks at #\(atFront ? 1 : ahead + 1)")
+        if atFront, let first = tasks.firstIndex(where: { $0.chatID == chatID && $0.status == .queued }) {
+            tasks.insert(task, at: first)
+        } else {
+            tasks.append(task)
+        }
+        return task
+    }
+
+    /// Move a chat task up (negative) or down among its chat's waiting tasks.
+    mutating func moveWithinChat(id: String, by offset: Int) {
+        guard offset != 0, let task = task(id), task.status == .queued, let chatID = task.chatID else { return }
+        let siblings = tasks.filter { $0.chatID == chatID && $0.status == .queued }.map(\.id)
+        guard let from = siblings.firstIndex(of: id) else { return }
+        let to = min(max(from + offset, 0), siblings.count - 1)
+        guard to != from else { return }
+        move(id: id, onto: siblings[to])
+    }
+
+    /// A chat was deleted: its waiting chat tasks go (a running one is marked skipped, as `remove` does).
+    mutating func removeChatTasks(_ chatID: String) {
+        for task in tasks where task.chatID == chatID { remove(id: task.id) }
+    }
+
     mutating func update(id: String, title: String?, details: String?) {
         guard var t = task(id) else { return }
         if let title = title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty { t.title = title }
@@ -332,9 +423,11 @@ public extension TaskQueue {
     }
 
     /// 1-based position among queued tasks (the "long view" number).
+    /// Counted among the tasks of the same list: a chat task's position in its chat, an unattended task's in the queue.
     public func position(of id: String) -> Int? {
         guard let idx = index(of: id) else { return nil }
-        return tasks[0..<idx].count(where: { $0.status == .queued }) + 1
+        let binding = tasks[idx].chatID
+        return tasks[0..<idx].count(where: { $0.status == .queued && $0.chatID == binding }) + 1
     }
 
     mutating func start(_ id: String, sessionID: String? = nil) {

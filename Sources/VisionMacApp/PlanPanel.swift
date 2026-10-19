@@ -207,8 +207,8 @@ struct PlanPanel: View {
     }
 }
 
-/// The plan panel beside the window's content, with a handle on its edge to make it wider or narrower (the width
-/// is remembered).
+/// The right column (Tasks · Prompts, see `RunPanel`) beside the window's content, with a handle on its edge to make
+/// it wider or narrower (the width is remembered).
 struct PlanPanelColumn: View {
     @Environment(AppModel.self) private var model
     @State private var dragStart: Double?
@@ -237,7 +237,7 @@ struct PlanPanelColumn: View {
                             .onEnded { _ in dragStart = nil })
                 )
                 .help("Drag to resize the plan")
-            PlanPanel()
+            RunPanel()
                 .frame(width: CGFloat(model.config.planPanelWidth))
         }
     }

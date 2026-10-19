@@ -67,6 +67,43 @@ final class SnapshotTests: XCTestCase {
         XCTAssertEqual(SnapshotSeed.routes(live: nil).first?.awsProfile, AppIdentity.awsProfile)
     }
 
+    /// The Prompts, Tasks and activity scenes show every kind of ending and a busy chat whose subagents name their
+    /// model and route — and nothing in that made-up state is a secret or a real path.
+    func testTheRunScenesSeedEveryEndingAndABusyChat() throws {
+        var state = TurnPhaseState(turnID: "t")
+        state.beginPlanning(prompt: "p", kind: .codeEdit, scope: 1, at: Date())
+        let records = SnapshotSeed.promptRecords(chatID: SnapshotSeed.mainChatID, start: Date(), finished: Date(), state: state)
+        XCTAssertEqual(Set(records.map(\.outcome)), [.completed, .failed, .stopped])
+        XCTAssertTrue(records.allSatisfy { $0.chatID == SnapshotSeed.mainChatID })
+        let others = SnapshotSeed.otherTimelines(now: Date())
+        XCTAssertEqual(others.count, 3)
+        XCTAssertTrue(others.allSatisfy { chatID, records in records.allSatisfy { $0.chatID == chatID } })
+
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("snap-runs-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let suite = "snap-runs-\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let config = AppConfig(defaults: UserDefaults(suiteName: suite)!, secrets: MemorySecretStore())
+        let transport = AppTransport(config: config, log: ConversationLog(dir: dir.appendingPathComponent("log")),
+                                     queueFile: dir.appendingPathComponent("q.json"),
+                                     skillLocations: SkillLocations(home: dir, appSupport: dir.appendingPathComponent("s")),
+                                     vault: CredentialVault(directory: dir.appendingPathComponent("v"), store: MemoryBlobStore()))
+        let vm = transport.newSession(cwd: "/tmp/ledger")
+        SnapshotSeed.stageBusy(vm, transport: transport)
+        XCTAssertTrue(vm.running)
+        XCTAssertEqual(transport.queue.queuedChatTaskCount(vm.id), 3)
+        XCTAssertEqual(transport.currentWork(for: vm)?.kind, "Goal")
+        XCTAssertTrue(vm.agentRuns.filter(\.isRunning).allSatisfy { $0.placementLabel != nil })
+        XCTAssertTrue(vm.todos.contains { step in vm.agentRuns.contains { $0.assignment == step.content } })
+        for text in records.map(\.text) + [SnapshotSeed.goalText] + vm.agentRuns.compactMap(\.placement) {
+            XCTAssertNil(text.range(of: #"/Users/|AKIA[0-9A-Z]{8}|(?i)\b(dsh|deepharness)\b"#, options: .regularExpression), text)
+        }
+        SnapshotSeed.unstageBusy(vm, transport: transport)
+        XCTAssertFalse(vm.running)
+        XCTAssertEqual(transport.queue.queuedChatTaskCount(vm.id), 0)
+        XCTAssertNil(transport.chatTasksPaused[vm.id])
+    }
+
     func testTheCodeSceneOpensFilesTheProjectHas() {
         for file in SnapshotSeed.codeSceneFiles {
             XCTAssertNotNil(SnapshotProject.changes[file] ?? SnapshotProject.files[file], file)

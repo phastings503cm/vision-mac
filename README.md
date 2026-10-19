@@ -15,7 +15,12 @@
   <img src="assets/screenshot.png" alt="Vision in code mode: project tree, syntax-highlighted editor, integrated terminal, and the agent alongside" width="960" />
 </p>
 <p align="center">
-  <em>Chat with the plan panel</em> · <a href="assets/screenshots/chat.png">full size</a> ·
+  <em>Code mode</em> · <a href="assets/screenshots/chat.png">chat with its tasks</a> ·
+  <a href="assets/screenshots/tasks.png">a /goal at work, with what is queued after it</a> ·
+  <a href="assets/screenshots/prompts.png">the Prompts timeline</a> ·
+  <a href="assets/screenshots/all-prompts.png">all prompts</a> ·
+  <a href="assets/screenshots/activity.png">background activity</a> ·
+  <a href="assets/screenshots/code-focus.png">code mode, chat and project status only</a> ·
   <a href="assets/screenshots/setup.png">the setup wizard</a> ·
   <a href="assets/screenshots/settings-models.png">Settings ▸ AI Models</a>
 </p>
@@ -220,7 +225,12 @@ the primary in one click.
   model can take the side tasks while a stronger one leads.
 - The bar above the composer shows where the running subagents are ("Spark 2 ×2 · Amazon Bedrock").
   A count is printed only when two or more subagents share a server, so a lone Bedrock agent is just
-  "Amazon Bedrock". Expanded, the bar shows what each is doing; `/agents` lists the servers with how busy each is.
+  "Amazon Bedrock". Expanded, the bar shows what each is doing, on which model; `/agents` lists the servers
+  with how busy each is, and **Background activity** (⌥⌘A, below) shows every agent in every chat.
+- A subagent on another route sends **that route's** temperature, output limit and thinking level (none set =
+  its provider's default) — never the main chat's, which a Kimi or GLM server would refuse. A hosted worker
+  whose key can't list models is still used with the model it is configured for. When a subagent doesn't run
+  where its agent file asked, or a server was skipped on the way, its log says why.
 
 ### Private models and the sensitive-data shield
 
@@ -349,7 +359,15 @@ calls, the text is run through an XML parser that understands both the `<functio
   VT100/xterm-subset emulator: colour including 256 and truecolor, scroll regions, the alternate
   screen, and OSC titles. Multiple tabs, each rooted where you opened it. **⌃`** toggles the panel.
 
-Open tabs, the terminal panel, and the tree's visibility are remembered per project.
+**The chat comes first.** The file tree (⌘B), the editor (⌥⌘E), the terminal (⌃`) and the agent beside
+the editor each have a toolbar toggle (lit while showing) and a View menu item. With the editor and
+terminal hidden, the chat takes the middle of the window and a **project status** panel sits beside it:
+the branch and the changed files from git (click one to open it), the selected chat's run — its phase,
+runtime against the estimate, and the model and server — its plan with the subagents on each step, what is
+queued next, and the agents working. **⌥⌘↩** hides everything but those two. Opening any file brings the
+editor back in the middle. A project opened for the first time starts with the chat as the main view.
+
+Open tabs, the terminal panel, and which panes show are remembered per project.
 
 ## Chat
 
@@ -373,14 +391,45 @@ Folder in Finder** is on the chat's right-click menu. Your own instruction files
 as "Using the deploy skill" when the model loads one); the open project's don't. A task such a chat puts
 on the Task Queue works in the same folder.
 
-### The plan panel
+### Tasks: what the chat is doing, and what comes next
 
-**⇧⌘P** — or the checklist button in the toolbar, or **View ▸ Show Plan** — opens the plan beside the
-chat, in chat and code mode: the selected chat's `/goal`, its steps from `todo_write` with progress ("3 of
-7 done"), a plan proposed in plan mode, and the subagents working for it, with their server and how long
-they've run. It always shows the selected chat; while it's open the transcript keeps the plan to one
-line. Drag its edge to resize it. It opens by itself when the agent first makes a plan, unless you untick
-**Show when the agent makes a plan**.
+**⇧⌘P** — or **Tasks** in the toolbar — opens the right column on the chat's tasks, in chat and code mode.
+The **first task is always what the chat is doing now**: the prompt, `/goal` or queue task, its phase,
+round and runtime against the estimate, a Stop button, and its plan's steps with progress — each step
+showing the subagents working it, by name and model ("worker · Qwen3-Coder on DGX Spark"). Idle, it shows
+how the last prompt ended and the plan it left.
+
+Below it is **Up next**. The composer stays usable while the agent works: **↩** adds the draft to the
+chat's tasks (**⌘↩** does so any time), and each task starts by itself, in order, when the work before it
+ends — sent exactly as if you had sent it then, so a `/goal` stays a goal and a command just runs. Drag or
+use the arrows to reorder, edit, remove, or run one next; the list keeps taking new tasks while it moves.
+A Stop, a failure, or a goal that needs you **pauses** the list (Resume carries on), and waiting tasks are
+paused when Vision opens again. Finished tasks are listed with **Run again**. Chat tasks never run
+unattended on the Task Queue, which stays the place for work across projects.
+
+The column opens by itself when the agent first makes a plan, unless you untick **Show when the agent makes
+a plan**; drag its edge to resize it.
+
+### Prompts: everything you asked, and how it ended
+
+**⇧⌘H** — or **Prompts** in the toolbar, or the line under the last result — lists every prompt the chat
+has sent, newest first under day headings: when, what, and how it ended (**Completed with results**,
+Completed, Finished with issues, Needs you, Failed, Stopped, Running, Queued), how long it took against its
+estimate, attempts and evidence. Search it; open a prompt to **Copy** it, **Add to composer** (a quote
+with when it ran and how it ended, to talk about it), **Jump** (the chat scrolls to it and flashes it) or
+see its **Results** — timing, attempts, rounds, kind, the model and server it ran on, tokens, the evidence
+and the completion notes. **All Prompts** (⌥⇧⌘H) does the same across every chat on this Mac, filterable
+by outcome. The timeline is kept per chat in `prompt-timeline/<chat id>.json`; chats from before it existed
+are filled in once from their transcripts.
+
+### Background activity
+
+**⌥⌘A** — or the bolt in the toolbar, which counts what is working — lists everything working right now,
+in every chat: each chat's main agent, its subagents and background agents, the Task Queue, and chats
+with tasks waiting. Each shows the model and server it runs on, what it was given (the plan step, the
+prompt, the task), its status, how long it has run, its steps and tokens. Open a subagent's log — where it
+ran and why, the task it was given, every stamped step, its report — or stop it. The model servers' load is
+at the bottom.
 
 ### Slash commands
 
@@ -515,7 +564,7 @@ Guardian (guardian.503cm.com) is the account side of the family — models, prom
 
 | | Direction | When |
 |---|---|---|
-| Prompt history | harness → Guardian | automatically, as you send prompts while signed in (deduplicated) |
+| Prompt history | harness → Guardian | automatically, as you send prompts while signed in, and again with the outcome when each ends |
 | Prompt history | Guardian → harness | Settings ▸ Guardian browses the account's notebook |
 | Skills | both ways | import the account's skills; deposit the project's `.vision/skills` |
 | Chats | both ways | export all loaded chats; import the account's exported ones back |
@@ -587,7 +636,7 @@ VisionMacApp/              SwiftUI
 swift test
 ```
 
-1,257 tests: the engine loop (tool round-trips, denials, iteration budget, usage accounting,
+1,490 tests: the engine loop (tool round-trips, denials, iteration budget, usage accounting,
 cancellation), permission containment, the Qwen XML fallback, glob, markdown, plugin interpolation
 and quoting, prompt assembly, editor-buffer conflict resolution, 34 over the terminal emulator, and 8
 that spawn a real shell on a real pty and assert on what lands on the screen — plus the fleet (server
@@ -601,8 +650,11 @@ across streamed pieces, values with quotes and emoji inside tool calls, a value 
 8,000 CSV rows in well under half a second), backups, sensitive tasks on
 private servers, chats without a project, the first launch's move of the data folder, settings and
 Keychain items from the app's old name (with a crash replayed after every step), the keyboard tool's key
-codes against the system's own, and the app host against two fake model servers. Four live tests are
-skipped unless pointed at a real server.
+codes against the system's own, and the app host against two fake model servers — including the Prompts
+timeline (every ending, timing against the estimate, search, the composer quote, Jump after a relaunch, the
+backfill of old chats, the file), chat tasks end to end (in order after the current work, paused by a Stop or
+a failure and at launch, goals and commands as tasks), and which model, route and settings a subagent really
+uses, checked on the wire. Four live tests are skipped unless pointed at a real server.
 
 ## Status
 

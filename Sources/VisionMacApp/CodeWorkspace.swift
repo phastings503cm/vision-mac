@@ -20,6 +20,17 @@ final class CodeWorkspace {
     var terminalVisible = false
 
     var showTree = true
+    /// The editor in the middle. Hidden (with the terminal), the chat takes the middle and the project status sits
+    /// beside it; opening a file brings the editor back.
+    var editorVisible = true
+    /// The agent beside the editor. Only the editor area can push it away: with the editor and terminal hidden the
+    /// chat always shows.
+    var chatVisible = true
+
+    /// Nothing but the chat and the project status: no file tree, no editor, no terminal.
+    var isChatFocus: Bool { !showTree && !editorVisible && !terminalVisible }
+    /// The editor or the terminal is showing (the middle column).
+    var editorAreaVisible: Bool { editorVisible || terminalVisible }
     /// Set when the user asks to mention a file in chat; the composer picks it
     /// up and clears it.
     var pendingMention: String?
@@ -71,6 +82,9 @@ final class CodeWorkspace {
         tree = nil
         root = nil
         selection = nil
+        showTree = true
+        editorVisible = true
+        chatVisible = true
     }
 
     func relativePath(_ url: URL) -> String {
@@ -82,6 +96,11 @@ final class CodeWorkspace {
 
     func openFile(_ url: URL) {
         selection = url
+        // A file asked for opens in the middle, even when the layout had the editor hidden.
+        if !restoring, !editorVisible {
+            editorVisible = true
+            persistState()
+        }
         if let existing = buffers.first(where: { $0.url == url }) {
             activeBufferID = existing.id
             return
@@ -240,6 +259,35 @@ final class CodeWorkspace {
         persistState()
     }
 
+    func toggleTree() {
+        showTree.toggle()
+        persistState()
+    }
+
+    func toggleEditor() {
+        editorVisible.toggle()
+        persistState()
+    }
+
+    func toggleChat() {
+        chatVisible.toggle()
+        persistState()
+    }
+
+    /// The chat and the project status alone, full window — or, from there, back to the files and the editor.
+    func toggleChatFocus() {
+        if isChatFocus {
+            showTree = true
+            editorVisible = true
+        } else {
+            showTree = false
+            editorVisible = false
+            terminalVisible = false
+        }
+        chatVisible = true
+        persistState()
+    }
+
     // MARK: - Restore
 
     /// What code mode reopens with. Terminals are not restored as processes —
@@ -250,6 +298,9 @@ final class CodeWorkspace {
         var active: String?
         var terminal = false
         var tree = true
+        /// Older builds didn't save these: the editor shows when files were open, the chat always.
+        var editor: Bool?
+        var chat: Bool?
     }
 
     private func stateKey(_ root: URL) -> String { "code.state.\(root.path)" }
@@ -259,18 +310,29 @@ final class CodeWorkspace {
         let state = SavedState(files: buffers.map(\.url.path),
                                active: activeBuffer?.url.path,
                                terminal: terminalVisible,
-                               tree: showTree)
+                               tree: showTree,
+                               editor: editorVisible,
+                               chat: chatVisible)
         guard let data = try? JSONEncoder().encode(state) else { return }
         IsolatedRun.defaults.set(data, forKey: stateKey(root))
     }
 
     private func restoreState(for root: URL) {
         guard let data = IsolatedRun.defaults.data(forKey: stateKey(root)),
-              let state = try? JSONDecoder().decode(SavedState.self, from: data) else { return }
+              let state = try? JSONDecoder().decode(SavedState.self, from: data) else {
+            // A project opened for the first time starts with the chat as the main view: the files are a click
+            // (or ⌘B / ⌥⌘E) away.
+            showTree = true
+            editorVisible = false
+            chatVisible = true
+            return
+        }
         restoring = true
         defer { restoring = false }
 
         showTree = state.tree
+        editorVisible = state.editor ?? !state.files.isEmpty
+        chatVisible = state.chat ?? true
         for path in state.files where FileManager.default.fileExists(atPath: path) {
             openFile(URL(fileURLWithPath: path))
         }

@@ -65,19 +65,32 @@ extension AppTransport {
         if profile.kind != .bedrock {
             var info = workerProbe[route.routeID].flatMap { Date().timeIntervalSince($0.at) < 60 ? $0.info : nil }
             if info == nil {
-                guard let fresh = await client.modelInfo(nil), !fresh.servedModels.isEmpty else {
+                let fresh = await client.modelInfo(nil)
+                if let fresh, !fresh.servedModels.isEmpty {
+                    workerProbe[route.routeID] = (fresh, Date())
+                    info = fresh
+                } else if !Self.workerNeedsModelList(profile) {
+                    // A hosted API (Kimi, Z.ai, OpenRouter…) may not list models for this key or plan; its configured
+                    // model is the answer, and the first request says whether it works (a refusal moves the task on).
+                } else {
                     throw LLMError.connection("\(route.baseURL) didn't answer")
                 }
-                workerProbe[route.routeID] = (fresh, Date())
-                info = fresh
             }
             if let served = info?.id, !served.isEmpty { model = served }
             window = window ?? info?.contextWindow
         }
+        // The worker's own settings — never the main route's temperature, output limit or thinking level.
         return FleetTarget(client: client, model: model,
                            contextWindow: window ?? FallbackContextWindow.limit(for: model) ?? FallbackContextWindow.defaultLimit,
                            vision: visionOn(for: profile), temperature: profile.temperature,
-                           maxOutputTokens: profile.maxOutputTokens)
+                           maxOutputTokens: profile.maxOutputTokens, ownSettings: true, thinking: profile.thinking)
+    }
+
+    /// A worker counts as reachable only if it lists its models — true for a server you run yourself (a Spark that is
+    /// down or swapping lists nothing). A hosted API is trusted with its configured model instead: some plans' keys
+    /// can't list models, and treating that as "down" sent every subagent to the main model without a word.
+    static func workerNeedsModelList(_ profile: ProviderProfile) -> Bool {
+        profile.isSelfHosted || profile.model.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
     // MARK: Per-chat helpers
@@ -87,9 +100,17 @@ extension AppTransport {
     func roster(for sessionID: String) -> AgentRoster {
         if let existing = rosters[sessionID] { return existing }
         let roster = AgentRoster()
-        roster.onChange = { [weak self] run in
+        roster.onChange = { [weak self, weak roster] run in
             Task { @MainActor [weak self] in
-                self?.sessions.first { $0.id == sessionID }?.upsertAgent(run)
+                guard let vm = self?.sessions.first(where: { $0.id == sessionID }) else { return }
+                let isNew = !run.id.isEmpty && !vm.agentRuns.contains(where: { $0.id == run.id })
+                vm.upsertAgent(run)
+                // A subagent that just started works one of the plan's steps: say which, so the plan can show who is
+                // working it (name and model).
+                if isNew, run.assignment == nil,
+                   let step = PlanAssignment.step(description: run.description, prompt: run.prompt ?? "", todos: vm.todos) {
+                    roster?.setAssignment(run.id, step)
+                }
             }
         }
         rosters[sessionID] = roster

@@ -12,6 +12,21 @@ enum WorkspaceMode: String, CaseIterable, Identifiable {
 }
 
 enum SettingsTab: Hashable { case general, models, spark, guardian, skills, computer, plugins, editor }
+
+/// The right column's tabs: the chat's tasks (its current plan first, then what is queued) and its Prompts timeline.
+enum RunPanelTab: String, CaseIterable, Identifiable {
+    case tasks, prompts
+    var id: String { rawValue }
+    var label: String { self == .tasks ? "Tasks" : "Prompts" }
+    var icon: String { self == .tasks ? "checklist" : "clock.arrow.circlepath" }
+}
+
+/// "Jump to this prompt in its chat": the chat scrolls to the row and flashes it.
+struct PromptJump: Equatable {
+    var sessionID: String
+    var recordID: String
+    var token = UUID()
+}
 enum SkillsAction: Equatable { case generate, importSkills, newManual }
 
 /// Root-level state: the config, the transport that drives sessions, the
@@ -48,9 +63,21 @@ final class AppModel {
     /// A skills action a caller wants the Skills tab to start with.
     var skillsAction: SkillsAction?
     /// Text a caller wants dropped into the selected chat's composer (the
-    /// prompt timeline's "Reuse in composer"). ChatView picks it up in
+    /// prompt timeline's "Add to composer"). ChatView picks it up in
     /// `onChange`, like `code.pendingMention`.
     var pendingComposerText: String?
+    /// Which tab the right column shows.
+    var runPanelTab: RunPanelTab = .tasks
+    /// The All Prompts window (every chat's prompts on this Mac).
+    var showAllPrompts = false
+    /// The background activity popover.
+    var showActivity = false
+    /// A prompt whose results and notes are open.
+    var resultsRecord: PromptRecord?
+    /// A pending "jump to this prompt".
+    var promptJump: PromptJump?
+    /// The Prompts tab's opened row (kept while switching tabs).
+    var expandedPromptID: String?
     /// The Guardian connection: sign-in state, prompt sync, skills, chats.
     let guardian = GuardianService(appSupport: AppPaths.support)
     /// The folder both modes operate in.
@@ -76,17 +103,22 @@ final class AppModel {
         // A prompt sent while signed into Guardian lands in the account's
         // prompt history (the service deduplicates).
         transport.guardianSync = { record, chatID in
+            // Sent when the prompt starts and again with its outcome when it ends (Guardian keys prompts by
+            // user + text + time, so the second send carries the outcome onto the same notebook row).
             let outcome: String? = {
                 switch record.outcome {
-                case .none: return nil
+                case .queued, .running: return nil
                 case .completed: return "completed"
-                case .blocked: return "needs you"
+                case .issues: return "completed with issues"
+                case .needsYou: return "needs you"
                 case .failed: return "failed"
                 case .stopped: return "stopped"
+                case .unknown: return nil
                 }
             }()
+            let key = record.outcome.isOpen ? record.id : record.id + "#final"
             Task { await guardian.syncPrompts([
-                .init(id: record.id, text: record.text, at: record.at, outcome: outcome, chatID: chatID),
+                .init(id: key, text: record.text, at: record.at, outcome: outcome, chatID: chatID),
             ]) }
         }
         // Requests to models that aren't private go through the sensitive-data shield: the user's settings, and
@@ -153,6 +185,40 @@ final class AppModel {
     /// Show or hide the plan panel.
     func togglePlan() {
         withAnimation(.easeInOut(duration: 0.18)) { config.planPanelOpen.toggle() }
+    }
+
+    /// Open the right column on a tab (or close it when that tab is already showing).
+    func toggleRunPanel(_ tab: RunPanelTab) {
+        withAnimation(.easeInOut(duration: 0.18)) {
+            if config.planPanelOpen, runPanelTab == tab {
+                config.planPanelOpen = false
+            } else {
+                runPanelTab = tab
+                config.planPanelOpen = true
+            }
+        }
+    }
+
+    // MARK: - Prompts
+
+    /// Scroll a chat to the row a prompt produced and flash it (opening the chat first when it isn't the one shown).
+    func jump(to record: PromptRecord) {
+        if transport.selectedID != record.chatID {
+            select(record.chatID)
+        }
+        promptJump = PromptJump(sessionID: record.chatID, recordID: record.id)
+    }
+
+    /// Drop a quote of an earlier prompt, with how it ended, into its chat's composer — to talk about it.
+    func addToComposer(_ record: PromptRecord) {
+        if transport.selectedID != record.chatID { select(record.chatID) }
+        pendingComposerText = PromptTimeline.quote(record)
+    }
+
+    /// Copy a prompt's text.
+    func copyPrompt(_ record: PromptRecord) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(record.text, forType: .string)
     }
 
     /// Open the Amazon Bedrock guide — from the start, or on one page for an existing route

@@ -115,7 +115,8 @@ public struct AgentTool: ToolExecutor {
     static func runCore(prompt firstPrompt: String, description: String, definition: AgentDefinition,
                         background: Bool, sensitive: Bool = false, context: ToolContext) async throws -> SubagentOutcome {
         let roster = context.roster
-        let runID = roster?.begin(description: description, agentType: definition.name, background: background)
+        let runID = roster?.begin(description: description, agentType: definition.name, background: background,
+                                  prompt: firstPrompt)
         let clock = ContinuousClock()
         let started = clock.now
         func elapsed() -> TimeInterval {
@@ -148,6 +149,10 @@ public struct AgentTool: ToolExecutor {
                     target = leased.target
                     if firstServer == nil { firstServer = leased.label }
                     if let runID, choice { roster?.setServer(runID, leased.label) }
+                    if let runID {
+                        roster?.setPlacement(runID, route: leased.label, model: target.model,
+                                             note: Self.placementNote(definition: definition, lease: leased, fleet: fleet))
+                    }
                 } else {
                     // No fleet: it would run on the chat's own model — for a sensitive task, only if that is private.
                     if sensitive, (context.client as? any ProviderClient)?.profile.isPrivateRoute != true {
@@ -156,6 +161,7 @@ public struct AgentTool: ToolExecutor {
                                                server: nil, elapsed: elapsed(), failovers: failovers)
                     }
                     target = FleetTarget(client: context.client, model: context.model, contextWindow: context.contextWindow)
+                    if let runID { roster?.setPlacement(runID, route: "this chat's model", model: context.model) }
                 }
 
                 do {
@@ -193,6 +199,23 @@ public struct AgentTool: ToolExecutor {
             if let runID { roster?.finish(runID, status: .stopped, report: "Stopped before it finished.") }
             throw CancellationError()
         }
+    }
+
+    /// Why a subagent runs where it does when that isn't the obvious place: its agent file asked for a server it
+    /// didn't get, or servers tried first couldn't take it. Nil when it runs where it was meant to.
+    static func placementNote(definition: AgentDefinition, lease: FleetLease, fleet: AgentFleet) -> String? {
+        var notes: [String] = []
+        if let wanted = definition.server, !wanted.isEmpty, !AgentFleet.matches(lease.server, preferred: wanted) {
+            if fleet.servers.contains(where: { AgentFleet.matches($0, preferred: wanted) }) {
+                notes.append("its agent file asks for “\(wanted)”, which was busy or not answering")
+            } else {
+                notes.append("its agent file asks for “\(wanted)”, but no model server by that name is set up (Settings ▸ AI Models: turn on “Use for subagents” for that route)")
+            }
+        }
+        if !lease.skipped.isEmpty {
+            notes.append("tried first: " + lease.skipped.map { String($0.prefix(140)) }.joined(separator: "; "))
+        }
+        return notes.isEmpty ? nil : notes.joined(separator: " · ")
     }
 
     private static let interruptedNote =
@@ -258,15 +281,16 @@ public struct AgentTool: ToolExecutor {
         } else {
             retry = context.retry ?? .standard
         }
+        let settings = Self.settings(for: target, context: context)
         var config = EngineConfig(
             maxIterations: definition.maxSteps ?? Self.defaultMaxSteps,
             toolTimeout: 300,
             model: target.model,
             // The leased server's own settings when it has them (a worker without vision must not be sent screenshots).
-            temperature: target.temperature ?? context.temperature,
-            maxOutputTokens: target.maxOutputTokens ?? context.maxOutputTokens,
+            temperature: settings.temperature,
+            maxOutputTokens: settings.maxOutputTokens,
             contextWindow: window,
-            thinking: context.thinking,
+            thinking: settings.thinking,
             visionEnabled: target.vision ?? context.visionEnabled,
             retry: retry
         )
@@ -321,11 +345,21 @@ public struct AgentTool: ToolExecutor {
                 break
             }
         })
+        if let runID, let usage = result.usage { roster?.addTokens(runID, prompt: usage.promptTokens, completion: usage.completionTokens) }
         if result.stalled { return (false, result.lastReplyText) }
         let text = result.finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? result.lastReplyText : result.finalText
         return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? (true, "Subagent completed without a final report. Its tool work (if any) has already been applied in the workspace.")
             : (true, text)
+    }
+
+    /// The model settings a subagent sends: a target on another route uses that route's own (nil = its provider's
+    /// default) — never the parent chat's temperature, output limit or thinking level; the primary (or no fleet)
+    /// shares the parent's.
+    static func settings(for target: FleetTarget, context: ToolContext)
+        -> (temperature: Double?, maxOutputTokens: Int?, thinking: ThinkingLevel?) {
+        if target.ownSettings { return (target.temperature, target.maxOutputTokens, target.thinking) }
+        return (target.temperature ?? context.temperature, target.maxOutputTokens ?? context.maxOutputTokens, context.thinking)
     }
 
     static func subagentPrompt(workspace: URL, permissionPreset: PermissionPreset,

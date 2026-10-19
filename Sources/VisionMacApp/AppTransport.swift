@@ -38,7 +38,7 @@ public final class AppTransport {
     /// Per chat: credentials set to "ask first" that the user has allowed.
     @ObservationIgnored private var vaultGrants: [String: VaultGrants] = [:]
     /// Per chat: background subagents it launched.
-    @ObservationIgnored private var backgroundPools: [String: BackgroundAgents] = [:]
+    @ObservationIgnored var backgroundPools: [String: BackgroundAgents] = [:]
     /// The model servers subagents run on: the main route is the primary, the routes flagged "Use for
     /// subagents" are workers. One per app, shared by every chat, so two chats can't both fill the same Spark.
     @ObservationIgnored let fleet = AgentFleet()
@@ -53,9 +53,9 @@ public final class AppTransport {
     @ObservationIgnored private var agentQueuedCount: [String: Int] = [:]
     static let maxAgentQueuedTasksPerChat = 20
     /// Automatic continuations since the user last sent something, per chat.
-    @ObservationIgnored private var autoContinuations: [String: Int] = [:]
+    @ObservationIgnored var autoContinuations: [String: Int] = [:]
     /// Chats carrying on by themselves right now (after their background agents finished): unattended work.
-    @ObservationIgnored private var autoTurns: Set<String> = []
+    @ObservationIgnored var autoTurns: Set<String> = []
     static let maxAutoContinuations = 3
     /// Where the task queue is persisted.
     @ObservationIgnored private let queueFile: URL
@@ -80,7 +80,7 @@ public final class AppTransport {
     @ObservationIgnored private var overflowCeiling: [String: Int] = [:]
     /// Outstanding "don't sleep" activities, by token.
     @ObservationIgnored private var awakeActivities: [UUID: NSObjectProtocol] = [:]
-    @ObservationIgnored private var runTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored var runTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private let basePrompt: String
     /// Route ID → context window (tokens) learned from a server probe.
     /// Observed, so the context gauge redraws the moment a probe lands.
@@ -99,6 +99,26 @@ public final class AppTransport {
     @ObservationIgnored let phaseRunner: TurnPhaseRunner
     /// The validation loopback cap (nil = unlimited). Settings change it.
     @ObservationIgnored public var phaseLoopbackCap: Int?
+
+    // MARK: - Prompts timeline and chat tasks (see AppTransport+Runs.swift)
+
+    /// Each chat's Prompts timeline, one file per chat next to the conversations.
+    @ObservationIgnored let promptStore: PromptTimelineStore
+    /// Chats whose task list is paused, with the banner's reason. A paused list keeps its tasks; Resume carries on.
+    public var chatTasksPaused: [String: String] = [:]
+    /// What each chat's current (or last) turn ran on: the model id and the route's name.
+    public var turnRoute: [String: RouteUse] = [:]
+    /// The source of the next prompt record a chat opens (a chat task starting), consumed by `beginPrompt`.
+    @ObservationIgnored var pendingPromptSource: [String: (source: PromptRecord.Source, taskID: String?)] = [:]
+    /// The chat task each chat is running now (chat id → task id).
+    @ObservationIgnored var chatTaskInFlight: [String: String] = [:]
+    /// The prompt record each running chat task opened (task id → record id).
+    @ObservationIgnored var chatTaskRecord: [String: String] = [:]
+
+    public struct RouteUse: Hashable, Sendable {
+        public var model: String
+        public var route: String
+    }
 
     // MARK: - The machine-in-use glow
 
@@ -137,7 +157,7 @@ public final class AppTransport {
     /// Stop can never clobber the state of the run that replaced it.
     @ObservationIgnored private var queueGeneration = 0
     /// Sessions working a queue task right now; values are the task id.
-    @ObservationIgnored private var queueSessions: [String: String] = [:]
+    @ObservationIgnored var queueSessions: [String: String] = [:]
     /// After this many tasks in a row fail on errors (not on the model's own
     /// verdict), the queue pauses instead of burning through the rest.
     static let queueMaxErroredTasks = 3
@@ -239,11 +259,16 @@ public final class AppTransport {
         self.phaseRunner = TurnPhaseRunner(
             fileURL: skillLocations.appSupport.appendingPathComponent("eta-cache.json"))
         self.phaseLoopbackCap = nil   // unlimited by default; Settings can cap it at 3
+        self.promptStore = PromptTimelineStore(
+            directory: skillLocations.appSupport.appendingPathComponent("prompt-timeline", isDirectory: true))
         // Ship-with-the-app skills (godot-debugging, …) refresh on every launch.
         try? SkillBuiltin.install(into: skillLocations.builtinSkills)
         reload()
         refreshDrafts()
         loadQueue()
+        // Chat tasks never start by themselves when the app opens: each chat with some waiting says so and waits for
+        // Resume.
+        for chatID in queue.chatsWithQueuedTasks { chatTasksPaused[chatID] = ChatTaskRules.pausedAtLaunch }
         config.onRoutesChanged = { [weak self] in self?.refreshFleet() }
         refreshFleet()
     }
@@ -341,6 +366,12 @@ public final class AppTransport {
         systemPrompts[id] = nil
         log.delete(id)
         sessions.removeAll { $0.id == id }
+        // Its own tasks and its Prompts timeline go with it.
+        queue.removeChatTasks(id)
+        chatTasksPaused[id] = nil
+        chatTaskInFlight[id] = nil
+        turnRoute[id] = nil
+        promptStore.delete(id)
         // Tasks that used this chat start a fresh one next time.
         queue.detachSession(id)
         if selectedID == id {
@@ -504,6 +535,8 @@ public final class AppTransport {
             broadcast(Self.interactiveOnlyQueueMessage(route), error: true)
             return
         }
+        // A chat's own task runs in that chat, as its next prompt — never unattended.
+        if let taskID, queue.task(taskID)?.isChatTask == true { return }
         if queueRunning {
             if let taskID, let t = queue.task(taskID), t.status != .running {
                 queue.requeue(taskID, toFront: true)
@@ -619,8 +652,8 @@ public final class AppTransport {
                 erroredInARow = 0
             }
         }
-        if queueOnlyTasks == nil, queueActive(generation), queue.stats().finished {
-            let s = queue.stats()
+        if queueOnlyTasks == nil, queueActive(generation), queue.unattended.stats().finished {
+            let s = queue.unattended.stats()
             broadcast("Queue finished: \(s.completed) complete, \(s.failed) failed, \(s.blocked) blocked.")
         }
     }
@@ -774,6 +807,16 @@ public final class AppTransport {
         }
         // The chat was deleted mid-run: the task starts a fresh one next time.
         if !sessions.contains(where: { $0 === vm }) { queue.detachSession(vm.id) }
+        // Its prompt record ends with the task; then the chat's own tasks may follow.
+        let outcome: PromptRecord.Outcome
+        switch queue.task(taskID)?.status {
+        case .complete?: outcome = .completed
+        case .blocked?: outcome = .needsYou
+        case .failed?: outcome = .failed
+        default: outcome = .stopped
+        }
+        finishPrompt(vm, outcome: outcome, reason: queue.task(taskID)?.log.last?.text)
+        afterWork(vm, outcome: outcome)
     }
 
     /// Runs the unattended goal loop for a queue task and records the outcome.
@@ -783,8 +826,8 @@ public final class AppTransport {
         // text is the prompt (unless this is a resume, which keeps its turn).
         if !resuming {
             phasesBegin(vm, prompt: task.goalText)
-            vm.promptHistory.append(.init(text: task.title, turnID: vm.turnPhase?.turnID))
         }
+        beginPrompt(vm, text: task.goalText, source: .queue)
         do {
             let outcome = try await goalLoop(vm, goal: task.goalText, auto: true, resuming: resuming)
             // Deleted (skipped) while the last round finished: keep that verdict.
@@ -884,6 +927,7 @@ public final class AppTransport {
         if transcripts[vm.id] == nil, !vm.entries.isEmpty {
             transcripts[vm.id] = Self.replayMessages(vm.entries)
         }
+        loadPromptHistory(vm)
     }
 
     private func replayLog(into vm: SessionVM) {
@@ -1080,6 +1124,8 @@ public final class AppTransport {
         defer {
             // A Stop never wakes the chat back up.
             if job.status != .stopped { continueAfterBackgroundAgents(vm) }
+            // Its last agent done and nothing carried on: the chat's next task may start.
+            schedulePump(vm)
         }
         let text = "🤖 Background agent \(job.id) “\(job.description)” \(verb) after \(job.elapsed.formattedDuration)."
         vm.note(text)
@@ -1268,7 +1314,7 @@ public final class AppTransport {
     /// Where prompt submissions go when the user is signed into Guardian
     /// (item 4): each sent prompt lands in Guardian's prompt history. Nil in
     /// tests and when not signed in.
-    @ObservationIgnored public var guardianSync: (@Sendable (SessionVM.PromptRecord, String) -> Void)?
+    @ObservationIgnored public var guardianSync: (@Sendable (PromptRecord, String) -> Void)?
 
     public func send(_ text: String, sessionID: String,
                      attachments: [MessageAttachment] = []) {
@@ -1278,6 +1324,12 @@ public final class AppTransport {
             return
         }
         autoContinuations[sessionID] = 0
+        dispatch(text, vm: vm, attachments: attachments)
+    }
+
+    /// Run what was sent (or what a chat task sends when its turn comes): a command, a skill by name, or a turn.
+    func dispatch(_ text: String, vm: SessionVM, attachments: [MessageAttachment] = []) {
+        let sessionID = vm.id
         if attachments.isEmpty, let command = SlashCommand.parse(text) {
             runCommand(command, vm: vm)
             return
@@ -1359,10 +1411,10 @@ public final class AppTransport {
 
         case .queue:
             if queueRunningNow {
-                let s = queue.stats()
+                let s = queue.unattended.stats()
                 vm.note("Queue is running — \(s.queued) waiting, \(s.completed) done so far. ⌘⇧Q shows the panel; Stop there (or ⌘.) halts it.")
             } else {
-                let s = queue.stats()
+                let s = queue.unattended.stats()
                 if s.queued > 0 {
                     vm.note("Starting the queue: \(s.queued) task\(s.queued == 1 ? "" : "s") to go, one at a time, unattended.")
                     startQueue()
@@ -1530,6 +1582,7 @@ public final class AppTransport {
         }
         phaseRunner.planSettled(&state, plan: draftText, stepsPlanned: max(vm.todos.count, 1))
         vm.turnPhase = state
+        promptPlanned(vm, state: state)
         if let eta = state.etaSeconds {
             vm.activity = "Planning done — estimated \(TurnPhaseState.phrase(eta)). Executing…"
         }
@@ -1580,17 +1633,12 @@ public final class AppTransport {
             ?? ""
         let failures = Self.validationFailures(state: state, reply: reply)
         if let failure = failures.first {
+            // Nothing re-runs a plain turn here, so the card must not claim it does: the turn ends as "Finished with
+            // issues", with what validation found — the person decides what to do next.
             state.lastValidationFailure = failure
-            if state.loopBack(reason: failure) {
-                vm.turnPhase = state
-                vm.note("⚠️ Validation failed: \(failure) — executing again to fix it"
-                        + (state.loopbackCap.map { " (capped at \($0) retries)" } ?? "") + ".")
-                return
-            }
-            // Capped out: finish with what was achieved, and say what didn't pass.
-            state.addEvidence(.init(kind: .note, title: "Validation hit the retry cap",
-                                    detail: "Last failure: \(failure)"))
-            state.beginResults(summary: "Completed with unresolved validation failures: \(failure)")
+            gatherEvidence(vm, into: &state, reply: reply)
+            state.addEvidence(.init(kind: .note, title: "Validation found an issue", detail: failure))
+            state.beginResults(summary: "Finished with issues: \(failure)")
             vm.turnPhase = state
             phasesFinish(vm, completed: false)
             return
@@ -1642,7 +1690,7 @@ public final class AppTransport {
             gatherEvidence(vm, into: &state, reply: "")
             state.beginResults(summary: reason)
         } else {
-            state.addStep(reason)
+            state.end(reason: reason)
         }
         vm.turnPhase = state
         phasesFinish(vm, completed: completed)
@@ -1653,10 +1701,6 @@ public final class AppTransport {
     private func phasesFinish(_ vm: SessionVM, completed: Bool) {
         guard let state = vm.turnPhase else { return }
         phaseRunner.recordCompletion(state)
-        recordTurnOutcome(vm, turnID: state.turnID,
-                          outcome: completed ? .completed(evidence: state.evidence.count)
-                                             : (state.lastValidationFailure != nil ? .failed(reason: state.lastValidationFailure!)
-                                                                                  : .stopped))
         // The multitenant cache: the duration goes up to Guardian when the
         // user is signed in (silent on failure — the local cache has it).
         if let kind = state.taskKind, let start = state.startedAt,
@@ -1671,13 +1715,6 @@ public final class AppTransport {
     /// Set by AppModel: pushes finished-turn durations to Guardian's shared
     /// ETA cache when signed in.
     @ObservationIgnored public var guardianEtaPush: (@Sendable (String, Double, Double) -> Void)?
-
-    // MARK: Prompt history
-
-    private func recordTurnOutcome(_ vm: SessionVM, turnID: String, outcome: SessionVM.PromptRecord.Outcome) {
-        guard let index = vm.promptHistory.lastIndex(where: { $0.turnID == turnID }) else { return }
-        vm.promptHistory[index].outcome = outcome
-    }
 
     static func countProjectFiles(_ root: URL) -> Int {
         let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey])
@@ -1719,15 +1756,17 @@ public final class AppTransport {
         let sessionID = vm.id
         vm.running = true
         vm.stopping = false
-        // A new prompt begins a new turn: fresh phases, a fresh prompt-history row. A resumed goal
-        // (a blocked queue task picked back up) keeps its row and continues the same turn.
+        // A new prompt begins a new turn: fresh phases. A resumed goal (a blocked queue task picked back up) continues
+        // the same turn. Either way the prompt gets its row in the Prompts timeline.
         if !resumingGoal {
             phasesBegin(vm, prompt: modelText ?? goal ?? text)
-            let record = SessionVM.PromptRecord(text: text, turnID: vm.turnPhase?.turnID)
-            vm.promptHistory.append(record)
-            // Signed into Guardian: the prompt goes to the account's history.
-            if let guardianSync { guardianSync(record, sessionID) }
         }
+        let source: PromptRecord.Source = goal != nil ? .goal : (modelText != nil && text.hasPrefix("/") ? .skill : .typed)
+        let isAutomatic = autoTurns.contains(sessionID)
+        if !isAutomatic { beginPrompt(vm, text: text, source: source) }
+        // How it ended, for its timeline row and the chat's task list.
+        var outcome: PromptRecord.Outcome = .completed
+        var reason: String?
         defer {
             vm.running = false
             vm.stopping = false
@@ -1740,17 +1779,25 @@ public final class AppTransport {
             log.touch(sessionID)
             vm.updatedAt = .now
             sessions.sort { $0.updatedAt > $1.updatedAt }
+            if !isAutomatic { finishPrompt(vm, outcome: outcome, reason: reason) }
+            afterWork(vm, outcome: outcome)
         }
 
         do {
             if let goal {
-                try await runGoal(vm, goal: goal, resuming: resumingGoal)
+                let ending = try await runGoal(vm, goal: goal, resuming: resumingGoal)
+                if case .blocked(let why) = ending {
+                    outcome = .needsYou
+                    reason = why
+                }
             } else {
                 _ = try await turn(vm, modelText: modelText ?? text, displayText: text, attachments: attachments)
             }
             // The engine run ended: validate what happened. Only a turn that
             // got as far as executing validates; a stopped one is closed out.
-            if vm.turnPhase?.phase == .execution {
+            if outcome == .needsYou {
+                phasesAbandon(vm, reason: "Paused — the agent needs you: \(reason ?? "")", completed: false)
+            } else if vm.turnPhase?.phase == .execution {
                 phasesValidate(vm, result: nil)
             } else if let state = vm.turnPhase, state.phase == .planning {
                 // Never got a plan (the model only asked a question): the
@@ -1758,7 +1805,13 @@ public final class AppTransport {
                 phasesPlanFromProse(vm)
                 phasesValidate(vm, result: nil)
             }
+            if outcome != .needsYou, let failure = vm.turnPhase?.lastValidationFailure, vm.turnPhase?.phase == .results {
+                outcome = .issues
+                reason = failure
+            }
         } catch is CancellationError {
+            outcome = .stopped
+            reason = "Stopped before it finished."
             phasesAbandon(vm, reason: "Stopped before finishing.", completed: false)
             vm.endStreaming()
             let text = goal != nil ? "Stopped. The goal was not finished — send `/goal` to pick it back up." : "Stopped."
@@ -1766,6 +1819,8 @@ public final class AppTransport {
             log.recordItem(sessionID, kind: "notice", text: text, toolName: nil, argSummary: nil, output: nil, isError: false)
         } catch {
             if Task.isCancelled {
+                outcome = .stopped
+                reason = "Stopped before it finished."
                 phasesAbandon(vm, reason: "Stopped before finishing.", completed: false)
                 vm.endStreaming()
                 vm.note("Stopped.")
@@ -1773,6 +1828,8 @@ public final class AppTransport {
                 return
             }
             let message = PlanCatalog.explainChatError(error, route: chatRoute(vm)) ?? Self.describe(error)
+            outcome = .failed
+            reason = message
             phasesAbandon(vm, reason: message, completed: false)
             vm.endStreaming()
             vm.note(message, role: .error)
@@ -1813,12 +1870,14 @@ public final class AppTransport {
 
     /// `/goal`: run rounds until the model writes GOAL_COMPLETE (or GOAL_BLOCKED),
     /// re-stating the goal every round so it survives compaction.
-    private func runGoal(_ vm: SessionVM, goal: String, resuming: Bool) async throws {
+    @discardableResult
+    private func runGoal(_ vm: SessionVM, goal: String, resuming: Bool) async throws -> GoalOutcome {
         vm.lastGoal = goal
         let outcome = try await goalLoop(vm, goal: goal, auto: false, resuming: resuming)
         if outcome == .complete { vm.lastGoal = nil }
         // Stopped between rounds: report it like a Stop mid-round.
         if outcome == .stopped { throw CancellationError() }
+        return outcome
     }
 
     /// The goal loop, interactive (`/goal`) or unattended (`auto`, the task
@@ -1953,6 +2012,7 @@ public final class AppTransport {
             round += 1
             state.round = round
             vm.goal = state
+            promptRound(vm, round: round)
         }
     }
 
@@ -1974,6 +2034,7 @@ public final class AppTransport {
         }
         let userEntryID = vm.appendMessage(.user, displayText)
         log.recordItem(sessionID, kind: "user", text: displayText, toolName: nil, argSummary: nil, output: nil, isError: false)
+        promptEntryLanded(vm, entryID: userEntryID, displayText: displayText)
         if vm.title == "New chat" {
             let first = displayText.split(separator: "\n").first.map(String.init) ?? displayText
             let title = String(first.prefix(48))
@@ -1984,6 +2045,7 @@ public final class AppTransport {
         // Spark can swap models between turns, and the window/model id must follow.
         pinRouteIfUnset(vm)
         guard let profile = await resolveRoute(vm) else { throw LLMError.noModel }
+        turnRoute[sessionID] = RouteUse(model: profile.model, route: Self.routeLabel(profile))
         let window = contextLimit(for: vm)
         let thinking = vm.thinking
         let skillState = self.skillState(for: vm)
@@ -2048,6 +2110,10 @@ public final class AppTransport {
         vm.retry = nil
         transcripts[sessionID] = result.messages
         vm.lastUsage = result.usage
+        if let usage = result.usage {
+            vm.turnPromptTokens += usage.promptTokens
+            vm.turnCompletionTokens += usage.completionTokens
+        }
         // A mask report still waiting for an answer to sit on goes on the turn's last answer.
         if let pending = vm.pendingMask, let answer = vm.currentAnswerID {
             vm.masked[answer] = pending
@@ -2396,8 +2462,12 @@ public final class AppTransport {
 
     // MARK: - Stopping
 
-    public func stopSession(_ id: String) {
+    public func stopSession(_ id: String, pauseTasks: Bool = true) {
         if let vm = sessions.first(where: { $0.id == id }), vm.running { vm.stopping = true }
+        // Stop means "stop": what the chat has queued waits until Resume.
+        if pauseTasks, queue.queuedChatTaskCount(id) > 0, chatTasksPaused[id] == nil {
+            chatTasksPaused[id] = ChatTaskRules.pauseReason(for: .stopped)
+        }
         resolveAllGates(for: id, with: false)
         runTasks[id]?.cancel()
         // Stop means everything the agent is doing in this chat.

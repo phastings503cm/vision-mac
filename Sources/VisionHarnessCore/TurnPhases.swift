@@ -161,8 +161,11 @@ public struct TurnPhaseState: Codable, Hashable, Sendable {
     public var evidence: [Evidence]
     /// Why the last validation failed (shown on the loopback banner).
     public var lastValidationFailure: String?
-    /// When validation finished and results began.
+    /// When validation finished and results began — or when the turn ended early (see `endedReason`).
     public var finishedAt: Date?
+    /// The turn ended before results: stopped, failed, or the goal needs the person. The card stops animating and
+    /// says why instead of showing a phase that is no longer running.
+    public var endedReason: String?
 
     public struct Step: Codable, Hashable, Sendable {
         public var at: Date
@@ -356,6 +359,16 @@ public struct TurnPhaseState: Codable, Hashable, Sendable {
         evidence.append(item)
         if evidence.count > 24 { evidence.removeFirst(evidence.count - 24) }
     }
+
+    /// The turn ended without reaching results (stopped, an error, a goal that needs the person).
+    public mutating func end(reason: String, at: Date = .now) {
+        endedReason = reason
+        finishedAt = at
+        steps.append(Step(at: at, text: reason))
+    }
+
+    /// The turn is over, one way or the other.
+    public var isOver: Bool { phase == .results || endedReason != nil }
 
     /// Validation passed: the results phase. `againstPlan` is the closing note — how the outcome
     /// matches the plan the turn started with.

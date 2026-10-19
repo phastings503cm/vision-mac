@@ -41,9 +41,10 @@ struct SubagentsBar: View {
                                 .font(.system(size: 10, weight: .semibold))
                                 .padding(.horizontal, 5).padding(.vertical, 1)
                                 .background(Theme.surfaceStrong, in: Capsule())
-                            Text(run.server ?? "waiting for a server")
+                            Text(run.placementLabel ?? "waiting for a server")
                                 .font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(run.server == nil ? Color.secondary : Color.accentColor)
+                                .foregroundStyle(run.placementLabel == nil ? Color.secondary : Color.accentColor)
+                                .lineLimit(1).truncationMode(.middle)
                             Text("“\(run.description)” — \(run.activity)")
                                 .font(.system(size: 11)).foregroundStyle(.secondary)
                                 .lineLimit(1).truncationMode(.tail)
@@ -74,7 +75,7 @@ struct SubagentsBar: View {
     private func summary(_ runs: [AgentRun]) -> String {
         guard !runs.isEmpty else { return "" }
         var counts: [String: Int] = [:]
-        for run in runs { counts[run.server ?? "waiting for a server", default: 0] += 1 }
+        for run in runs { counts[run.route ?? run.server ?? "waiting for a server", default: 0] += 1 }
         return counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
             .map { $0.value > 1 ? "\($0.key) ×\($0.value)" : $0.key }
             .joined(separator: " · ")

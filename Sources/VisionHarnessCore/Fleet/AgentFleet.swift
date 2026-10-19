@@ -18,15 +18,26 @@ public struct FleetTarget: Sendable {
     public var vision: Bool?
     public var temperature: Double?
     public var maxOutputTokens: Int?
+    /// The target is another route's server, with settings of its own: its temperature, output limit and thinking
+    /// level are the route's (nil = that provider's default) and never the parent chat's. A Kimi or GLM worker must
+    /// not be sent the temperature, max_tokens or reasoning effort the main model's route was set up with — a server
+    /// that rejects them answers 400, and the subagent quietly ends up somewhere else. False (the primary, or no
+    /// fleet): the parent's settings, as before.
+    public var ownSettings: Bool
+    /// The thinking level for this target when it has `ownSettings` (nil = the route's own default).
+    public var thinking: ThinkingLevel?
 
     public init(client: any LLMClient, model: String, contextWindow: Int? = nil,
-                vision: Bool? = nil, temperature: Double? = nil, maxOutputTokens: Int? = nil) {
+                vision: Bool? = nil, temperature: Double? = nil, maxOutputTokens: Int? = nil,
+                ownSettings: Bool = false, thinking: ThinkingLevel? = nil) {
         self.client = client
         self.model = model
         self.contextWindow = contextWindow
         self.vision = vision
         self.temperature = temperature
         self.maxOutputTokens = maxOutputTokens
+        self.ownSettings = ownSettings
+        self.thinking = thinking
     }
 }
 
@@ -112,6 +123,9 @@ public final class FleetLease: @unchecked Sendable {
     public let server: FleetServer
     public let target: FleetTarget
     public var label: String { server.label }
+    /// Servers tried first that couldn't take the work, and why ("DGX Spark: didn't answer") — so the person can
+    /// see why a subagent runs where it does.
+    public let skipped: [String]
 
     private let fleet: AgentFleet
     private let lock = NSLock()
@@ -119,10 +133,11 @@ public final class FleetLease: @unchecked Sendable {
     private var failed = false
     private var abandoned = false
 
-    init(fleet: AgentFleet, server: FleetServer, target: FleetTarget) {
+    init(fleet: AgentFleet, server: FleetServer, target: FleetTarget, skipped: [String] = []) {
         self.fleet = fleet
         self.server = server
         self.target = target
+        self.skipped = skipped
     }
 
     /// The server misbehaved (unreachable, overloaded, erroring): keep new work away from it for a while.
@@ -278,6 +293,7 @@ public final class AgentFleet: @unchecked Sendable {
                         home: FleetServer? = nil) async throws -> FleetLease {
         var tried = Set<String>()
         var lastError: (any Error)?
+        var skipped: [String] = []
         while true {
             try Task.checkCancellation()
             let step: Step = try lock.withLock {
@@ -327,7 +343,7 @@ public final class AgentFleet: @unchecked Sendable {
                 raiseChanged()
                 do {
                     let target = try await server.resolve()
-                    return FleetLease(fleet: self, server: server, target: target)
+                    return FleetLease(fleet: self, server: server, target: target, skipped: skipped)
                 } catch {
                     if Task.isCancelled {
                         release(server.id, failed: false, counted: false)
@@ -335,12 +351,22 @@ public final class AgentFleet: @unchecked Sendable {
                     }
                     // Couldn't reach it: note that, free the slot, and try the next server.
                     lastError = error
+                    skipped.append("\(server.label): \(error.localizedDescription)")
                     tried.insert(server.id)
                     markFailed(server.id, error)
                     release(server.id, failed: true, counted: true)
                 }
             }
         }
+    }
+
+    /// Whether `server` is the one a preference names (its label or route id contains it, any case) — how an agent
+    /// file's `server:`/`model:` line picks a server.
+    public static func matches(_ server: FleetServer, preferred: String) -> Bool {
+        let wanted = preferred.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !wanted.isEmpty else { return false }
+        return server.label.range(of: wanted, options: .caseInsensitive) != nil
+            || server.id.range(of: wanted, options: .caseInsensitive) != nil
     }
 
     /// Whether `error` is the server's fault rather than the request's — the kind of failure another
@@ -438,10 +464,7 @@ public final class AgentFleet: @unchecked Sendable {
         }
 
         if let wanted = preferred?.trimmingCharacters(in: .whitespacesAndNewlines), !wanted.isEmpty {
-            let matches = healthy.filter {
-                $0.label.range(of: wanted, options: .caseInsensitive) != nil
-                    || $0.id.range(of: wanted, options: .caseInsensitive) != nil
-            }
+            let matches = healthy.filter { Self.matches($0, preferred: wanted) }
             if let favourite = pick(from: matches) { return favourite }
         }
         let workers = healthy.filter { !$0.isPrimary }

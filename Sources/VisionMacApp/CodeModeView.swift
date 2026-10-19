@@ -2,12 +2,13 @@ import SwiftUI
 import AppKit
 import VisionHarnessCore
 
-/// Code mode: the project navigator, a tabbed editor, an integrated terminal,
-/// and the agent alongside — the layout a VS Code user expects, with the chat
-/// where the panel would be.
+/// Code mode: the agent is the main view. Around it, each on its own toggle (toolbar, View menu, shortcuts):
+/// the project's file tree (⌘B), the tabbed editor (⌥⌘E) and the terminal (⌃`). With the editor and terminal hidden
+/// the chat takes the middle and the project status — run phases, the plan and tasks, agents, git — sits beside it;
+/// ⌥⌘↩ hides everything but those two. Opening a file brings the editor back in the middle. The layout is
+/// remembered per project.
 struct CodeModeView: View {
     @Environment(AppModel.self) private var model
-    @State private var chatVisible = true
 
     private var code: CodeWorkspace { model.code }
 
@@ -16,50 +17,57 @@ struct CodeModeView: View {
         // fill, which otherwise leaves the panes floating in a band.
         HSplitView {
             if code.showTree {
+                // Beside the chat (no editor) the tree stays a narrow navigator; the chat is the main view.
                 FileTreeView()
-                    .frame(minWidth: 180, idealWidth: 250, maxWidth: 460,
+                    .frame(minWidth: 180, idealWidth: 250, maxWidth: code.editorAreaVisible ? 460 : 300,
                            maxHeight: .infinity)
             }
 
-            VSplitView {
-                EditorArea()
-                    .frame(minHeight: 140, maxHeight: .infinity)
-                if code.terminalVisible {
-                    TerminalPanel()
-                        .frame(minHeight: 100, idealHeight: 240, maxHeight: .infinity)
+            if code.editorAreaVisible {
+                VSplitView {
+                    if code.editorVisible {
+                        EditorArea()
+                            .frame(minHeight: 140, maxHeight: .infinity)
+                    }
+                    if code.terminalVisible {
+                        TerminalPanel()
+                            .frame(minHeight: 100, idealHeight: 240, maxHeight: .infinity)
+                    }
                 }
-            }
-            .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
 
-            if chatVisible {
+                if code.chatVisible {
+                    chatPane
+                        .frame(minWidth: 320, idealWidth: 400, maxWidth: 640,
+                               maxHeight: .infinity)
+                }
+            } else {
+                // The chat is the main view; the project status beside it.
                 chatPane
-                    .frame(minWidth: 320, idealWidth: 400, maxWidth: 640,
-                           maxHeight: .infinity)
+                    .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
+                    .layoutPriority(1)
+                ProjectStatusPanel()
+                    .frame(minWidth: 260, idealWidth: 330, maxWidth: 460, maxHeight: .infinity)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .toolbar {
             ToolbarItemGroup(placement: .automatic) {
-                Button {
-                    code.showTree.toggle()
-                } label: {
-                    Image(systemName: "sidebar.squares.left")
+                CodeLayoutToggle(on: code.showTree, icon: "sidebar.squares.left",
+                                 help: "File tree (⌘B)") { code.toggleTree() }
+                CodeLayoutToggle(on: code.editorVisible, icon: "doc.text",
+                                 help: "Editor (⌥⌘E)") { code.toggleEditor() }
+                CodeLayoutToggle(on: code.terminalVisible, icon: "apple.terminal",
+                                 help: "Terminal (⌃`)") { code.toggleTerminal() }
+                if code.editorAreaVisible {
+                    CodeLayoutToggle(on: code.chatVisible, icon: "bubble.left.and.bubble.right",
+                                     help: "The agent beside the editor") { code.toggleChat() }
                 }
-                .help("Show or hide the file tree")
-
-                Button {
-                    code.toggleTerminal()
-                } label: {
-                    Image(systemName: "apple.terminal")
+                CodeLayoutToggle(on: code.isChatFocus, icon: "rectangle.and.text.magnifyingglass",
+                                 help: code.isChatFocus ? "Show the files and the editor again (⌥⌘↩)"
+                                                        : "Chat and project status only, full window (⌥⌘↩)") {
+                    code.toggleChatFocus()
                 }
-                .help("Toggle the terminal (⌃`)")
-
-                Button {
-                    chatVisible.toggle()
-                } label: {
-                    Image(systemName: chatVisible ? "sidebar.right" : "bubble.left.and.bubble.right")
-                }
-                .help("Show or hide the agent")
             }
         }
         .alert("Something went wrong",
@@ -83,6 +91,22 @@ struct CodeModeView: View {
                     .buttonStyle(.borderedProminent)
             }
         }
+    }
+}
+
+/// A layout button that shows whether its pane is on.
+private struct CodeLayoutToggle: View {
+    let on: Bool
+    let icon: String
+    let help: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .foregroundStyle(on ? Color.accentColor : Color.secondary)
+        }
+        .help(help + (on ? " — showing" : " — hidden"))
     }
 }
 

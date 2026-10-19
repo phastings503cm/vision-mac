@@ -130,6 +130,52 @@ final class FleetHostTests: XCTestCase {
         XCTAssertEqual(fleet.first { $0.label == "Worker" }?.healthy, false, "the dead worker is skipped for a while")
     }
 
+    /// The main route's temperature, output limit and thinking level stay on the main route: a worker that has
+    /// none of its own sends none (a Kimi or GLM server that rejects them would answer 400 and the subagent would end
+    /// up elsewhere). The chat's subagent list says the model and route it really ran on.
+    func testASubagentOnAWorkerSendsTheWorkersSettingsNotTheMainRoutes() async throws {
+        var main = route("Main", host: "main.test")
+        main.temperature = 0.7
+        main.maxOutputTokens = 30_000
+        var worker = route("Kimi", host: "worker.test", worker: true)
+        worker.model = "stub-model"
+        _ = makeTransport([main, worker])
+        FakeModelServer.reset(Self.delegating(mainHost: "main.test"))
+        transport.adoptProject(project())
+        let vm = transport.newSession(cwd: project().path)
+        vm.thinking = .high
+        transport.send("please scan", sessionID: vm.id)
+        try await waitUntil("the chat to finish") {
+            !vm.running && vm.entries.contains { $0.message?.role == .assistant && $0.message?.text.contains("All done.") == true }
+        }
+        let mainRequest = try XCTUnwrap(FakeModelServer.seen.first { $0.host == "main.test" })
+        XCTAssertEqual(mainRequest.temperature, 0.7)
+        XCTAssertEqual(mainRequest.maxTokens, 30_000)
+        XCTAssertTrue(mainRequest.reasoning, "the chat thinks hard on its own route")
+        let sub = try XCTUnwrap(FakeModelServer.seen.first { $0.host == "worker.test" && $0.lastUser == "count the files" })
+        XCTAssertNil(sub.temperature, "not the main route's 0.7")
+        XCTAssertNil(sub.maxTokens, "not the main route's 30,000")
+        XCTAssertFalse(sub.reasoning, "not the chat's thinking level")
+        try await waitUntil("the roster to land") { vm.agentRuns.first?.route != nil }
+        let run = try XCTUnwrap(vm.agentRuns.first)
+        XCTAssertEqual(run.route, "Kimi")
+        XCTAssertEqual(run.model, "stub-model")
+        XCTAssertEqual(run.placementLabel, "stub-model on Kimi")
+    }
+
+    /// A hosted API's key may not be allowed to list models; that is not "down". A server you run yourself that lists
+    /// nothing is.
+    func testOnlySelfHostedWorkersMustListTheirModels() {
+        let spark = ProviderProfile(kind: .openAICompat, name: "Spark", baseURL: "http://spark.local:8000/v1", model: "qwen")
+        let kimi = ProviderProfile(kind: .openAICompat, name: "Kimi", baseURL: "https://api.kimi.com/coding/v1", model: "kimi-for-coding")
+        let zai = ProviderProfile(kind: .openAICompat, name: "GLM", baseURL: "https://api.z.ai/api/coding/paas/v4", model: "glm-5.3")
+        let unnamed = ProviderProfile(kind: .openAICompat, name: "X", baseURL: "https://openrouter.ai/api/v1", model: "")
+        XCTAssertTrue(AppTransport.workerNeedsModelList(spark))
+        XCTAssertFalse(AppTransport.workerNeedsModelList(kimi))
+        XCTAssertFalse(AppTransport.workerNeedsModelList(zai))
+        XCTAssertTrue(AppTransport.workerNeedsModelList(unnamed), "with no model named there is nothing to trust")
+    }
+
     func testMakingAnotherRouteMainSendsTheChatThere() async throws {
         let t = makeTransport([route("Alpha", host: "alpha.test"), route("Beta", host: "beta.test", worker: true)])
         FakeModelServer.reset { _, _ in .text("hello") }

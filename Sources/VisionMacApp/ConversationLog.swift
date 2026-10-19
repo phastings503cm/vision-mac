@@ -124,6 +124,12 @@ public final class ConversationLog {
         return loaded
     }
 
+    /// A session's rows without keeping them in memory (the loaded copy when there is one): for one-off reads such
+    /// as backfilling the Prompts timeline of a chat nobody has opened.
+    public func peekItems(_ id: String) -> [LogItemRow] {
+        items[id] ?? readItems(id) ?? []
+    }
+
     /// Write this session's pending changes now and drop its timeline from
     /// memory; `loadItems` reads it back from disk on demand.
     public func release(_ id: String) {

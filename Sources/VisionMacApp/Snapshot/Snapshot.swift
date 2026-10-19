@@ -18,7 +18,8 @@ import VisionHarnessCore
 // permission, and fall back to drawing the window's views (`cacheDisplay`).
 //
 //   --snapshot <folder>         where the PNGs go (or VISION_SNAPSHOT_DIR)
-//   --snapshot-scenes a,b       only these scenes (chat, code, setup, settings-models)
+//   --snapshot-scenes a,b       only these scenes (chat, code, setup, settings-models, prompts, tasks, activity,
+//                               all-prompts, code-focus, code-chat)
 //   --snapshot-live <profile>   run the chat for real first, on Amazon Bedrock with this AWS profile, and save what
 //                               happened as chat-transcript.json (the seeded chat is made from such a run)
 //   --snapshot-region <region>  the live run's Region (default us-west-2)
@@ -35,6 +36,18 @@ enum Snapshot {
         case chatKimi = "chat-kimi"
         /// A Z.ai route in Settings ▸ AI Models' editor: the endpoint picker, Test, what was learned.
         case zaiRoute = "settings-zai-route"
+        /// The right column on the chat's Prompts timeline.
+        case prompts
+        /// The right column on the chat's tasks: a /goal at work, its plan with subagents on steps, three queued.
+        case tasks
+        /// The background activity popover over that busy chat.
+        case activity
+        /// Every chat's prompts.
+        case allPrompts = "all-prompts"
+        /// Code mode with the file tree, editor and terminal hidden: the chat and the project status.
+        case codeFocus = "code-focus"
+        /// Code mode as a project first opens: the file tree, the chat in the middle, the project status.
+        case codeChat = "code-chat"
     }
 
     struct Live: Equatable, Sendable {
@@ -319,6 +332,49 @@ enum Snapshot {
             ProviderSettings.editOnAppear = zai
             model.settingsTab = .models
             model.showSettings = true
+        case .prompts:
+            model.mode = .chat
+            showMainChat(chatID, model)
+            model.config.planPanelWidth = 380
+            model.runPanelTab = .prompts
+            model.config.planPanelOpen = true
+            if let vm = model.selectedSession, let last = vm.promptHistory.last {
+                model.expandedPromptID = last.id
+                // "Jump": the chat scrolls to the prompt's row and flashes it.
+                await pause(0.8)
+                model.promptJump = PromptJump(sessionID: vm.id, recordID: last.id)
+            }
+        case .tasks, .activity:
+            model.mode = .chat
+            showMainChat(chatID, model)
+            if let vm = model.selectedSession { SnapshotSeed.stageBusy(vm, transport: model.transport) }
+            model.config.planPanelWidth = 380
+            model.runPanelTab = .tasks
+            model.config.planPanelOpen = true
+            if scene == .activity {
+                await pause(0.6)
+                model.showActivity = true
+            }
+        case .allPrompts:
+            model.mode = .chat
+            showMainChat(chatID, model)
+            model.config.planPanelOpen = false
+            model.showAllPrompts = true
+        case .codeChat:
+            model.config.planPanelOpen = false
+            showMainChat(chatID, model)
+            model.mode = .code
+            setSidebarCollapsed(true, in: window)
+            model.code.showTree = true
+            model.code.editorVisible = false
+            model.code.terminalVisible = false
+        case .codeFocus:
+            model.config.planPanelOpen = false
+            showMainChat(chatID, model)
+            if let vm = model.selectedSession { SnapshotSeed.stageBusy(vm, transport: model.transport) }
+            model.mode = .code
+            setSidebarCollapsed(true, in: window)
+            if !model.code.isChatFocus { model.code.toggleChatFocus() }
         }
     }
 
@@ -344,6 +400,22 @@ enum Snapshot {
             model.mode = .chat
             setSidebarCollapsed(false, in: window)
         case .chat: break
+        case .prompts:
+            model.expandedPromptID = nil
+        case .tasks, .activity:
+            model.showActivity = false
+            if let vm = model.selectedSession { SnapshotSeed.unstageBusy(vm, transport: model.transport) }
+        case .allPrompts:
+            model.showAllPrompts = false
+        case .codeFocus:
+            if let vm = model.selectedSession { SnapshotSeed.unstageBusy(vm, transport: model.transport) }
+            model.code.toggleChatFocus()
+            model.mode = .chat
+            setSidebarCollapsed(false, in: window)
+        case .codeChat:
+            model.code.editorVisible = true
+            model.mode = .chat
+            setSidebarCollapsed(false, in: window)
         }
     }
 
