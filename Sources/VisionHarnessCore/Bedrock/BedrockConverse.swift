@@ -79,7 +79,8 @@ public enum BedrockConverse {
         for m in request.messages where m.role == .system { addSystem(m.content) }
         if !system.isEmpty && traits.cachePoints { system.append(cachePointBlock()) }
 
-        var turns = makeTurns(request.messages, traits: traits, replay: replay)
+        var turns = makeTurns(request.messages, traits: traits, replay: replay,
+                              attachments: AttachmentRoute.bedrock(profile, traits: traits))
         if traits.cachePoints { turns[turns.count - 1].content.append(cachePointBlock()) }
         let messages = turns.map { turn in
             JSONValue.object(["role": .string(turn.role), "content": .array(turn.content)])
@@ -162,7 +163,8 @@ public enum BedrockConverse {
 
     private static let interruptedCall = "Not run — the turn was interrupted before this call executed."
 
-    private static func makeTurns(_ messages: [LLMMessage], traits: BedrockModelTraits, replay: Bool) -> [Turn] {
+    private static func makeTurns(_ messages: [LLMMessage], traits: BedrockModelTraits, replay: Bool,
+                                  attachments route: AttachmentRoute) -> [Turn] {
         var turns: [Turn] = []
         // toolUse ids of the latest assistant turn still waiting for their results.
         var open: [String] = []
@@ -190,7 +192,7 @@ public enum BedrockConverse {
             switch m.role {
             case .user:
                 closeOpenCalls()
-                add("user", userBlocks(m, traits: traits))
+                add("user", userBlocks(m, route: route))
             case .tool:
                 let id = toolUseID(m.toolCallID ?? "")
                 if let index = open.firstIndex(of: id) {
@@ -228,27 +230,31 @@ public enum BedrockConverse {
         return turns
     }
 
-    private static func userBlocks(_ m: LLMMessage, traits: BedrockModelTraits) -> [JSONValue] {
+    /// The user's text, then each attachment as `AttachmentWire` sends it on this route: images in Converse's four
+    /// formats, PDFs as documents where the model reads them, everything else as the text Vision read out of it.
+    private static func userBlocks(_ m: LLMMessage, route: AttachmentRoute) -> [JSONValue] {
         var blocks: [JSONValue] = []
         if let content = m.content, !isBlank(content) { blocks.append(textBlock(content)) }
-        for a in m.attachments ?? [] {
-            if a.kind == .image, let format = imageFormat(a.mime) {
+        for part in AttachmentWire.parts(for: m.attachments ?? [], route: route) {
+            switch part {
+            case .text(let text):
+                blocks.append(textBlock(text))
+            case .image(let mime, let data):
+                guard let format = imageFormat(mime) else { blocks.append(textBlock("[image of \(data.count) bytes, not shown]")); continue }
                 blocks.append(.object([
                     "image": .object([
                         "format": .string(format),
-                        "source": .object(["bytes": .string(a.data.base64EncodedString())]),
+                        "source": .object(["bytes": .string(data.base64EncodedString())]),
                     ]),
                 ]))
-            } else if a.mime == "application/pdf" && traits.documents {
+            case .document(let name, let data):
                 blocks.append(.object([
                     "document": .object([
                         "format": .string("pdf"),
-                        "name": .string(documentName(a.name)),
-                        "source": .object(["bytes": .string(a.data.base64EncodedString())]),
+                        "name": .string(documentName(name)),
+                        "source": .object(["bytes": .string(data.base64EncodedString())]),
                     ]),
                 ]))
-            } else {
-                blocks.append(textBlock(fileText(a)))
             }
         }
         return blocks
@@ -411,15 +417,6 @@ public enum BedrockConverse {
         }
         let name = String(cleaned).split(separator: " ", omittingEmptySubsequences: true).joined(separator: " ")
         return name.isEmpty ? "document" : name
-    }
-
-    /// A non-image file as text: its content when it is UTF-8 text, else a note.
-    private static func fileText(_ a: MessageAttachment) -> String {
-        if var text = String(data: a.data, encoding: .utf8) {
-            while text.unicodeScalars.first == "\u{FEFF}" { text.unicodeScalars.removeFirst() }
-            if !text.unicodeScalars.contains("\u{0}") { return "[Attached file: \(a.name)]\n\(text)" }
-        }
-        return "[Attached file: \(a.name) (\(a.data.count) bytes of binary data, not shown)]"
     }
 
     // MARK: Text

@@ -364,6 +364,7 @@ public final class AppTransport {
         config.sessionSkills[id] = nil
         transcripts[id] = nil
         systemPrompts[id] = nil
+        attachmentStore(for: id).removeAll()
         log.delete(id)
         sessions.removeAll { $0.id == id }
         // Its own tasks and its Prompts timeline go with it.
@@ -933,7 +934,7 @@ public final class AppTransport {
     private func replayLog(into vm: SessionVM) {
         for row in log.loadItems(vm.id) {
             switch row.kind {
-            case "user": vm.appendMessage(.user, row.text ?? "", at: row.at)
+            case "user": vm.appendMessage(.user, row.text ?? "", at: row.at, attachments: row.attachments ?? [])
             case "assistant": vm.appendMessage(.assistant, row.text ?? "", at: row.at)
             case "notice": vm.appendMessage(.notice, row.text ?? "", at: row.at)
             case "error": vm.appendMessage(.error, row.text ?? "", at: row.at)
@@ -969,12 +970,15 @@ public final class AppTransport {
                 switch body.role {
                 case .user:
                     flushTools()
+                    // What it carried: the files' content isn't in the display rows, but where it is saved is.
+                    let text = ([body.text] + body.attachments.map(\.replayNote))
+                        .filter { !$0.isEmpty }.joined(separator: "\n\n")
                     // Back-to-back user messages (a message that never got an
                     // answer) upset strict chat templates: fold them together.
                     if let last = out.last, last.role == .user, last.attachments == nil {
-                        out[out.count - 1].content = (last.content ?? "") + "\n\n" + body.text
+                        out[out.count - 1].content = (last.content ?? "") + "\n\n" + text
                     } else {
-                        out.append(.user(body.text))
+                        out.append(.user(text))
                     }
                 case .assistant:
                     flushTools()
@@ -1032,6 +1036,8 @@ public final class AppTransport {
         var extra: [any ToolExecutor] = PluginLoader.tools(from: plugins, reserved: Set(builtins.names))
         if !skillState.active.isEmpty { extra.append(UseSkillTool(skills: skillState.active)) }
         extra.append(VaultSearchTool(vault: vault))
+        // Long attachments are read in parts; any attachment again after a restart.
+        extra.append(ReadAttachmentTool(store: attachmentStore(for: sessionID)))
         extra.append(contentsOf: ToolRegistry.backgroundAgentTools())
         if vm.preset != .plan {
             extra.append(QueueAddTool(add: { [weak self] title, details, front, start in
@@ -2032,8 +2038,10 @@ public final class AppTransport {
         if transcripts[sessionID] == nil {
             transcripts[sessionID] = vm.entries.isEmpty ? [] : Self.replayMessages(vm.entries)
         }
-        let userEntryID = vm.appendMessage(.user, displayText)
-        log.recordItem(sessionID, kind: "user", text: displayText, toolName: nil, argSummary: nil, output: nil, isError: false)
+        let firstBadges = attachments.map { AttachmentBadge($0) }
+        let userEntryID = vm.appendMessage(.user, displayText, attachments: firstBadges)
+        log.recordItem(sessionID, kind: "user", text: displayText, toolName: nil, argSummary: nil, output: nil, isError: false,
+                       attachments: firstBadges.isEmpty ? nil : firstBadges)
         promptEntryLanded(vm, entryID: userEntryID, displayText: displayText)
         if vm.title == "New chat" {
             let first = displayText.split(separator: "\n").first.map(String.init) ?? displayText
@@ -2070,6 +2078,10 @@ public final class AppTransport {
         retryRoute[sessionID] = nil
         failoverNoticed.remove(sessionID)
         let input = transcripts[sessionID] ?? []
+        // Attachments go as what this route takes: text read out of every file (a long one in parts the model
+        // reads with read_attachment), pictures only to a model that takes them.
+        let outgoing = attachments.isEmpty ? attachments
+            : await prepareAttachments(attachments, vm: vm, entryID: userEntryID, profile: profile, window: window)
 
         // Engine events arrive on a pool thread; hop to main so the
         // timeline is only ever mutated from one place.
@@ -2078,7 +2090,7 @@ public final class AppTransport {
         let result: RunResult
         do {
             result = try await engine.run(messages: input, userText: modelText,
-                                          userAttachments: attachments, progress: progress) { event in
+                                          userAttachments: outgoing, progress: progress) { event in
                 Task { @MainActor in
                     sink.apply(event, sessionID: sessionID)
                 }
@@ -2132,6 +2144,43 @@ public final class AppTransport {
             vm.note("Paused after \(engine.config.maxIterations) steps. Say “continue” to keep going, or use `/goal` for long tasks.")
         }
         return result
+    }
+
+    // MARK: - Attachments
+
+    /// Where a chat's attachments are saved (their full text, for `read_attachment`).
+    func attachmentStore(for sessionID: String) -> AttachmentStore {
+        AttachmentStore.forChat(sessionID, root: skillLocations.appSupport.appendingPathComponent("attachments", isDirectory: true))
+    }
+
+    /// What a route takes besides text — what the composer's chips describe (pass the chat's own route; nil = the primary).
+    func attachmentRoute(for profile: ProviderProfile? = nil) -> AttachmentRoute {
+        guard let profile = profile ?? config.activeProvider else { return .textOnly }
+        var route = AttachmentRoute.of(effective(profile))
+        route.vision = route.vision && visionOn(for: profile)
+        return route
+    }
+
+    /// Read (if the composer hadn't), budget, split and save a message's attachments off the main thread, and put
+    /// the final badges — how each one went — under the user's message.
+    private func prepareAttachments(_ attachments: [MessageAttachment], vm: SessionVM, entryID: String,
+                                    profile: ProviderProfile, window: Int) async -> [MessageAttachment] {
+        let store = attachmentStore(for: vm.id)
+        let route = attachmentRoute(for: profile)
+        let previous = vm.activity
+        if attachments.contains(where: { $0.digest == nil }) { vm.activity = "Reading attachments…" }
+        let prepared = await Task.detached(priority: .userInitiated) {
+            AttachmentPrep.prepare(attachments, window: window, store: store)
+        }.value
+        vm.activity = previous
+        let badges = zip(prepared.badges, prepared.attachments).map { badge, attachment in
+            var badge = badge
+            badge.label += " · " + AttachmentWire.delivery(attachment, route: route).label
+            return badge
+        }
+        vm.setAttachments(entryID: entryID, badges)
+        log.setAttachments(vm.id, onLastUser: badges)
+        return prepared.attachments
     }
 
     /// Turn a user entry the model never received into a notice.
@@ -2730,9 +2779,9 @@ public final class AppTransport {
             used = Self.estimateTokens(systemPrompt: prompt,
                                        messages: transcripts[sessionID] ?? [])
         }
-        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty {
-            used += max(1, trimmed.count / 4)
+        // UTF-16 length, not `count`: this runs on every keystroke, and counting characters walks the whole draft.
+        if draft.contains(where: { !$0.isWhitespace }) {
+            used += max(1, draft.utf16.count / 4)
         }
         return used
     }
@@ -2839,9 +2888,10 @@ public final class AppTransport {
         var seq = 0
         for entry in entries {
             let (kind, text, toolName, argSummary, output, isError) = logRowFields(for: entry)
+            let badges = entry.message?.attachments ?? []
             out.append(LogItemRow(sessionID: sessionID, seq: seq, kind: kind, text: text,
                                   toolName: toolName, argSummary: argSummary, output: output,
-                                  isError: isError, at: entry.at))
+                                  isError: isError, at: entry.at, attachments: badges.isEmpty ? nil : badges))
             seq += 1
         }
         return out

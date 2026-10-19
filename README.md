@@ -241,7 +241,7 @@ and every plan included, starts out *not private*. Flip the **Private** switch e
 wins.
 
 Before a request goes to a model that isn't private, Vision masks what's sensitive in it — in the system
-prompt, the messages, tool results, earlier tool calls and attached text files. Each value becomes a
+prompt, the messages, tool results, earlier tool calls and the text Vision read out of attachments. Each value becomes a
 placeholder such as `⟦EMAIL_1⟧` or `⟦SECRET_1⟧` (the same value always gets the same one), and once a value
 has been found it is masked wherever it appears, even without the `password:` that gave it away. The model
 is told to use the placeholders as written, and the real values are put back on your Mac as the answer
@@ -376,8 +376,23 @@ between the text that preceded it and the text that followed, expandable to its 
 renders with headings, fenced code (with copy), lists, task lists, quotes, and tables, including an
 unterminated fence while a response is still streaming.
 
-The composer sends on ↩ and inserts a newline on ⇧↩. The **+** menu attaches an image or a file.
-Files the turn touched appear as chips that jump straight to the editor.
+The composer sends on ↩ and inserts a newline on ⇧↩. The **+** menu attaches an image or a file (or drop
+files on the composer). Files the turn touched appear as chips that jump straight to the editor.
+
+### Attachments
+
+Vision reads every attachment itself, so a model server never gets a part it can't take: text, Markdown,
+CSV, JSON, YAML, XML, HTML, logs and source go as text; a PDF goes as its text, page by page (a scan is read
+with OCR, and a model that takes images gets its pages as pictures); Word, PowerPoint and Excel files go as
+the text in them; Rich Text and old Word files through `textutil`; a picture goes as a picture to a model that
+takes images and as its OCR text to one that doesn't. Bedrock keeps PDFs as native documents. Each chip says
+what will be sent — *PDF · 42 pages · sent as text* — and opens to show exactly that text.
+
+A file longer than a quarter of the model's context window goes as a contents list and its first parts; the
+whole text is saved with the chat and the model reads the other parts with the `read_attachment` tool (and
+can read any attachment again after the app restarts). A paste of more than 400 lines or 20,000 characters
+becomes a *Pasted text · 10,214 lines · 412 KB* chip — view, edit or remove it — instead of filling the
+message box, and goes the same way.
 
 ### Chats without a project
 

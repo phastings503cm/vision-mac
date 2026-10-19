@@ -15,10 +15,12 @@ public struct LogItemRow: Identifiable, Hashable, Sendable {
     public var output: String?
     public var isError: Bool
     public var at: Date
+    /// A user row's attachments (names and summaries, not content).
+    public var attachments: [AttachmentBadge]?
 
     public init(sessionID: String, seq: Int, kind: String, text: String?,
                 toolName: String?, argSummary: String?, output: String?,
-                isError: Bool, at: Date) {
+                isError: Bool, at: Date, attachments: [AttachmentBadge]? = nil) {
         self.sessionID = sessionID
         self.seq = seq
         self.kind = kind
@@ -28,6 +30,7 @@ public struct LogItemRow: Identifiable, Hashable, Sendable {
         self.output = output
         self.isError = isError
         self.at = at
+        self.attachments = attachments
     }
 }
 
@@ -57,6 +60,7 @@ private struct StoredItem: Codable {
     var output: String?
     var isError: Bool
     var at: Date
+    var attachments: [AttachmentBadge]?
 }
 
 /// Per-session conversation store. One JSON file per session under
@@ -153,18 +157,27 @@ public final class ConversationLog {
               let file = try? JSONDecoder().decode(SessionFile.self, from: data) else { return nil }
         return file.items.map {
             LogItemRow(sessionID: id, seq: $0.seq, kind: $0.kind, text: $0.text, toolName: $0.toolName,
-                       argSummary: $0.argSummary, output: $0.output, isError: $0.isError, at: $0.at)
+                       argSummary: $0.argSummary, output: $0.output, isError: $0.isError, at: $0.at,
+                       attachments: $0.attachments)
         }
     }
 
     public func recordItem(_ id: String, kind: String, text: String?,
                            toolName: String?, argSummary: String?, output: String?,
-                           isError: Bool) {
+                           isError: Bool, attachments: [AttachmentBadge]? = nil) {
         var list = items[id] ?? (rows[id] != nil ? readItems(id) ?? [] : [])
         let row = LogItemRow(sessionID: id, seq: list.count, kind: kind, text: text,
                              toolName: toolName, argSummary: argSummary, output: output,
-                             isError: isError, at: .now)
+                             isError: isError, at: .now, attachments: attachments)
         list.append(row)
+        items[id] = list
+        persist(id)
+    }
+
+    /// Set the attachments of a session's last user row (they are known for sure once the message is prepared).
+    public func setAttachments(_ id: String, onLastUser badges: [AttachmentBadge]) {
+        guard var list = items[id], let index = list.lastIndex(where: { $0.kind == "user" }) else { return }
+        list[index].attachments = badges.isEmpty ? nil : badges
         items[id] = list
         persist(id)
     }
@@ -234,7 +247,8 @@ public final class ConversationLog {
         let stored = items[id] ?? readItems(id) ?? []
         let file = SessionFile(session: row, items: stored.map {
             StoredItem(seq: $0.seq, kind: $0.kind, text: $0.text, toolName: $0.toolName,
-                       argSummary: $0.argSummary, output: $0.output, isError: $0.isError, at: $0.at)
+                       argSummary: $0.argSummary, output: $0.output, isError: $0.isError, at: $0.at,
+                       attachments: ($0.attachments?.isEmpty ?? true) ? nil : $0.attachments)
         })
         guard let data = try? JSONEncoder().encode(file) else { return }
         let url = fileURL(id)

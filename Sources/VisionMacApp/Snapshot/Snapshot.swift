@@ -18,8 +18,9 @@ import VisionHarnessCore
 // permission, and fall back to drawing the window's views (`cacheDisplay`).
 //
 //   --snapshot <folder>         where the PNGs go (or VISION_SNAPSHOT_DIR)
-//   --snapshot-scenes a,b       only these scenes (chat, code, setup, settings-models, prompts, tasks, activity,
-//                               all-prompts, code-focus, code-chat)
+//   --snapshot-scenes a,b       only these scenes (by default the README's: chat, code, setup, settings-models,
+//                               prompts, tasks, activity, all-prompts, code-focus, code-chat; and, only when named,
+//                               zai-guide, chat-kimi, settings-zai-route, chat-attachments and attachment-preview)
 //   --snapshot-live <profile>   run the chat for real first, on Amazon Bedrock with this AWS profile, and save what
 //                               happened as chat-transcript.json (the seeded chat is made from such a run)
 //   --snapshot-region <region>  the live run's Region (default us-west-2)
@@ -48,6 +49,14 @@ enum Snapshot {
         case codeFocus = "code-focus"
         /// Code mode as a project first opens: the file tree, the chat in the middle, the project status.
         case codeChat = "code-chat"
+        /// A chat whose messages carried files and a large paste, with more waiting in the composer as chips.
+        case attachments = "chat-attachments"
+        /// The pasted-text chip opened: what the model will get, editable.
+        case attachmentPreview = "attachment-preview"
+
+        /// What a plain `--snapshot` run takes (the README's pictures).
+        static let standard: [Scene] = [.chat, .code, .setup, .models, .prompts, .tasks, .activity, .allPrompts,
+                                        .codeFocus, .codeChat]
     }
 
     struct Live: Equatable, Sendable {
@@ -58,7 +67,7 @@ enum Snapshot {
 
     struct Options: Equatable, Sendable {
         var output: URL
-        var scenes: [Scene] = Scene.allCases
+        var scenes: [Scene] = Scene.standard
         var live: Live?
     }
 
@@ -109,7 +118,7 @@ enum Snapshot {
         if let region, live != nil { live?.region = region }
         if let model, live != nil { live?.model = model }
         let folder = URL(fileURLWithPath: (output as NSString).expandingTildeInPath, isDirectory: true)
-        return Options(output: folder.standardizedFileURL, scenes: scenes?.isEmpty == false ? scenes! : Scene.allCases,
+        return Options(output: folder.standardizedFileURL, scenes: scenes?.isEmpty == false ? scenes! : Scene.standard,
                        live: live)
     }
 
@@ -375,6 +384,16 @@ enum Snapshot {
             model.mode = .code
             setSidebarCollapsed(true, in: window)
             if !model.code.isChatFocus { model.code.toggleChatFocus() }
+        case .attachments, .attachmentPreview:
+            model.mode = .chat
+            model.config.planPanelOpen = false
+            model.select(SnapshotSeed.attachmentsChatID)
+            await pause(0.5)
+            model.pendingComposerAttachments = SnapshotSeed.composerAttachments()
+            if scene == .attachmentPreview {
+                await pause(2.0)
+                model.pendingAttachmentPreview = "pasted-text.txt"
+            }
         }
     }
 
@@ -399,7 +418,9 @@ enum Snapshot {
         case .code:
             model.mode = .chat
             setSidebarCollapsed(false, in: window)
-        case .chat: break
+        case .chat, .attachments: break
+        case .attachmentPreview:
+            window.attachedSheet.map { window.endSheet($0) }
         case .prompts:
             model.expandedPromptID = nil
         case .tasks, .activity:

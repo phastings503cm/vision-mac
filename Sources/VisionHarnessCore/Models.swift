@@ -71,17 +71,37 @@ public struct MessageAttachment: Codable, Hashable, Sendable {
     }
     public var kind: Kind
     public var name: String
-    /// Raw content (base64-encoded on the wire for images).
+    /// Raw content (base64-encoded on the wire for images, and for a PDF sent as a native document).
     public var data: Data
+    /// What Vision read out of the file when it was attached (`AttachmentReader`); nil for one nobody read.
+    public var digest: AttachmentDigest?
+    /// The text sent in its place on a route that doesn't take the file itself: a header and the file's text, or —
+    /// for a long one — its contents list and first parts (`AttachmentPrep`). For an image, what a model that can't
+    /// take images gets (the OCR text). Nil until the message is prepared.
+    public var text: String?
+    /// How many parts the file's text was split into (1 = sent whole); nil until the message is prepared.
+    public var parts: Int?
 
-    public init(kind: Kind, name: String, data: Data) {
+    public init(kind: Kind, name: String, data: Data, digest: AttachmentDigest? = nil, text: String? = nil,
+                parts: Int? = nil) {
         self.kind = kind
         self.name = name
         self.data = data
+        self.digest = digest
+        self.text = text
+        self.parts = parts
     }
 
-    /// Best-effort MIME type from the filename extension.
+    /// The MIME type: a picture's own bytes decide (the composer re-encodes pictures to PNG under their original
+    /// name), else the filename extension.
     public var mime: String {
+        let head = [UInt8](data.prefix(12))
+        if head.starts(with: [0x89, 0x50, 0x4E, 0x47]) { return "image/png" }
+        if head.starts(with: [0xFF, 0xD8, 0xFF]) { return "image/jpeg" }
+        if head.starts(with: [0x47, 0x49, 0x46, 0x38]) { return "image/gif" }
+        if head.count >= 12, head.starts(with: [0x52, 0x49, 0x46, 0x46]), Array(head[8..<12]) == [0x57, 0x45, 0x42, 0x50] {
+            return "image/webp"
+        }
         let ext = (name as NSString).pathExtension.lowercased()
         switch ext {
         case "png": return "image/png"

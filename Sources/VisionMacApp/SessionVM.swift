@@ -7,10 +7,13 @@ public struct MessageBody: Hashable, Sendable {
     public enum Role: String, Hashable, Sendable { case user, assistant, notice, error }
     public var role: Role
     public var text: String
+    /// What a user message carried (files, pictures, large pastes), shown as badges under it.
+    public var attachments: [AttachmentBadge]
 
-    public init(role: Role, text: String) {
+    public init(role: Role, text: String, attachments: [AttachmentBadge] = []) {
         self.role = role
         self.text = text
+        self.attachments = attachments
     }
 }
 
@@ -301,11 +304,20 @@ public final class SessionVM: Identifiable {
     // MARK: - Mutation
 
     @discardableResult
-    public func appendMessage(_ role: MessageBody.Role, _ text: String, at: Date = .now) -> String {
-        let entry = ChatEntry(at: at, kind: .message(.init(role: role, text: text)))
+    public func appendMessage(_ role: MessageBody.Role, _ text: String, at: Date = .now,
+                              attachments: [AttachmentBadge] = []) -> String {
+        let entry = ChatEntry(at: at, kind: .message(.init(role: role, text: text, attachments: attachments)))
         entries.append(entry)
         updatedAt = .now
         return entry.id
+    }
+
+    /// Replace the badges under a user message (once its attachments are prepared and saved).
+    public func setAttachments(entryID: String, _ badges: [AttachmentBadge]) {
+        guard let index = entries.lastIndex(where: { $0.id == entryID }),
+              case .message(var body) = entries[index].kind else { return }
+        body.attachments = badges
+        entries[index].kind = .message(body)
     }
 
     public func note(_ text: String, role: MessageBody.Role = .notice) {

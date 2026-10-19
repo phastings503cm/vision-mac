@@ -109,6 +109,7 @@ enum SnapshotSeed {
 
         let timelines = PromptTimelineStore(directory: AppPaths.support.appendingPathComponent("prompt-timeline", isDirectory: true))
         for (chatID, records) in otherTimelines(now: now) { timelines.save(chatID, records) }
+        installAttachmentsChat(project: project, now: now)
 
         guard live == nil, let transcript = transcript else { return }
         let start = now.addingTimeInterval(-transcript.duration - 120)
@@ -117,6 +118,59 @@ enum SnapshotSeed {
                              preset: PermissionPreset.workspaceWrite.rawValue,
                              updatedAt: start.addingTimeInterval(transcript.duration)),
                   items: AppTransport.logRows(for: entries, sessionID: mainChatID))
+    }
+
+    // MARK: The attachments scenes
+
+    static let attachmentsChatID = "7B3E9D21-4C6A-4F8B-A2D5-9E1F0C3B6A44"
+
+    /// A chat whose first message carried a PDF, a large paste and a scan, and whose second is a long paste from
+    /// before pastes became attachments (shown collapsed).
+    private static func installAttachmentsChat(project: URL, now: Date) {
+        let updated = now.addingTimeInterval(-25 * 60)
+        let log = ConversationLog.shared
+        let rows: [(MessageBody.Role, String, [AttachmentBadge])] = [
+            (.user, "Summarise the board pack, and tell me which of the pasted errors are new since Monday.", [
+                AttachmentBadge(name: "board-pack-q3.pdf", label: "PDF · 42 pages · sent as text in 6 parts", stored: "board-pack-q3.pdf"),
+                AttachmentBadge(name: "pasted-text.txt", label: "Pasted text · 10,214 lines · 409 KB · sent as text in 52 parts", stored: "pasted-text.txt"),
+                AttachmentBadge(name: "signed-minutes.pdf", label: "PDF · 3 pages · scanned · sent as 3 page images"),
+            ]),
+            (.assistant, "**Board pack (Q3).** Revenue is up 12% on Q2, led by the West region; the two risks the board flagged are the AMD feed and the Lucet intake backlog. I read parts 1–6 with `read_attachment`.\n\n**Errors.** 3 of the 41 distinct errors in the paste are new since Monday — all three are `ECONNRESET` from the Spark at 02:14–02:31.", []),
+            (.user, Self.longOldPaste, []),
+            (.assistant, "That trace is the same `ECONNRESET` burst — the Spark restarted at 02:14 after its disk filled.", []),
+        ]
+        let entries = rows.enumerated().map { index, row in
+            ChatEntry(at: updated.addingTimeInterval(Double(index - rows.count) * 50),
+                      kind: .message(.init(role: row.0, text: row.1, attachments: row.2)))
+        }
+        log.store(LogSession(id: attachmentsChatID, title: "Board pack and the overnight errors", cwd: nil,
+                             preset: PermissionPreset.workspaceWrite.rawValue, updatedAt: updated),
+                  items: AppTransport.logRows(for: entries, sessionID: attachmentsChatID))
+    }
+
+    /// 1,200 lines of a stack trace, pasted whole into a message by an earlier build.
+    private static var longOldPaste: String {
+        (1...1_200).map { "2026-10-17T02:14:\(String(format: "%02d", $0 % 60))Z ERROR worker-\($0 % 7) request failed: ECONNRESET (spark.local:8002)" }
+            .joined(separator: "\n")
+    }
+
+    /// What waits in the composer in the attachments scenes: a long PDF, a large paste, a screenshot, a Word file.
+    static func composerAttachments() -> [MessageAttachment] {
+        let pages = (1...42).map { page in
+            "--- Page \(page) of 42 ---\n" + (1...70).map { "Q3 board pack, page \(page), line \($0): revenue, risks and the plan for Q4." }.joined(separator: "\n")
+        }.joined(separator: "\n\n")
+        let pdfText = AttachmentText.normalizeNewlines(pages)
+        let pdf = MessageAttachment(kind: .file, name: "board-pack-q3.pdf", data: Data(count: 2_202_010),
+                                    digest: AttachmentDigest(format: .pdf, pages: 42, lines: AttachmentText.lineCount(pdfText),
+                                                             bytes: 2_202_010, text: pdfText))
+        let log = (1...10_214).map { "2026-10-18T0\($0 % 10):\(String(format: "%02d", $0 % 60)):00Z INFO sync ok batch=\($0)" }.joined(separator: "\n")
+        let pasted = PastedText.attachment(log)
+        let shot = MessageAttachment(kind: .image, name: "grafana-latency.png", data: Data([0x89, 0x50, 0x4E, 0x47]),
+                                     digest: AttachmentDigest(format: .image, lines: 2, bytes: 184_320, text: "p95 latency\n2.4 s", ocr: true))
+        let doc = "# Q4 plan\n" + (1...180).map { "- item \($0)" }.joined(separator: "\n")
+        let word = MessageAttachment(kind: .file, name: "q4-plan.docx", data: Data(count: 48_000),
+                                     digest: AttachmentDigest(format: .word, lines: AttachmentText.lineCount(doc), bytes: 48_000, text: doc))
+        return [pdf, pasted, shot, word]
     }
 
     /// What a stored chat doesn't keep — the plan, tool cards' order with the plan between them, the files the agent

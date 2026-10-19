@@ -150,12 +150,29 @@ final class ProviderRulesTests: XCTestCase {
         let content = (b["messages"] as! [[String: Any]])[0]["content"]
         let text = try XCTUnwrap(content as? String, "Z.ai's text models take a string, not parts")
         XCTAssertTrue(text.hasPrefix("look"))
-        XCTAssertTrue(text.contains("--- notes.md ---\n# Notes\nhello"))
-        XCTAssertTrue(text.contains("[Image shot.png not sent: this model reads text only.]"))
+        // The harness's attachment text (night/files): never a part the model can't take.
+        XCTAssertTrue(text.contains("[Attached file: notes.md]\n# Notes\nhello"), text)
+        // A picture nobody read goes as a line naming it (the app reads every picture first: OCR text, see
+        // AttachmentWireTests), never as an image part.
+        XCTAssertTrue(text.contains("[Attached file: shot.png"), text)
+        XCTAssertFalse(text.contains("base64"), text)
         let rules = ModelRequestRules.for(glm, model: "glm-5.3")
         XCTAssertEqual(rules.thinkingLevels, [.low, .high, .max])
         XCTAssertEqual(rules.acceptsImages, false)
         XCTAssertFalse(rules.forcedToolChoice, "tool_choice: only auto")
+    }
+
+    /// The attachment wire (night/files) asks the model's rules whether it takes images: a GLM text model gets a
+    /// picture's OCR text in its one string, the vision model gets the picture — and the chip says which.
+    func testGLMTextModelsGetAPicturesTextAndTheVisionModelThePicture() throws {
+        var photo = MessageAttachment(kind: .image, name: "page.png", data: Data([0x89, 0x50, 0x4E, 0x47]))
+        photo.digest = AttachmentDigest(format: .image, lines: 1, bytes: 4, text: "INVOICE 4471", ocr: true)
+        XCTAssertFalse(AttachmentRoute.openAI(route(zaiCoding, "glm-5.3")).vision)
+        XCTAssertTrue(AttachmentRoute.openAI(route(zaiGeneral, "glm-5.3-flash")).vision)
+        XCTAssertEqual(AttachmentWire.delivery(photo, route: .openAI(route(zaiCoding, "glm-5.3"))), .ocrText)
+        let b = try body(route(zaiCoding, "glm-5.3"), messages: [.user("read it", attachments: [photo])])
+        let text = try XCTUnwrap((b["messages"] as! [[String: Any]])[0]["content"] as? String)
+        XCTAssertTrue(text.contains("[Image: page.png — this model can't take images; the text in it, read by OCR:]\nINVOICE 4471"), text)
     }
 
     func testOlderGLMsToggleAndGLM52SkipsWithNone() throws {

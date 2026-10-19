@@ -256,8 +256,14 @@ public enum Shield {
 
     /// A request with its sensitive values replaced and the note added — and the placeholders it used, and
     /// whether it carries pictures or files that aren't plain text (which can't be checked).
+    ///
+    /// `route` is what the request's route takes besides text (`AttachmentRoute`): an attachment that goes as text
+    /// there (a PDF or Word file Vision read, a picture's OCR text) is checked like any text; one whose bytes go
+    /// (a picture to a vision model, a PDF document to Bedrock) can't be. Nil = assume the bytes of every picture and
+    /// PDF go.
     public static func mask(_ request: LLMRequest, detector: SensitiveDetector,
-                            cache: MatchCache = MatchCache()) -> (request: LLMRequest, map: ShieldMap, unchecked: Bool) {
+                            cache: MatchCache = MatchCache(),
+                            route: AttachmentRoute? = nil) -> (request: LLMRequest, map: ShieldMap, unchecked: Bool) {
         var map = ShieldMap()
         var unchecked = false
 
@@ -284,7 +290,8 @@ public enum Shield {
             var texts: [TextAttachment?] = []
             for attachment in message.attachments ?? [] {
                 let text = TextAttachment(attachment)
-                if let text { collect(text.text) } else { unchecked = true }
+                if let text { collect(text.text) }
+                if text == nil || TextAttachment.bytesGo(attachment, route: route) { unchecked = true }
                 texts.append(text)
             }
             files.append(texts)
@@ -394,18 +401,37 @@ public enum Shield {
     }
 }
 
-/// A file attachment that is plain text — UTF-8, or UTF-16 with a byte-order mark — and how to write it back the
-/// same way. Nil for anything else (a picture, a PDF, any binary file), which can't be checked.
+/// The text an attachment goes to the model as, and how to put a masked version back: the text Vision prepared for
+/// it (`MessageAttachment.text`), else what it read out of it (`AttachmentDigest.text`), else — a file nobody read —
+/// its own bytes when they are plain text (UTF-8, or UTF-16 with a byte-order mark). Nil for anything else (a picture
+/// or PDF nobody read, any binary file), which can't be checked.
 struct TextAttachment {
+    private enum Source {
+        case prepared
+        case digest
+        case bytes(encoding: String.Encoding, mark: Data)
+    }
+
     let attachment: MessageAttachment
     let text: String
-    private let encoding: String.Encoding
-    private let mark: Data
+    private let source: Source
 
     init?(_ attachment: MessageAttachment) {
+        self.attachment = attachment
+        if let prepared = attachment.text {
+            text = prepared
+            source = .prepared
+            return
+        }
+        if let digest = attachment.digest, !digest.text.isEmpty {
+            text = digest.text
+            source = .digest
+            return
+        }
         guard attachment.kind == .file, attachment.mime != "application/pdf" else { return nil }
         let data = attachment.data
         let start = [UInt8](data.prefix(3))
+        let mark: Data, encoding: String.Encoding
         if start.starts(with: [0xFF, 0xFE]) {
             (mark, encoding) = (Data([0xFF, 0xFE]), .utf16LittleEndian)
         } else if start.starts(with: [0xFE, 0xFF]) {
@@ -418,14 +444,33 @@ struct TextAttachment {
             (mark, encoding) = (Data(), .utf8)
         }
         guard let text = String(data: data.dropFirst(mark.count), encoding: encoding) else { return nil }
-        self.attachment = attachment
         self.text = text
+        source = .bytes(encoding: encoding, mark: mark)
     }
 
-    /// The attachment with `text` in place of its own, in the same encoding.
+    /// The attachment with `text` in place of its own.
     func with(_ text: String) -> MessageAttachment {
-        guard text != self.text, let body = text.data(using: encoding) else { return attachment }
-        return MessageAttachment(kind: attachment.kind, name: attachment.name, data: mark + body)
+        guard text != self.text else { return attachment }
+        var out = attachment
+        switch source {
+        case .prepared:
+            out.text = text
+        case .digest:
+            out.digest?.text = text
+        case .bytes(let encoding, let mark):
+            guard let body = text.data(using: encoding) else { return attachment }
+            out.data = mark + body
+        }
+        return out
+    }
+
+    /// Whether the attachment's own bytes go to the model (which the shield can't look into).
+    static func bytesGo(_ attachment: MessageAttachment, route: AttachmentRoute?) -> Bool {
+        guard let route else { return attachment.kind == .image || attachment.mime == "application/pdf" }
+        switch AttachmentWire.delivery(attachment, route: route) {
+        case .image, .document, .pageImages: return true
+        case .ocrText, .text, .textInParts, .nameOnly: return false
+        }
     }
 }
 
@@ -475,7 +520,8 @@ public struct ShieldClient: ProviderClient {
     public func modelInfo(_ model: String?) async -> ModelInfo? { await inner.modelInfo(model) }
 
     public func stream(_ request: LLMRequest) -> AsyncThrowingStream<LLMStreamEvent, Error> {
-        let (masked, map, unchecked) = Shield.mask(request, detector: detector, cache: cache)
+        let (masked, map, unchecked) = Shield.mask(request, detector: detector, cache: cache,
+                                                   route: AttachmentRoute.of(inner.profile))
         let inner = self.inner, report = self.onReport
         let route = inner.profile.name.isEmpty ? inner.profile.model : inner.profile.name
         return AsyncThrowingStream { continuation in

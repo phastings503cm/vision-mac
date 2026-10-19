@@ -317,6 +317,13 @@ public struct OpenAIClient: LLMClient {
                 ReasoningEffortCache.shared.learn(route: effortRoute(request), requested: requested, accepted: fix)
                 return try await runTurn(request, onText: onText, onReasoning: onReasoning, isRetry: true)
             }
+            // A model that takes no images, answering one ("image input is not supported", "requires a multimodal
+            // processor"): remember it for this route and send the picture's OCR text instead.
+            if !isRetry, [400, 422, 500].contains(http.statusCode), VisionRejections.saysNoImages(body),
+               carriesImages(request) {
+                VisionRejections.shared.learn(VisionRejections.key(profile, model: requestModel(request)))
+                return try await runTurn(request, onText: onText, onReasoning: onReasoning, isRetry: true)
+            }
             // SGLang / vLLM report a context-overflow 400 as
             // "This model's maximum context length is N tokens; however, you requested M ...".
             if let limit = Self.overflowLimit(in: body) {
@@ -625,8 +632,9 @@ public struct OpenAIClient: LLMClient {
             case .system:
                 if let c = m.content, !c.isEmpty { systemParts.append(c) }
             case .user:
-                messages.append(["role": "user",
-                                 "content": rules.textOnlyContent ? Self.textOnlyContent(for: m) : userContent(for: m)])
+                // A text-only model (Z.ai's GLM text models) gets no image parts from `attachmentRoute`, so its
+                // content is always one plain string.
+                messages.append(["role": "user", "content": userContent(for: m, request: request)])
             case .assistant:
                 var msg: [String: Any] = ["role": "assistant"]
                 msg["content"] = m.content ?? ""
@@ -700,25 +708,6 @@ public struct OpenAIClient: LLMClient {
         }
         if let learned { RequestBody.apply(learned, to: &body) }
         return body
-    }
-
-    /// A user message as one string, for APIs that take text only (Z.ai's text models): text files are folded
-    /// in, anything else is named in a line so the model knows it was there.
-    static func textOnlyContent(for m: LLMMessage) -> String {
-        var text = m.content ?? ""
-        for a in m.attachments ?? [] {
-            switch a.kind {
-            case .file:
-                if let s = String(data: a.data, encoding: .utf8), !s.contains("\u{0}") {
-                    text += "\n\n--- \(a.name) ---\n\(s)"
-                } else {
-                    text += "\n\n[\(a.name) is attached, but it isn't text and this model reads text only.]"
-                }
-            case .image:
-                text += "\n\n[Image \(a.name) not sent: this model reads text only.]"
-            }
-        }
-        return text
     }
 
     // MARK: Thinking
@@ -822,34 +811,53 @@ public struct OpenAIClient: LLMClient {
         }
     }
 
-    /// Build the OpenAI `content` value for a user message. Plain text when
-    /// there are no attachments, otherwise a multi-part array mixing text
-    /// with image / file entries (images inline as base64 data-URIs).
-    private func userContent(for m: LLMMessage) -> Any {
+    /// Build the OpenAI `content` value for a user message. Plain text when it carries no attachments, or only ones
+    /// that go as text; otherwise a multi-part array of `text` and `image_url` parts (images inline as base64 data
+    /// URLs). Never a `file` part: no self-hosted server takes one (vLLM: "Unsupported chat content part type:
+    /// 'file'"; llama.cpp: "unsupported content[].type"; SGLang's schema has no such part) — a file goes as the text
+    /// Vision read out of it (see `AttachmentWire`).
+    private func userContent(for m: LLMMessage, request: LLMRequest) -> Any {
         guard let attachments = m.attachments, !attachments.isEmpty else {
             return m.content ?? ""
         }
-        var parts: [[String: Any]] = []
-        if let text = m.content, !text.isEmpty {
-            parts.append(["type": "text", "text": text])
+        let wire = AttachmentWire.parts(for: attachments, route: attachmentRoute(request))
+        var texts: [String] = []
+        if let text = m.content, !text.isEmpty { texts.append(text) }
+        guard wire.contains(where: { if case .image = $0 { return true } else { return false } }) else {
+            // All text: one string, which every server and chat template takes.
+            for part in wire { if case .text(let text) = part { texts.append(text) } }
+            return texts.joined(separator: "\n\n")
         }
-        for a in attachments {
-            switch a.kind {
-            case .image:
-                let b64 = a.data.base64EncodedString()
+        var parts: [[String: Any]] = texts.map { ["type": "text", "text": $0] }
+        for part in wire {
+            switch part {
+            case .text(let text):
+                parts.append(["type": "text", "text": text])
+            case .image(let mime, let data):
                 parts.append([
                     "type": "image_url",
-                    "image_url": ["url": "data:\(a.mime);base64,\(b64)"],
+                    "image_url": ["url": "data:\(mime);base64,\(data.base64EncodedString())"],
                 ])
-            case .file:
-                let b64 = a.data.base64EncodedString()
-                parts.append([
-                    "type": "file",
-                    "file": ["filename": a.name, "file_data": "data:\(a.mime);base64,\(b64)"],
-                ])
+            case .document(_, let data):
+                // No OpenAI-compatible route takes documents (`AttachmentRoute.openAI`); never reached.
+                parts.append(["type": "text", "text": "[document of \(data.count) bytes]"])
             }
         }
         return parts
+    }
+
+    /// What this route takes besides text, for this request's model.
+    func attachmentRoute(_ request: LLMRequest) -> AttachmentRoute {
+        AttachmentRoute.openAI(profile, model: requestModel(request))
+    }
+
+    /// Whether a request carries any image (a picture, a scanned PDF's pages) that would go as an `image_url`.
+    func carriesImages(_ request: LLMRequest) -> Bool {
+        let route = attachmentRoute(request)
+        return request.messages.contains { m in
+            m.role == .user && AttachmentWire.parts(for: m.attachments ?? [], route: route)
+                .contains { if case .image = $0 { return true } else { return false } }
+        }
     }
 
     /// Who is calling, authorization + user-supplied custom headers on every request.

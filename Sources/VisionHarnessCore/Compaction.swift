@@ -21,7 +21,16 @@ public enum TokenEstimate {
                 // screenshot is ~1.6K tokens although its base64 is ~1M chars.
                 tokens += ImageSize.tokens(for: att.data)
             case .file:
-                chars += att.data.count * 4 / 3   // base64 payload
+                // What goes in the file's place (see `AttachmentWire`): its prepared text, the text read out of it,
+                // a scan's page images — or, for a file nobody read, its base64 payload.
+                if let text = att.text {
+                    chars += text.utf16.count
+                } else if let digest = att.digest {
+                    chars += digest.textLength
+                } else {
+                    chars += att.data.count * 4 / 3
+                }
+                for page in att.digest?.pageImages ?? [] { tokens += ImageSize.tokens(for: page) }
             }
         }
         return max(0, chars / 4) + tokens
