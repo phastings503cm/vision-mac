@@ -34,9 +34,29 @@ extension AppTransport {
         }
     }
 
+    /// When a chat loads: the card for its latest prompt's changes, as it was when that turn ended (not for an older
+    /// turn — the card always belongs to the newest prompt).
+    func restoreCheckpoint(_ vm: SessionVM) {
+        guard vm.checkpoint == nil, let last = vm.promptHistory.last,
+              let record = checkpointStore.record(chatID: vm.id, turnID: last.id), !record.changedFiles.isEmpty else { return }
+        vm.checkpoint = record
+    }
+
+    /// What one prompt's turn changed (nil when it changed no file, or its record was pruned).
+    public func checkpoint(chatID: String, turnID: String) -> TurnCheckpointRecord? {
+        checkpointStore.record(chatID: chatID, turnID: turnID).flatMap { $0.changedFiles.isEmpty ? nil : $0 }
+    }
+
     /// The chat's recent turns that changed files, newest first.
     public func checkpoints(for vm: SessionVM, limit: Int = 30) -> [TurnCheckpointRecord] {
         Array(checkpointStore.records(chatID: vm.id).prefix(limit))
+    }
+
+    /// Why a turn can't be rewound right now — it is still running and writing (rewinding under it would put files
+    /// back while the agent keeps working on them) — else nil.
+    public func rewindBlocked(turnID: String, in vm: SessionVM) -> String? {
+        guard vm.running, turnID == vm.currentPromptID else { return nil }
+        return "Wait for the turn to finish (or stop it) to rewind it."
     }
 
     /// What rewinding a turn would do now.
@@ -48,6 +68,10 @@ extension AppTransport {
     /// what happened, and the model hears it with the next message.
     @discardableResult
     public func rewind(_ plan: RewindPlan, includeConflicts: Bool, in vm: SessionVM) -> RewindResult {
+        if let why = rewindBlocked(turnID: plan.turn.id, in: vm) {
+            vm.note(why, role: .error)
+            return RewindResult()
+        }
         let recorder = checkpointStore.recorder(chatID: vm.id, turnID: "rewind-" + UUID().uuidString,
                                                 title: "Rewind of “\(plan.turn.title)”")
         let result = Rewind.apply(plan, store: checkpointStore, includeConflicts: includeConflicts, recorder: recorder)
@@ -71,10 +95,14 @@ extension AppTransport {
 
     /// The diff of one file a turn changed: before the turn → what the turn left.
     public func diff(_ file: CheckpointFile) -> FileDiff {
+        Self.diff(file, store: checkpointStore)
+    }
+
+    /// The same, off the main actor (the views compute it in the background).
+    public nonisolated static func diff(_ file: CheckpointFile, store: CheckpointStore) -> FileDiff {
         if let skipped = file.skipped, file.before == nil || file.after == nil {
             return FileDiff(hunks: [], added: 0, removed: 0, note: "No diff: \(skipped).")
         }
-        let store = checkpointStore
         let old = file.before.flatMap(store.data), new = file.after.flatMap(store.data)
         if file.before != nil, old == nil { return FileDiff(hunks: [], added: 0, removed: 0, note: "The earlier content is no longer kept.") }
         if file.after != nil, new == nil { return FileDiff(hunks: [], added: 0, removed: 0, note: "The turn's content is no longer kept.") }
@@ -93,6 +121,10 @@ extension AppTransport {
         if let arg, let n = Int(arg.trimmingCharacters(in: .whitespaces)) {
             guard (1...records.count).contains(n) else {
                 vm.note("There is no turn \(n) — `/rewind` lists \(records.count).", role: .error)
+                return
+            }
+            if let why = rewindBlocked(turnID: records[n - 1].id, in: vm) {
+                vm.note(why, role: .error)
                 return
             }
             rewindRequest = RewindRequest(chatID: vm.id, turnID: records[n - 1].id)

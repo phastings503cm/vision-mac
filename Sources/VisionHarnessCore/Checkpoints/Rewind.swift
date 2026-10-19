@@ -18,6 +18,9 @@ public struct RewindPlan: Sendable, Equatable {
         public var skipped: String?
         /// It already holds what it held before the turn: nothing to do.
         public var alreadyThere: Bool
+        /// What the file held on disk when the plan was made (nil = no file). A file that no longer holds it when the
+        /// rewind runs changed while the person was deciding, and is left alone unless they chose Rewind All.
+        public var seen: String?
         public var id: String { path }
     }
 
@@ -45,6 +48,8 @@ public struct RewindResult: Sendable, Equatable {
     public var failed: [String: String] = [:]
 
     public var changedCount: Int { restored.count + removed.count }
+
+    public init() {}
 }
 
 public enum Rewind {
@@ -61,12 +66,12 @@ public enum Rewind {
     public static func plan(_ turn: TurnCheckpointRecord, store: CheckpointStore) -> RewindPlan {
         var items: [RewindPlan.Item] = []
         for file in turn.changedFiles {
+            let now = current(file.path)
             var item = RewindPlan.Item(path: file.path, restore: file.before, conflict: nil, skipped: file.skipped,
-                                       alreadyThere: false)
+                                       alreadyThere: false, seen: now.hash)
             if item.skipped == nil, let before = file.before, store.data(before) == nil {
                 item.skipped = "its earlier content is no longer kept"
             }
-            let now = current(file.path)
             if !now.readable {
                 item.skipped = item.skipped ?? "it can't be read now"
             } else if now.hash == file.before {
@@ -79,8 +84,13 @@ public enum Rewind {
         return RewindPlan(turn: turn, items: items)
     }
 
-    /// Put the files back. Conflicting files are rewound only with `includeConflicts`. `recorder`, when given,
-    /// records the rewind as a turn of its own.
+    /// Why a file the plan called safe is left alone: it changed between the confirmation and the rewind.
+    public static let changedWhileDeciding = "it changed after you confirmed — left as it is"
+
+    /// Put the files back. Conflicting files are rewound only with `includeConflicts`. Every file is looked at again
+    /// just before it is written: one that no longer holds what the plan saw (an editor saved it, another chat or a
+    /// running turn wrote it while the confirmation was up) is left alone — unless it was a conflict the person chose
+    /// to throw away with Rewind All. `recorder`, when given, records the rewind as a turn of its own.
     @discardableResult
     public static func apply(_ plan: RewindPlan, store: CheckpointStore, includeConflicts: Bool,
                              recorder: TurnCheckpoint? = nil) -> RewindResult {
@@ -90,6 +100,14 @@ public enum Rewind {
             if item.alreadyThere { continue }
             if item.skipped != nil || (item.conflict != nil && !includeConflicts) {
                 result.left.append(item.path)
+                continue
+            }
+            // Looked at again now, not when the confirmation opened (a conflict here is one the person chose to
+            // throw away: it is written whatever the file holds).
+            let now = current(item.path)
+            if now.readable, now.hash == item.restore { continue }
+            if !now.readable || (item.conflict == nil && now.hash != item.seen) {
+                result.failed[item.path] = now.readable ? changedWhileDeciding : "it can't be read now"
                 continue
             }
             let url = URL(fileURLWithPath: item.path)

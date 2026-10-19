@@ -958,6 +958,7 @@ public final class AppTransport {
     /// Replay a stored transcript into a session's timeline. Called lazily, so
     /// a long session list stays cheap to open.
     public func hydrate(_ vm: SessionVM) {
+        let firstLoad = !vm.loaded
         if !vm.loaded {
             // Anything added while the timeline was unloaded (a notice) goes after it.
             let added = vm.entries
@@ -972,6 +973,8 @@ public final class AppTransport {
             transcripts[vm.id] = Self.replayMessages(vm.entries)
         }
         loadPromptHistory(vm)
+        // The latest turn's "Files changed (N)" card comes back after a relaunch.
+        if firstLoad { restoreCheckpoint(vm) }
     }
 
     private func replayLog(into vm: SessionVM) {

@@ -129,6 +129,75 @@ final class CheckpointTests: XCTestCase {
         XCTAssertTrue(Rewind.plan(record, store: store).isEmpty)
     }
 
+    func testAFileThatChangesWhileTheConfirmationIsUpIsLeftAlone() async throws {
+        try write("a.txt", "v1\n")
+        try write("b.txt", "b1\n")
+        let recorder = store.recorder(chatID: "chat", turnID: "turn-1", title: "Edit both")
+        let turns: [ScriptedClient.Turn] = [
+            .init(calls: [call("1", "write_file", ["file_path": "a.txt", "content": "v2\n"])]),
+            .init(calls: [call("2", "write_file", ["file_path": "b.txt", "content": "b2\n"])]),
+            .init(text: "done"),
+        ]
+        _ = try await TurnCheckpoint.$current.withValue(recorder) {
+            try await engine(turns).run(messages: [], userText: "go") { _ in }
+        }
+        let record = try XCTUnwrap(store.record(chatID: "chat", turnID: "turn-1"))
+        let plan = Rewind.plan(record, store: store)
+        XCTAssertEqual(plan.safe.count, 2, "no conflict when the confirmation opens")
+        // While it is up, an editor saves a.txt.
+        try write("a.txt", "saved by the editor\n")
+        let result = Rewind.apply(plan, store: store, includeConflicts: false)
+        XCTAssertEqual(read("a.txt"), "saved by the editor\n", "the later change survives")
+        XCTAssertEqual(read("b.txt"), "b1\n")
+        XCTAssertEqual(result.failed.keys.map { URL(fileURLWithPath: $0).lastPathComponent }, ["a.txt"])
+        XCTAssertEqual(result.failed.values.first, Rewind.changedWhileDeciding)
+        XCTAssertTrue(Rewind.summary(result, title: "Edit both", root: workspace.path)
+            .contains("Couldn't rewind a.txt (it changed after you confirmed — left as it is)."))
+
+        // A conflict the person saw and chose to throw away (Rewind All) goes back whatever it holds by then.
+        let again = Rewind.plan(record, store: store)
+        XCTAssertEqual(again.conflicts.count, 1)
+        try write("a.txt", "saved once more\n")
+        Rewind.apply(again, store: store, includeConflicts: true)
+        XCTAssertEqual(read("a.txt"), "v1\n")
+    }
+
+    func testACleanFilesEarlierContentIsWhatTheWorkingTreeHeld() async throws {
+        guard GitProbe.executable != nil else { throw XCTSkip("no git on this machine") }
+        func git(_ args: String...) {
+            _ = GitProbe.run(["-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"] + args, in: workspace)
+        }
+        git("init", "-q")
+        git("config", "user.email", "t@example.com")
+        git("config", "user.name", "Test")
+        // The index keeps LF; the working tree has CRLF (as Git for Windows' core.autocrlf, or eol=crlf, does).
+        try write(".gitattributes", "*.txt text eol=crlf\n")
+        try Data("one\r\ntwo\r\n".utf8).write(to: workspace.appendingPathComponent("crlf.txt"))
+        try write("odd[1].md", "brackets are not a pattern\n")
+        git("add", ".")
+        git("commit", "-qm", "init")
+        XCTAssertEqual(GitProbe.run(["show", ":crlf.txt"], in: workspace).map { String(decoding: $0, as: UTF8.self) },
+                       "one\ntwo\n", "what the index holds")
+
+        let recorder = store.recorder(chatID: "chat", turnID: "turn-1", title: "Rewrite")
+        let command = "printf 'changed\\r\\n' > crlf.txt; printf 'x\\n' > 'odd[1].md'"
+        let turns: [ScriptedClient.Turn] = [
+            .init(calls: [call("1", "run_shell_command", ["command": command])]),
+            .init(text: "done"),
+        ]
+        _ = try await TurnCheckpoint.$current.withValue(recorder) {
+            try await engine(turns).run(messages: [], userText: "go") { _ in }
+        }
+        let record = try XCTUnwrap(store.record(chatID: "chat", turnID: "turn-1"))
+        let byName = Dictionary(uniqueKeysWithValues: record.changedFiles.map { (URL(fileURLWithPath: $0.path).lastPathComponent, $0) })
+        XCTAssertEqual(byName["crlf.txt"]?.before.flatMap(store.data), Data("one\r\ntwo\r\n".utf8),
+                       "the bytes that were on disk, not the index's LF copy")
+        XCTAssertEqual(byName["odd[1].md"]?.change, .modified, "a path with pattern characters is still found in the index")
+        Rewind.apply(Rewind.plan(record, store: store), store: store, includeConflicts: false)
+        XCTAssertEqual(try Data(contentsOf: workspace.appendingPathComponent("crlf.txt")), Data("one\r\ntwo\r\n".utf8))
+        XCTAssertEqual(read("odd[1].md"), "brackets are not a pattern\n")
+    }
+
     func testWithoutACheckpointNothingIsRecorded() async throws {
         let turns: [ScriptedClient.Turn] = [
             .init(calls: [call("1", "write_file", ["file_path": "x.txt", "content": "x"])]),
@@ -221,5 +290,25 @@ final class CheckpointTests: XCTestCase {
         XCTAssertEqual(diff.hunks[1].lines.filter { $0.kind == .added }.map(\.text), ["inserted"])
         XCTAssertNotNil(LineDiff.diff(old: Data([0, 1, 2]), new: Data([3])).note, "binary files are only sized")
         XCTAssertEqual(LineDiff.diff(old: nil, new: Data("a\nb\n".utf8)).added, 2)
+    }
+
+    func testAFileChangedThroughoutIsCountedAndOneEditInALargeFileIsCompared() {
+        let started = Date()
+        let lines = (1...8_000).map { "line \($0)" }
+        let reindented = LineDiff.diff(old: lines.joined(separator: "\n"), new: lines.map { "    " + $0 }.joined(separator: "\n"))
+        XCTAssertTrue(reindented.note?.hasPrefix("Too many changes to compare line by line (") == true,
+                      reindented.note ?? "")
+        XCTAssertEqual(reindented.added, 8_000)
+        XCTAssertEqual(reindented.removed, 8_000)
+
+        var big = (1...19_000).map { "row \($0)" }
+        let old = big.joined(separator: "\n")
+        big[12_345] = "row changed"
+        let one = LineDiff.diff(old: old, new: big.joined(separator: "\n"))
+        XCTAssertNil(one.note)
+        XCTAssertEqual(one.hunks.map(\.header), ["@@ -12343,7 +12343,7 @@"])
+        XCTAssertEqual(one.hunks.first?.lines.first { $0.kind == .removed }?.oldNumber, 12_346)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 10, "neither takes long")
+        XCTAssertNotNil(LineDiff.diff(old: Array(repeating: "x", count: 20_001).joined(separator: "\n"), new: "x").note)
     }
 }

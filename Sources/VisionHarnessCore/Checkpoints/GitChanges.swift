@@ -6,7 +6,8 @@ import Foundation
 // can: before the command, `git status` lists the files that differ from the index (changed, deleted, new and not
 // ignored) and their contents are kept; after it, `git status` again. A file that is on either list and isn't what it
 // was is a change the command made: its "before" is what was kept — or, for a file that was clean, the index's copy
-// (which is what the working tree held) — and its "after" is what is there now. Ignored files (build output) are
+// as checked out (`git cat-file --filters`: what the working tree held) — and its "after" is what is there now. A file
+// git can't answer about is marked as one that can't be rewound, never as one the command created. Ignored files (build output) are
 // never looked at. Outside a git repository a shell command's changes aren't recorded.
 
 /// Running git without surprises.
@@ -72,6 +73,11 @@ public enum GitProbe {
         init(_ process: Process) { self.process = process }
     }
 
+    /// NUL-separated paths (`git ls-files -z`).
+    static func splitNul(_ data: Data) -> [String] {
+        data.split(separator: 0).map { String(decoding: $0, as: UTF8.self) }
+    }
+
     /// The paths `git status --porcelain -z` lists (relative to the repository), without the status letters.
     static func parseStatus(_ data: Data) -> [String] {
         // "XY path\0" per entry (renames are turned off, so there is never a second path).
@@ -115,18 +121,41 @@ extension TurnCheckpoint {
         return GitBaseline(root: root, dirty: dirty, unkept: unkept)
     }
 
+    /// Why a clean file's earlier content is unknown: git didn't answer (a timeout, an odd path).
+    static let gitCouldntSay = "git couldn't say what it held before"
+
+    /// Which of `paths` the index has (nil when git can't say). Paths are taken literally, not as patterns.
+    static func indexed(_ paths: [String], root: URL) -> Set<String>? {
+        guard !paths.isEmpty else { return [] }
+        return GitProbe.run(["--literal-pathspecs", "ls-files", "-z", "--"] + paths, in: root)
+            .map { Set(GitProbe.splitNul($0)) }
+    }
+
+    /// The index's copy of a clean file as the working tree holds it: with the checkout filters applied (Git LFS's
+    /// smudge, `eol=crlf` / `core.autocrlf` line endings), so a rewind writes back the bytes that were on disk.
+    static func checkedOutCopy(_ path: String, root: URL) -> Data? {
+        GitProbe.run(["cat-file", "--filters", ":" + path], in: root)
+    }
+
     /// After the command: record each file it changed (see the top of this file).
     public func recordGitChanges(since baseline: GitBaseline, by tool: String) {
         guard let paths = Self.gitStatus(baseline.root), paths.count <= Self.maxGitEntries else { return }
         let candidates = Set(paths).union(baseline.dirty.keys)
+        // The files that were clean before the command: in the index (the working tree held its copy), or not (the
+        // command made them). Asked once for all of them.
+        let wereClean = candidates.filter { baseline.dirty[$0] == nil }.sorted()
+        let inIndex = Self.indexed(wereClean, root: baseline.root)
         for path in candidates.sorted() {
             let absolute = baseline.root.appendingPathComponent(path).standardizedFileURL.path
             let before: String?
             var skipped: String? = baseline.unkept[path]
             if let kept = baseline.dirty[path] {
                 before = kept
-            } else if let data = GitProbe.run(["show", ":" + path], in: baseline.root) {
-                // It was clean: the working tree held the index's copy.
+            } else if let inIndex, !inIndex.contains(path) {
+                // Not in the index and not listed before: the command made it.
+                before = nil
+            } else if inIndex != nil, let data = Self.checkedOutCopy(path, root: baseline.root) {
+                // It was clean: the working tree held the index's copy, as checked out.
                 if data.count > CheckpointStore.maxFileBytes {
                     before = nil
                     skipped = "too large to keep"
@@ -134,8 +163,10 @@ extension TurnCheckpoint {
                     before = try? store.put(data)
                 }
             } else {
-                // Not in the index and not listed before: the command made it.
+                // Git didn't answer: what it held is unknown, so it is never treated as made by the command (a
+                // rewind would delete it) — it can't be rewound.
                 before = nil
+                skipped = skipped ?? Self.gitCouldntSay
             }
             let after = keep(path: absolute)
             if skipped == nil, let why = after.skipped { skipped = why }

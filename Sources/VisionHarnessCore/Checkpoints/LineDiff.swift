@@ -3,8 +3,8 @@ import Foundation
 // MARK: - Line diffs (what a turn changed in a file)
 //
 // A unified diff of two texts, line by line, in hunks with a few lines of context — what "Files changed (N)" shows
-// under a turn. Uses the standard library's difference (Myers), so it is fast for source files; very large files
-// are summarised instead of diffed.
+// under a turn. Uses the standard library's difference (Myers) on the part between the unchanged first and last
+// lines, so it is fast for source files; very large files, and files changed throughout, are counted instead.
 
 public struct DiffLine: Hashable, Sendable {
     public enum Kind: String, Hashable, Sendable { case context, added, removed }
@@ -45,7 +45,10 @@ public enum LineDiff {
     /// Lines of context around each change.
     public static let context = 3
     /// More lines than this on either side and the files are only counted, not compared.
-    public static let maxLines = 40_000
+    public static let maxLines = 20_000
+    /// The comparison costs about (lines on both sides) × (lines changed). Past this budget — a file rewritten or
+    /// re-indented throughout — the change is only counted: comparing it line by line could take seconds to minutes.
+    public static let maxWork = 25_000_000
 
     /// The diff of two file contents (nil = the file didn't exist on that side).
     public static func diff(old: Data?, new: Data?) -> FileDiff {
@@ -80,12 +83,27 @@ public enum LineDiff {
             return FileDiff(hunks: [], added: b.count, removed: a.count,
                             note: "Too large to compare line by line (\(a.count.formatted()) → \(b.count.formatted()) lines)")
         }
-        let difference = b.difference(from: a)
+        // The unchanged lines at the start and the end are set aside first: most edits touch a small middle part.
+        var prefix = 0
+        while prefix < a.count, prefix < b.count, a[prefix] == b[prefix] { prefix += 1 }
+        var suffix = 0
+        while suffix < a.count - prefix, suffix < b.count - prefix, a[a.count - 1 - suffix] == b[b.count - 1 - suffix] {
+            suffix += 1
+        }
+        let middleA = Array(a[prefix..<(a.count - suffix)]), middleB = Array(b[prefix..<(b.count - suffix)])
+        // At least this many lines differ (a line only one side has, counted with repeats).
+        let (onlyOld, onlyNew) = unmatched(middleA, middleB)
+        if (middleA.count + middleB.count) * (onlyOld + onlyNew) > maxWork {
+            return FileDiff(hunks: [], added: onlyNew, removed: onlyOld,
+                            note: "Too many changes to compare line by line (\(a.count.formatted()) → "
+                                + "\(b.count.formatted()) lines, about +\(onlyNew.formatted()) −\(onlyOld.formatted()))")
+        }
+        let difference = middleB.difference(from: middleA)
         var removedOffsets = Set<Int>(), insertedOffsets = Set<Int>()
         for change in difference {
             switch change {
-            case .remove(let offset, _, _): removedOffsets.insert(offset)
-            case .insert(let offset, _, _): insertedOffsets.insert(offset)
+            case .remove(let offset, _, _): removedOffsets.insert(offset + prefix)
+            case .insert(let offset, _, _): insertedOffsets.insert(offset + prefix)
             }
         }
         // Walk both sides in order: the whole file as context / removed / added lines.
@@ -115,6 +133,18 @@ public enum LineDiff {
         return FileDiff(hunks: hunks(all), added: added, removed: removed,
                         note: added == 0 && removed == 0 && oldExists != newExists
                             ? (newExists ? "New empty file" : "Empty file removed") : nil)
+    }
+
+    /// How many lines only the old side has, and only the new side has (as multisets: a line twice in one and once in
+    /// the other counts once). A lower bound on the lines a diff marks removed and added.
+    static func unmatched(_ a: [String], _ b: [String]) -> (old: Int, new: Int) {
+        var counts: [String: Int] = [:]
+        for line in a { counts[line, default: 0] += 1 }
+        var onlyNew = 0
+        for line in b {
+            if let n = counts[line], n > 0 { counts[line] = n - 1 } else { onlyNew += 1 }
+        }
+        return (counts.values.reduce(0, +), onlyNew)
     }
 
     /// Group the lines into hunks: each change with `context` lines around it, nearby changes merged.

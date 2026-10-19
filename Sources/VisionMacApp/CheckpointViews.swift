@@ -31,14 +31,13 @@ struct TurnChangesCard: View {
                     Text("Rewound").font(Theme.metaFont).foregroundStyle(Theme.noticeTint)
                 }
                 Spacer()
+                let blocked = model.transport.rewindBlocked(turnID: record.id, in: session)
                 Button("Rewind this turn…") {
                     model.transport.rewindRequest = RewindRequest(chatID: session.id, turnID: record.id)
                 }
                 .controlSize(.small)
-                .disabled(session.running && record.id == session.currentPromptID)
-                .help(session.running && record.id == session.currentPromptID
-                      ? "Wait for the turn to finish (or stop it) to rewind it"
-                      : "Put these files back to how they were before this turn (you confirm first)")
+                .disabled(blocked != nil)
+                .help(blocked ?? "Put these files back to how they were before this turn (you confirm first)")
             }
             if expanded {
                 ForEach(files) { file in
@@ -93,6 +92,12 @@ struct ChangedFileRow: View {
             }
             .buttonStyle(.plain)
             .contextMenu {
+                if file.after != nil {
+                    Button("Open in Editor") {
+                        model.mode = .code
+                        model.code.reveal(URL(fileURLWithPath: file.path))
+                    }
+                }
                 Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: file.path)]) }
                 Button("Copy Path") {
                     NSPasteboard.general.clearContents()
@@ -107,15 +112,14 @@ struct ChangedFileRow: View {
                 }
             }
         }
-        .onAppear { if diff == nil { load() } }
     }
 
+    /// Only when the row is opened, and off the main thread: a large rewritten file can take a while to compare.
     private func load() {
-        let transport = model.transport
+        let store = model.transport.checkpointStore
         let file = self.file
         Task {
-            let result = transport.diff(file)
-            diff = result
+            diff = await Task.detached(priority: .userInitiated) { AppTransport.diff(file, store: store) }.value
         }
     }
 }
@@ -223,8 +227,11 @@ struct RewindSheet: View {
                                 Spacer()
                                 Text(record.startedAt.formatted(date: .abbreviated, time: .shortened))
                                     .font(Theme.metaFont).foregroundStyle(.secondary)
+                                let blocked = session.flatMap { model.transport.rewindBlocked(turnID: record.id, in: $0) }
                                 Button("Rewind…") { ask(record) }
                                     .controlSize(.small)
+                                    .disabled(blocked != nil)
+                                    .help(blocked ?? "Put this turn's files back to how they were before it (you confirm first)")
                             }
                             if selected == record.id {
                                 ForEach(record.changedFiles) { file in
@@ -284,6 +291,8 @@ struct RewindSheet: View {
     }
 
     private func ask(_ record: TurnCheckpointRecord) {
+        // The turn still running can't be rewound under the agent (the card and the list disable it too).
+        if let session, model.transport.rewindBlocked(turnID: record.id, in: session) != nil { return }
         let plan = model.transport.rewindPlan(record)
         if plan.isEmpty { nothingToDo = true } else { self.plan = plan }
     }

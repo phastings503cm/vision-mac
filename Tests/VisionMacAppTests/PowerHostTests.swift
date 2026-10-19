@@ -186,6 +186,61 @@ final class PowerHostTests: XCTestCase {
 
     // MARK: Rewind
 
+    /// One turn that rewrites notes.txt ("old" → "new"); its record.
+    private func writeTurn(_ t: AppTransport, _ vm: SessionVM) async throws -> TurnCheckpointRecord {
+        let notes = dir.appendingPathComponent("notes.txt")
+        try Data("old\n".utf8).write(to: notes)
+        FakeModelServer.reset { seen, _ in
+            seen.fresh ? .toolCall("write_file", #"{"file_path":"notes.txt","content":"new\n"}"#) : .text("Done.")
+        }
+        t.send("update the notes", sessionID: vm.id)
+        try await waitIdle(vm)
+        let deadline = Date().addingTimeInterval(5)
+        while vm.checkpoint == nil, Date() < deadline { try await Task.sleep(nanoseconds: 10_000_000) }
+        return try XCTUnwrap(vm.checkpoint)
+    }
+
+    func testARunningTurnCantBeRewoundUnderTheAgent() async throws {
+        let t = makeTransport([spark])
+        let vm = t.newSession(cwd: dir.path)
+        let record = try await writeTurn(t, vm)
+        let notes = dir.appendingPathComponent("notes.txt")
+        // As if that turn were still running.
+        vm.running = true
+        vm.currentPromptID = record.id
+        defer { vm.running = false; vm.currentPromptID = nil }
+        XCTAssertEqual(t.rewindBlocked(turnID: record.id, in: vm), "Wait for the turn to finish (or stop it) to rewind it.")
+        XCTAssertNil(t.rewindBlocked(turnID: "another-turn", in: vm))
+        let result = t.rewind(t.rewindPlan(record), includeConflicts: false, in: vm)
+        XCTAssertEqual(result.changedCount, 0)
+        XCTAssertEqual(try String(contentsOf: notes, encoding: .utf8), "new\n", "nothing was put back under the agent")
+        XCTAssertEqual(vm.entries.last?.message?.text, "Wait for the turn to finish (or stop it) to rewind it.")
+        t.rewindRequest = nil
+        t.rewindCommand("1", vm: vm)
+        XCTAssertNil(t.rewindRequest, "/rewind 1 doesn't open the confirmation either")
+        vm.running = false
+        XCTAssertNil(t.rewindBlocked(turnID: record.id, in: vm))
+    }
+
+    func testTheLatestTurnsChangesComeBackAfterARelaunch() async throws {
+        let t = makeTransport([spark])
+        let vm = t.newSession(cwd: dir.path)
+        let record = try await writeTurn(t, vm)
+        XCTAssertEqual(t.checkpoint(chatID: vm.id, turnID: record.id)?.changedFiles.count, 1, "a prompt's results find it")
+        t.log.flush(wait: true)
+
+        let config = AppConfig(defaults: UserDefaults(suiteName: defaultsSuite)!, secrets: MemorySecretStore())
+        let relaunched = AppTransport(config: config, log: ConversationLog(dir: dir.appendingPathComponent("log", isDirectory: true)),
+                                      queueFile: dir.appendingPathComponent("task-queue.json"),
+                                      skillLocations: SkillLocations(home: dir, appSupport: dir.appendingPathComponent("support")),
+                                      vault: CredentialVault(directory: dir.appendingPathComponent("vault"), store: MemoryBlobStore()))
+        defer { relaunched.stopAll() }
+        let reopened = try XCTUnwrap(relaunched.sessions.first { $0.id == vm.id })
+        relaunched.hydrate(reopened)   // (the launch may already have loaded it: the selected chat)
+        XCTAssertEqual(reopened.checkpoint?.id, record.id, "the card under the latest turn is back")
+        XCTAssertEqual(reopened.checkpoint?.changedFiles.map { URL(fileURLWithPath: $0.path).lastPathComponent }, ["notes.txt"])
+    }
+
     func testATurnsFileChangesShowAndRewindAndTheModelIsTold() async throws {
         let t = makeTransport([spark])
         let notes = dir.appendingPathComponent("notes.txt")
