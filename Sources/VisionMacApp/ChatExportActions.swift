@@ -58,37 +58,51 @@ enum ChatExportActions {
 }
 
 extension GuardianService {
+    /// What a chat going to Guardian is masked with: the vault's secrets always, the shield's finds when it is on
+    /// (nil: nothing to mask — the vault is empty and the shield is off).
+    nonisolated static func chatMask() -> SensitiveDetector? { ProviderClients.shield?.detector() }
+
+    /// A chat as it goes up: masked (off the main thread — a long chat is megabytes), then encoded.
+    nonisolated static func upload(_ doc: ChatExportDocument, mask: SensitiveDetector?) async -> (title: String, payload: Data) {
+        await Task.detached(priority: .userInitiated) {
+            let out = doc.masked(by: mask)
+            return (out.title, ChatExport.guardianPayload(out))
+        }.value
+    }
+
     /// Keep one chat in the account's Guardian (`POST /api/harness/chats/:id`), where any Vision harness on the
-    /// account can import it. Returns what happened, in words.
-    func sendChat(_ doc: ChatExportDocument) async -> String {
+    /// account can import it. Secrets are masked first (`chatMask`). Returns what happened, in words.
+    func sendChat(_ doc: ChatExportDocument, mask: SensitiveDetector? = GuardianService.chatMask()) async -> String {
         guard isSignedIn, let client else { return "Sign in to Guardian first (Settings ▸ Guardian)." }
-        let payload = ChatExport.guardianPayload(doc)
+        let (title, payload) = await Self.upload(doc, mask: mask)
         guard payload.count <= ChatExport.maxGuardianPayloadBytes else {
             return "“\(doc.title)” is over 25 MB, the most Guardian keeps for one chat — export it as JSON instead."
         }
         do {
-            try await client.putChat(id: doc.id, title: doc.title, updatedAt: doc.updatedAt, payload: payload)
+            try await client.putChat(id: doc.id, title: title, updatedAt: doc.updatedAt, payload: payload)
             return "Sent “\(doc.title)” to Guardian."
         } catch {
             return "Couldn't send “\(doc.title)” to Guardian: " + ((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
         }
     }
 
-    /// Every chat on this Mac to Guardian (Settings ▸ Guardian ▸ Export all chats). Chats over 25 MB stay here.
-    func sendAllChats(from transport: AppTransport, progress: ((Int, Int) -> Void)? = nil) async -> String {
+    /// Every chat on this Mac to Guardian (Settings ▸ Guardian ▸ Export all chats), masked like one chat. Chats over
+    /// 25 MB stay here.
+    func sendAllChats(from transport: AppTransport, mask: SensitiveDetector? = GuardianService.chatMask(),
+                      progress: ((Int, Int) -> Void)? = nil) async -> String {
         guard isSignedIn, let client else { return "Sign in to Guardian first (Settings ▸ Guardian)." }
         let ids = transport.sessions.map(\.id)
         var sent = 0
         var tooBig = 0
         for (index, id) in ids.enumerated() {
             guard let doc = transport.exportDocument(id), !doc.rows.isEmpty else { continue }
-            let payload = ChatExport.guardianPayload(doc)
+            let (title, payload) = await Self.upload(doc, mask: mask)
             if payload.count > ChatExport.maxGuardianPayloadBytes {
                 tooBig += 1
                 continue
             }
             do {
-                try await client.putChat(id: doc.id, title: doc.title, updatedAt: doc.updatedAt, payload: payload)
+                try await client.putChat(id: doc.id, title: title, updatedAt: doc.updatedAt, payload: payload)
                 sent += 1
             } catch {
                 return "Exported \(sent) chat\(sent == 1 ? "" : "s") to Guardian, then: "

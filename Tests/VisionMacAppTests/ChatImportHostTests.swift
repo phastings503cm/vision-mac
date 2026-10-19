@@ -234,6 +234,34 @@ final class ChatImportHostTests: XCTestCase {
         XCTAssertEqual(legacy.rows.map(\.kind), ["notice", "user", "tool", "assistant"])
         XCTAssertEqual(legacy.rows[1].at, t0)
 
+        // Masked on the way: a vault secret in a tool's output never reaches Guardian.
+        var secretDoc = doc
+        secretDoc.rows[2].output = "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCY\n"
+        var off = ShieldSettings()
+        off.enabled = false
+        let masked = await service.sendChat(secretDoc, mask: SensitiveDetector(settings: off, vaultValues: ["wJalrXUtnFEMIK7MDENGbPxRfiCY"]))
+        XCTAssertEqual(masked, "Sent “Login fixes” to Guardian.")
+        let maskedEnvelope = try XCTUnwrap(try JSONSerialization.jsonObject(with: try XCTUnwrap(wire.body("POST /api/harness/chats/\(id)"))) as? [String: Any])
+        let maskedPayload = try XCTUnwrap(maskedEnvelope["payload"] as? String)
+        XCTAssertFalse(maskedPayload.contains("wJalrXUtnFEMIK7MDENGbPxRfiCY"))
+        XCTAssertTrue(maskedPayload.contains("AWS_SECRET_ACCESS_KEY=⟦"), maskedPayload)
+    }
+
+    func testAnOpenChatsPlanGoesOutAsAPlanNotice() throws {
+        let id = try XCTUnwrap(transport.importChats([claudeCodeChat()]).imported.first)
+        let vm = try XCTUnwrap(transport.sessions.first { $0.id == id })
+        transport.hydrate(vm)
+        vm.setTodos([TodoItem(id: "1", content: "Read the form", status: .completed),
+                     TodoItem(id: "2", content: "Fix the button", status: .inProgress)])
+        let doc = try XCTUnwrap(transport.exportDocument(id))
+        XCTAssertEqual(doc.rows.map(\.kind), [.notice, .user, .tool, .assistant, .notice])
+        XCTAssertEqual(doc.rows.last?.text, "Plan:\n- [x] Read the form\n- [ ] Fix the button", "the checklist Copy gives")
+        // Through Guardian and back (either Vision reads it the same way).
+        let back = try XCTUnwrap(GuardianChatImport.harnessChat(id: id, title: "x", updatedAt: .now,
+                                                                payload: ChatExport.guardianPayload(doc)))
+        XCTAssertEqual(back.rows.last?.text, "Plan:\n- [x] Read the form\n- [ ] Fix the button")
+        let markdown = String(decoding: ChatExportActions.data(.markdown, for: doc), as: UTF8.self)
+        XCTAssertTrue(markdown.contains("- [x] Read the form"))
     }
 
     func testAGuardianChatGuardianImportedFromSomethingAlreadyHereShowsAsImported() throws {

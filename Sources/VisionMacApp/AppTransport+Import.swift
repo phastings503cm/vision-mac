@@ -132,14 +132,27 @@ extension AppTransport {
         }
     }
 
-    /// A chat as it stands, ready to export: the open transcript when it is loaded, else its file.
+    /// An open chat's entries as export rows. Its plan goes out as a notice — "Plan:" then the checklist Copy gives
+    /// ("- [x] done", "- [ ] still to do") — the shape both Visions read a plan row back as.
+    static func exportRows(_ entries: [ChatEntry], sessionID: String) -> [ImportedRow] {
+        zip(entries, logRows(for: entries, sessionID: sessionID)).compactMap { entry, row in
+            if case .todos = entry.kind {
+                guard let checklist = MessageCopy.text(for: entry) else { return nil }
+                return ImportedRow(kind: .notice, text: "Plan:\n" + checklist, at: entry.at)
+            }
+            return exportRows([row]).first
+        }
+    }
+
+    /// A chat as it stands, ready to export: the open transcript when it is loaded (with its plan), else its file
+    /// (the log keeps no plan).
     func exportDocument(_ sessionID: String) -> ChatExportDocument? {
         guard let vm = sessions.first(where: { $0.id == sessionID }) else { return nil }
-        let rows = vm.loaded ? Self.logRows(for: vm.entries, sessionID: sessionID) : log.peekItems(sessionID)
+        let rows = vm.loaded ? Self.exportRows(vm.entries, sessionID: sessionID) : Self.exportRows(log.peekItems(sessionID))
         let stored = log.session(sessionID)
         return ChatExportDocument(id: vm.id, title: vm.title, cwd: vm.cwd,
                                   source: stored?.source.flatMap(ChatSource.init(rawValue:)), sourceID: stored?.sourceID,
-                                  createdAt: rows.first?.at, updatedAt: vm.updatedAt, rows: Self.exportRows(rows))
+                                  createdAt: rows.first?.at, updatedAt: vm.updatedAt, rows: rows)
     }
 
     // MARK: Search

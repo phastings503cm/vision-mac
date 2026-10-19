@@ -421,6 +421,35 @@ final class ChatImportTests: XCTestCase {
         XCTAssertEqual(ChatExport.fileName("...", ext: "json"), "Chat.json")
     }
 
+    func testWhatGoesToGuardianIsMaskedLikeAPromptToAModelThatIsntPrivate() {
+        let secret = "tok_live_51HxQe9Rk2"
+        var doc = document()
+        doc.title = "Rotate \(secret)"
+        doc.rows[1].text = "Use \(secret) and mail pat@example.com"
+        doc.rows[2].argSummary = "export TOKEN=\(secret)"
+        doc.rows[2].output = "TOKEN=\(secret)\nok"
+        XCTAssertEqual(doc.masked(by: nil).rows, doc.rows, "nothing to mask: the vault is empty and the shield is off")
+
+        var off = ShieldSettings()
+        off.enabled = false
+        let vaultOnly = doc.masked(by: SensitiveDetector(settings: off, vaultValues: [secret]))
+        let texts = [vaultOnly.title] + vaultOnly.rows.flatMap { [$0.text, $0.argSummary, $0.output].compactMap { $0 } }
+        XCTAssertFalse(texts.contains { $0.contains(secret) }, "the vault's secrets always: title, prompt, arguments, output")
+        let placeholder = try? XCTUnwrap(vaultOnly.rows[2].output?.components(separatedBy: "\n").first?
+            .replacingOccurrences(of: "TOKEN=", with: ""))
+        XCTAssertEqual(vaultOnly.title, "Rotate \(placeholder ?? "?")", "one value is one placeholder all through the chat")
+        XCTAssertEqual(vaultOnly.rows[1].text, "Use \(placeholder ?? "?") and mail pat@example.com", "the shield is off: only the vault")
+        XCTAssertEqual(vaultOnly.rows.map(\.kind), doc.rows.map(\.kind))
+        XCTAssertEqual(vaultOnly.rows.map(\.at), doc.rows.map(\.at))
+        XCTAssertEqual(vaultOnly.id, doc.id)
+        XCTAssertEqual(vaultOnly.sourceID, doc.sourceID)
+
+        let shielded = doc.masked(by: SensitiveDetector(settings: ShieldSettings(), vaultValues: [secret]))
+        XCTAssertFalse(shielded.rows[1].text?.contains("pat@example.com") ?? true, "the shield's finds when it is on")
+        let payload = String(decoding: ChatExport.guardianPayload(shielded), as: UTF8.self)
+        XCTAssertFalse(payload.contains(secret))
+    }
+
     // MARK: Guardian
 
     final class Wire: @unchecked Sendable {

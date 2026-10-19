@@ -490,7 +490,9 @@ the calls to your signed-in Guardian. The first look at a long Claude Code histo
 read only what changed.
 
 **Export**: **File ▸ Export Chat ▸ Markdown… / JSON…** (or the chat's right-click menu), and **Send Chat to
-Guardian** to keep it with your account. The JSON imports back into Vision on any computer.
+Guardian** to keep it with your account — masked first, like the prompts Guardian's notebook gets (the Credentials
+Vault's secrets always, what the sensitive-data shield finds when it is on). An open chat's plan goes along as a
+"Plan:" checklist. The JSON imports back into Vision on any computer.
 
 **Search all chats** — the field above the chat list (⇧⌘F) — finds every word of a search in titles, prompts,
 answers and tool calls across every chat, made here or imported; its menu narrows it to one source. Click a
@@ -679,7 +681,7 @@ Guardian (guardian.503cm.com) is the account side of the family — models, prom
 | Prompt history | harness → Guardian | automatically, as you send prompts while signed in, and again with the outcome when each ends — masked first (your vault's secrets always, and what the sensitive-data shield masks); **Send my prompts to the notebook** in Settings ▸ Guardian turns it off |
 | Prompt history | Guardian → harness | Settings ▸ Guardian browses the account's notebook |
 | Skills | both ways | import the account's skills; deposit the project's `.vision/skills` |
-| Chats | both ways | export all chats, or one with **Send Chat to Guardian**; **Import Chats** brings back the account's kept chats and your Guardian chats (read a page at a time; a chat Guardian imported from something this Mac already has shows as imported) |
+| Chats | both ways | export all chats, or one with **Send Chat to Guardian** (masked first, like the prompt notebook: vault secrets always, the shield's finds when it is on); **Import Chats** brings back the account's kept chats and your Guardian chats (read a page at a time; a chat Guardian imported from something this Mac already has shows as imported) |
 | Code projects | both ways | upload the open project's text files to the account's private repo store — Guardian's own github-for-one, ready for the AI Coders module — never `.env` files, keys or certificates; download one back |
 
 **Estimates across users**: the turn-phase ETA cache that Vision keeps per machine (`eta-cache.json`) has a multitenant big sibling in Guardian, which aggregates durations per task kind and scope across its users — the client sends nothing but the kind, the scope number and the wall-clock.

@@ -32,6 +32,28 @@ public struct ChatExportDocument: Sendable {
         self.updatedAt = updatedAt
         self.rows = rows
     }
+
+    /// The copy that leaves the Mac for Guardian: masked like a request to a model that isn't private — the vault's
+    /// secrets always, and what the sensitive-data shield finds when it is on (`detector` nil: nothing to mask). The
+    /// title, the folder and every row's text, arguments and output are masked together, so one value is one
+    /// placeholder (⟦SECRET_1⟧) all through the chat. The same rule as the prompts Guardian's notebook gets.
+    public func masked(by detector: SensitiveDetector?) -> ChatExportDocument {
+        guard let detector else { return self }
+        var texts: [String?] = [title, cwd]
+        texts.reserveCapacity(2 + rows.count * 3)
+        for row in rows { texts += [row.text, row.argSummary, row.output] }
+        let out = Shield.maskTexts(texts, detector: detector)
+        var copy = self
+        copy.title = out[0] ?? title
+        copy.cwd = out[1]
+        for index in copy.rows.indices {
+            let base = 2 + index * 3
+            copy.rows[index].text = out[base]
+            copy.rows[index].argSummary = out[base + 1]
+            copy.rows[index].output = out[base + 2]
+        }
+        return copy
+    }
 }
 
 public enum ChatExport {
