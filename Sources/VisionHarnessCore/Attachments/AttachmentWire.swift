@@ -15,9 +15,13 @@ public struct AttachmentRoute: Sendable, Equatable {
     public var maxImageBytes: Int?
     public var maxDocuments: Int?
     public var maxDocumentBytes: Int?
+    /// The most bytes of pictures and documents, together, one whole request may carry (the newest message has the
+    /// first claim); past it, they go as their text. Nil = no total.
+    public var maxRequestMediaBytes: Int?
 
     public init(vision: Bool, documents: Bool = false, imageTypes: Set<String>? = nil, maxImages: Int? = nil,
-                maxImageBytes: Int? = nil, maxDocuments: Int? = nil, maxDocumentBytes: Int? = nil) {
+                maxImageBytes: Int? = nil, maxDocuments: Int? = nil, maxDocumentBytes: Int? = nil,
+                maxRequestMediaBytes: Int? = nil) {
         self.vision = vision
         self.documents = documents
         self.imageTypes = imageTypes
@@ -25,6 +29,7 @@ public struct AttachmentRoute: Sendable, Equatable {
         self.maxImageBytes = maxImageBytes
         self.maxDocuments = maxDocuments
         self.maxDocumentBytes = maxDocumentBytes
+        self.maxRequestMediaBytes = maxRequestMediaBytes
     }
 
     public static let textOnly = AttachmentRoute(vision: false)
@@ -47,11 +52,16 @@ public struct AttachmentRoute: Sendable, Equatable {
     }
 
     /// Anthropic's own API: the same four image formats, PDFs as document blocks, and the Messages API's limits
-    /// (5 MB an image, a 32 MB request — documents are kept well under it, base64 being a third larger).
+    /// (5 MB an image, a 32 MB request). Base64 is a third larger, so a request carries at most 20 MB of pictures and
+    /// documents (about 27 MB on the wire), leaving room for the conversation's text — past it they go as their text,
+    /// never as a 413 that would compact the chat for nothing.
+    public static let anthropicRequestMediaBytes = 20_000_000
+
     public static func anthropic(_ profile: ProviderProfile, traits: BedrockModelTraits) -> AttachmentRoute {
         AttachmentRoute(vision: profile.vision ?? true, documents: traits.documents,
                         imageTypes: ["image/png", "image/jpeg", "image/gif", "image/webp"],
-                        maxImages: 20, maxImageBytes: 5_000_000, maxDocuments: 5, maxDocumentBytes: 15_000_000)
+                        maxImages: 20, maxImageBytes: 5_000_000, maxDocuments: 5, maxDocumentBytes: 15_000_000,
+                        maxRequestMediaBytes: anthropicRequestMediaBytes)
     }
 
     /// The route a profile is served on.
@@ -122,47 +132,83 @@ public enum AttachmentWire {
         }
     }
 
-    /// The wire pieces for a user message's attachments, in order, within the route's per-message limits (past
-    /// them, a picture or document goes as its text instead).
+    /// The wire pieces for a user message's attachments, in order, within the route's per-message limits and its
+    /// request total (past them, a picture or document goes as its text instead).
     public static func parts(for attachments: [MessageAttachment], route: AttachmentRoute) -> [AttachmentWirePart] {
-        var out: [AttachmentWirePart] = []
+        var room = route.maxRequestMediaBytes ?? .max
+        return parts(for: attachments, route: route, mediaRoom: &room)
+    }
+
+    /// The same, drawing pictures and documents from `mediaRoom` — the bytes the request has left for them, shared
+    /// by its messages (newest first).
+    public static func parts(for attachments: [MessageAttachment], route: AttachmentRoute,
+                             mediaRoom: inout Int) -> [AttachmentWirePart] {
+        plan(for: attachments, route: route, mediaRoom: &mediaRoom).flatMap(\.parts)
+    }
+
+    /// How each attachment of a message actually goes once the limits are applied — what the badges under a sent
+    /// message say (a fourth big PDF past the request total says "sent as text", not "sent as PDF document").
+    public static func deliveries(for attachments: [MessageAttachment], route: AttachmentRoute) -> [AttachmentDelivery] {
+        var room = route.maxRequestMediaBytes ?? .max
+        return plan(for: attachments, route: route, mediaRoom: &room).map(\.delivery)
+    }
+
+    /// Each attachment's delivery after the limits, and its wire pieces.
+    static func plan(for attachments: [MessageAttachment], route: AttachmentRoute,
+                     mediaRoom: inout Int) -> [(delivery: AttachmentDelivery, parts: [AttachmentWirePart])] {
+        var out: [(delivery: AttachmentDelivery, parts: [AttachmentWirePart])] = []
         var images = 0, documents = 0
-        func imageFits(_ data: Data) -> Bool {
-            images < (route.maxImages ?? .max) && data.count <= (route.maxImageBytes ?? .max)
+        func imageFits(_ data: Data, room: Int) -> Bool {
+            images < (route.maxImages ?? .max) && data.count <= (route.maxImageBytes ?? .max) && data.count <= room
+        }
+        /// What a file that couldn't go as a document or pages is labelled when its text goes instead.
+        func asText(_ attachment: MessageAttachment) -> AttachmentDelivery {
+            attachment.digest?.readable == false ? .nameOnly : .text
         }
         for attachment in attachments {
-            switch delivery(attachment, route: route) {
+            let delivery = delivery(attachment, route: route)
+            switch delivery {
             case .image:
-                if imageFits(attachment.data) {
-                    out.append(.image(mime: attachment.mime, data: attachment.data))
+                if imageFits(attachment.data, room: mediaRoom) {
+                    out.append((.image, [.image(mime: attachment.mime, data: attachment.data)]))
                     images += 1
+                    mediaRoom -= attachment.data.count
                 } else {
-                    out.append(.text(fallbackText(attachment)))
+                    out.append((.ocrText, [.text(fallbackText(attachment))]))
                 }
             case .ocrText:
-                out.append(.text(fallbackText(attachment)))
+                out.append((.ocrText, [.text(fallbackText(attachment))]))
             case .document:
-                if documents < (route.maxDocuments ?? .max) {
-                    out.append(.document(name: attachment.name, data: attachment.data))
+                if documents < (route.maxDocuments ?? .max), attachment.data.count <= mediaRoom {
+                    out.append((.document, [.document(name: attachment.name, data: attachment.data)]))
                     documents += 1
+                    mediaRoom -= attachment.data.count
                 } else {
-                    out.append(.text(fallbackText(attachment)))
+                    out.append((asText(attachment), [.text(fallbackText(attachment))]))
                 }
             case .pageImages:
                 let digest = attachment.digest!
                 let room = max(0, (route.maxImages ?? .max) - images)
-                let pages = digest.pageImages.prefix(room).filter { $0.count <= (route.maxImageBytes ?? .max) }
-                guard !pages.isEmpty else { out.append(.text(fallbackText(attachment))); continue }
+                var pages: [Data] = []
+                var used = 0
+                for page in digest.pageImages.prefix(room) where page.count <= (route.maxImageBytes ?? .max) {
+                    guard used + page.count <= mediaRoom else { break }
+                    pages.append(page)
+                    used += page.count
+                }
+                guard !pages.isEmpty else { out.append((asText(attachment), [.text(fallbackText(attachment))])); continue }
                 let total = digest.pages ?? pages.count
                 var head = "[Attached file: \(attachment.name) — \(digest.summary) — it has no text layer, so "
                 head += pages.count == total ? "its pages follow as images]" : "its first \(pages.count) of \(total) pages follow as images]"
-                out.append(.text(head))
-                for page in pages { out.append(.image(mime: "image/png", data: page)) }
+                var wire: [AttachmentWirePart] = [.text(head)]
+                for page in pages { wire.append(.image(mime: "image/png", data: page)) }
                 images += pages.count
+                mediaRoom -= used
                 // Pages past the images: what OCR read from the whole file.
-                if pages.count < total, digest.ocr { out.append(.text(fallbackText(attachment))) }
+                if pages.count < total, digest.ocr { wire.append(.text(fallbackText(attachment))) }
+                out.append((.pageImages(pages.count), wire))
             case .text, .textInParts, .nameOnly:
-                out.append(.text(fallbackText(attachment)))
+                out.append((delivery, [.text(fallbackText(attachment))]))
             }
         }
         return out

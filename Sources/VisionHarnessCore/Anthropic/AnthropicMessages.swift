@@ -189,11 +189,19 @@ public enum AnthropicMessages {
             add("user", stubs)
         }
 
-        for m in messages {
+        // Pictures and documents share the request's total (32 MB on the wire), the newest message first: the one
+        // being sent keeps its attachments, older ones past the total go back as their text.
+        var mediaRoom = route.maxRequestMediaBytes ?? .max
+        var userContent: [Int: [JSONValue]] = [:]
+        for index in messages.indices.reversed() where messages[index].role == .user {
+            userContent[index] = userBlocks(messages[index], route: route, mediaRoom: &mediaRoom)
+        }
+
+        for (index, m) in messages.enumerated() {
             switch m.role {
             case .user:
                 closeOpenCalls()
-                add("user", userBlocks(m, route: route))
+                add("user", userContent[index] ?? [])
             case .tool:
                 let id = toolUseID(m.toolCallID ?? "")
                 if let index = open.firstIndex(of: id) {
@@ -234,9 +242,15 @@ public enum AnthropicMessages {
     /// The user's text, then each attachment as `AttachmentWire` sends it on this route: images as
     /// base64 image blocks, PDFs as document blocks, everything else as the text Vision read out of it.
     static func userBlocks(_ m: LLMMessage, route: AttachmentRoute) -> [JSONValue] {
+        var room = route.maxRequestMediaBytes ?? .max
+        return userBlocks(m, route: route, mediaRoom: &room)
+    }
+
+    /// The same, drawing pictures and documents from what the request has left (`mediaRoom`).
+    static func userBlocks(_ m: LLMMessage, route: AttachmentRoute, mediaRoom: inout Int) -> [JSONValue] {
         var blocks: [JSONValue] = []
         if let content = m.content, !BedrockConverse.isBlank(content) { blocks.append(textBlock(content)) }
-        for part in AttachmentWire.parts(for: m.attachments ?? [], route: route) {
+        for part in AttachmentWire.parts(for: m.attachments ?? [], route: route, mediaRoom: &mediaRoom) {
             switch part {
             case .text(let text):
                 if !BedrockConverse.isBlank(text) { blocks.append(textBlock(text)) }

@@ -2298,9 +2298,11 @@ public final class AppTransport {
             AttachmentPrep.prepare(attachments, window: window, store: store)
         }.value
         vm.activity = previous
-        let badges = zip(prepared.badges, prepared.attachments).map { badge, attachment in
+        // How each one actually goes, after the route's limits (a picture past them goes as its text).
+        let deliveries = AttachmentWire.deliveries(for: prepared.attachments, route: route)
+        let badges = zip(prepared.badges, deliveries).map { badge, delivery in
             var badge = badge
-            badge.label += " · " + AttachmentWire.delivery(attachment, route: route).label
+            badge.label += " · " + delivery.label
             return badge
         }
         vm.setAttachments(entryID: entryID, badges)

@@ -213,6 +213,41 @@ final class AnthropicClientTests: XCTestCase {
         XCTAssertEqual(content[2]["source"]?["media_type"]?.string, "application/pdf")
     }
 
+    /// The Messages API takes 32 MB a request, and base64 is a third larger: a request's pictures and PDFs share
+    /// 20 MB, the message being sent first. Past it they go as their text (no 413 that would compact the chat for
+    /// nothing), and the badge says so.
+    func testARequestsPicturesAndPDFsStayUnderTheMessagesAPIsTotal() throws {
+        func pdf(_ name: String, megabytes: Int) -> MessageAttachment {
+            var data = Data("%PDF-1.7\n".utf8)
+            data.append(Data(repeating: 0x20, count: megabytes * 1_000_000 - data.count))
+            return MessageAttachment(kind: .file, name: name, data: data,
+                                     digest: AttachmentDigest(format: .pdf, pages: 2, lines: 2, bytes: data.count,
+                                                              text: "Text of \(name)"),
+                                     text: "[Attached file: \(name)]\nText of \(name)")
+        }
+        let older = LLMMessage.user("last week's", attachments: [pdf("old.pdf", megabytes: 12)])
+        let current = LLMMessage.user("compare", attachments: [pdf("a.pdf", megabytes: 9), pdf("b.pdf", megabytes: 9)])
+        let request = body(route("claude-opus-5-5"), messages: [older, .assistant("Read it."), current])
+        let messages = request["messages"]?.array ?? []
+        XCTAssertEqual(messages.count, 3)
+        guard messages.count == 3 else { return }
+        XCTAssertEqual(messages[2]["content"]?.array?.map { $0["type"]?.string ?? "" }, ["text", "document", "document"],
+                       "the message being sent keeps its PDFs")
+        XCTAssertEqual(messages[0]["content"]?.array?.map { $0["type"]?.string ?? "" }, ["text", "text"])
+        XCTAssertEqual(messages[0]["content"]?[1]?["text"]?.string, "[Attached file: old.pdf]\nText of old.pdf")
+        let wire = request.serialized().utf8.count
+        XCTAssertLessThan(wire, 32_000_000, "under the Messages API's 32 MB")
+
+        // Three 8 MB PDFs in one message: two go as documents, the third as its text — and its badge says that.
+        let three = [pdf("1.pdf", megabytes: 8), pdf("2.pdf", megabytes: 8), pdf("3.pdf", megabytes: 8)]
+        let anthropic = AttachmentRoute.of(route("claude-opus-5-5"))
+        XCTAssertEqual(anthropic.maxRequestMediaBytes, 20_000_000)
+        XCTAssertEqual(AttachmentWire.deliveries(for: three, route: anthropic).map(\.label),
+                       ["sent as PDF document", "sent as PDF document", "sent as text"])
+        XCTAssertNil(AttachmentRoute.of(ProviderProfile(kind: .bedrock, name: "Bedrock", baseURL: "", model: "claude-opus-5-5"))
+            .maxRequestMediaBytes, "only the Anthropic route has a request total")
+    }
+
     /// Signed thinking goes back verbatim with the turn whose tool calls are being answered; without replay (the
     /// retry after a refused signature) the turn is rebuilt from its text and calls.
     func testSignedThinkingIsReplayedWithItsTurn() {
