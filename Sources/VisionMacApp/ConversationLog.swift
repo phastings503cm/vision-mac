@@ -49,6 +49,8 @@ public struct LogSession: Identifiable, Hashable, Codable, Sendable {
     /// primary when it next sends).
     public var route: String?
     public var thinking: String?
+    /// The chat's Claude Code session (when it has run on Claude Code): resumed on its next Claude Code turn.
+    public var claudeCode: ClaudeCodeLink?
 }
 
 private struct StoredItem: Codable {
@@ -214,6 +216,17 @@ public final class ConversationLog {
         rows[id] = row
         persist(id)
     }
+
+    /// Store the chat's Claude Code session link (nil forgets it).
+    public func setClaudeCode(id: String, link: ClaudeCodeLink?) {
+        guard var row = rows[id], row.claudeCode != link else { return }
+        row.claudeCode = link
+        rows[id] = row
+        persist(id)
+    }
+
+    /// The chat's stored Claude Code session link.
+    public func claudeCode(_ id: String) -> ClaudeCodeLink? { rows[id]?.claudeCode }
 
     public func touch(_ id: String) {
         guard var row = rows[id] else { return }

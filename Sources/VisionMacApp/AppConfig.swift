@@ -43,6 +43,7 @@ public final class AppConfig {
         static let planPanelAutoOpen = "planPanel.autoOpen.v1"
         static let projectChoices = "routes.byProject.v1"
         static let guardianPromptSync = "guardian.promptSync.v1"
+        static let claudeCodePath = "claudeCode.path.v1"
     }
 
     private let defaults: UserDefaults
@@ -74,6 +75,11 @@ public final class AppConfig {
     @ObservationIgnored public var onRoutesChanged: (@MainActor () -> Void)?
     /// Signed in to Guardian: send each prompt (masked) to the Guardian prompt notebook, with how it ended.
     public var guardianPromptSync: Bool = true {
+        didSet { persist() }
+    }
+    /// The `claude` command the person picked on the Claude Code card ("" = find it: PATH, the installers'
+    /// folders, the Claude desktop app's copy).
+    public var claudeCodePath: String = "" {
         didSet { persist() }
     }
     /// What the sensitive-data shield masks before a request goes to a model that isn't private.
@@ -469,6 +475,7 @@ public final class AppConfig {
         queueResumeOnLaunch = defaults.bool(forKey: Keys.queueResume)
         subagentsUsePrimary = defaults.object(forKey: Keys.subagentsUsePrimary) as? Bool ?? true
         guardianPromptSync = defaults.object(forKey: Keys.guardianPromptSync) as? Bool ?? true
+        claudeCodePath = defaults.string(forKey: Keys.claudeCodePath) ?? ""
         if let data = defaults.data(forKey: Keys.shield), let decoded = try? JSONDecoder().decode(ShieldSettings.self, from: data) {
             shield = decoded
         }
@@ -508,6 +515,8 @@ public final class AppConfig {
         if guardianPromptSync { defaults.removeObject(forKey: Keys.guardianPromptSync) }
         else { defaults.set(false, forKey: Keys.guardianPromptSync) }
         persistShield()
+        if claudeCodePath.isEmpty { defaults.removeObject(forKey: Keys.claudeCodePath) }
+        else { defaults.set(claudeCodePath, forKey: Keys.claudeCodePath) }
         defaults.set(planPanelOpen, forKey: Keys.planPanelOpen)
         defaults.set(planPanelWidth, forKey: Keys.planPanelWidth)
         defaults.set(planPanelAutoOpen, forKey: Keys.planPanelAutoOpen)

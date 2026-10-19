@@ -69,7 +69,7 @@ public final class AppTransport {
     /// What each session's engine was built with; a mismatch rebuilds it
     /// (provider or served model changed, window re-detected, thinking level).
     @ObservationIgnored private var engineKeys: [String: EngineKey] = [:]
-    @ObservationIgnored private var transcripts: [String: [LLMMessage]] = [:]
+    @ObservationIgnored var transcripts: [String: [LLMMessage]] = [:]
     /// Pending permission questions, keyed by a token unique to each question
     /// (tool-call ids repeat across turns and chats: "call-0", "xml-0").
     @ObservationIgnored private var gates: [String: (cont: CheckedContinuation<Bool, Never>, sessionID: String)] = [:]
@@ -225,6 +225,11 @@ public final class AppTransport {
     @ObservationIgnored var isRouteSwitching: ((ProviderProfile) -> Bool)?
     /// Handles `/swap [model]`.
     @ObservationIgnored var onSwapCommand: ((String?, SessionVM) -> Void)?
+    /// Claude Code on this Mac: the `claude` command, its sign-in status, and how turns start it.
+    @ObservationIgnored public let claudeCode: ClaudeCodeHost
+    /// Whether a chat is Sensitive — the per-chat sensitivity policy answers it. A Sensitive chat never runs on an
+    /// engine that reads files itself (Claude Code): the shield can't anonymise what it reads.
+    @ObservationIgnored public var isSensitiveChat: (SessionVM) -> Bool = { _ in false }
 
     // MARK: - Chats without a project
 
@@ -279,6 +284,11 @@ public final class AppTransport {
         self.phaseLoopbackCap = nil   // unlimited by default; Settings can cap it at 3
         self.promptStore = PromptTimelineStore(
             directory: skillLocations.appSupport.appendingPathComponent("prompt-timeline", isDirectory: true))
+        let claudeCode = ClaudeCodeHost()
+        claudeCode.explicitPath = { [weak config] in config?.claudeCodePath ?? "" }
+        self.claudeCode = claudeCode
+        // Side tasks on a Claude Code route (a summary, a skill draft) find the CLI through the same check.
+        ClaudeCodeClient.installLookup = { await claudeCode.usableInstall().install }
         // Ship-with-the-app skills (godot-debugging, …) refresh on every launch.
         try? SkillBuiltin.install(into: skillLocations.builtinSkills)
         reload()
@@ -931,6 +941,7 @@ public final class AppTransport {
             if cwd == nil { vm.workFolder = row.scratch }
             vm.routeID = row.route
             vm.thinking = row.thinking.flatMap(ThinkingLevel.init(rawValue:))
+            vm.claudeCode = row.claudeCode
             vm.updatedAt = row.updatedAt
             vm.loaded = false
             return vm
@@ -1524,6 +1535,11 @@ public final class AppTransport {
             vm.running = false
             vm.activity = nil
             runTasks[sessionID] = nil
+        }
+        // Claude Code keeps the conversation itself: its own /compact folds it.
+        if let route = chatRoute(vm), route.kind == .claudeCode {
+            await claudeCodeCompact(vm, profile: route, focus: focus)
+            return
         }
         switch await compactSession(vm, focus: focus) {
         case .nothingYet:
@@ -2127,6 +2143,8 @@ public final class AppTransport {
                 markerMisplaced = false
                 errorsInARow += 1
                 let why = Self.describe(error)
+                // Claude Code not installed or signed in, the plan's limit, a Sensitive chat: another round can't help.
+                if let claude = error as? ClaudeCodeError, claude.isPermanent { throw error }
                 if errorsInARow >= GoalProtocol.maxConsecutiveErrors { throw error }
                 let wait = max(0, goalErrorBackoff(errorsInARow))
                 notice("Round \(round) failed: \(why)\nThe goal carries on — trying again in \(Int(wait))s "
@@ -2179,6 +2197,11 @@ public final class AppTransport {
         pinRouteIfUnset(vm)
         guard let profile = await resolveRoute(vm) else { throw LLMError.noModel }
         turnRoute[sessionID] = RouteUse(model: profile.model, route: Self.routeLabel(profile))
+        // Claude Code runs its own agent: the turn goes to the claude CLI, not to Vision's engine.
+        if profile.kind == .claudeCode {
+            return try await claudeCodeTurn(vm, profile: profile, modelText: modelText, attachments: attachments,
+                                            userEntryID: userEntryID)
+        }
         let window = contextLimit(for: vm)
         let thinking = vm.thinking
         let skillState = self.skillState(for: vm)
@@ -2309,14 +2332,14 @@ public final class AppTransport {
     }
 
     /// Turn a user entry the model never received into a notice.
-    private func markUndelivered(_ vm: SessionVM, entryID: String) {
+    func markUndelivered(_ vm: SessionVM, entryID: String) {
         guard let index = vm.entries.lastIndex(where: { $0.id == entryID }),
               case .message(let body) = vm.entries[index].kind, body.role == .user else { return }
         vm.entries[index].kind = .message(.init(role: .notice, text: "Not delivered to the model: \(body.text)"))
         if vm.loaded { log.resync(vm.id, rows: Self.logRows(for: vm.entries, sessionID: vm.id)) }
     }
 
-    private func apply(_ event: EngineEvent, sessionID: String) {
+    func apply(_ event: EngineEvent, sessionID: String) {
         guard let vm = sessions.first(where: { $0.id == sessionID }) else { return }
         switch event {
         case .textDelta(let chunk):
