@@ -256,6 +256,53 @@ final class ProviderRulesTests: XCTestCase {
                      "a parameter that wasn't sent isn't the problem")
     }
 
+    /// The same bodies Windows pins (night/integrate review finding 1): a refusal pointing at the messages, tools,
+    /// model or stream is about what was in them — learning "drop messages" would strip them from every later request.
+    func testARefusalAboutTheMessagesToolsOrModelIsNeverADrop() {
+        let sent: Set<String> = ["model", "messages", "tools", "stream", "temperature"]
+        XCTAssertNil(change(#"{"detail":[{"loc":["body","messages",1,"content"],"msg":"Field required","type":"missing"}]}"#, sent: sent, status: 422))
+        XCTAssertNil(change(#"{"detail":[{"loc":["body","tools",0,"function","parameters"],"msg":"Input should be a valid dictionary","type":"dict_type"}]}"#, sent: sent, status: 422))
+        XCTAssertNil(change(#"{"error":{"message":"Invalid value for 'content': expected a string, got null.","type":"invalid_request_error","param":"messages","code":null}}"#, sent: sent))
+        XCTAssertNil(change(#"{"error":{"param":"messages"}}"#, sent: sent))
+        XCTAssertNil(change(#"{"error":{"message":"The model `qwen9` does not exist","type":"invalid_request_error","param":"model","code":"model_not_found"}}"#, sent: sent))
+        XCTAssertNil(change(#"{"error":{"param":"model"}}"#, sent: sent))
+        XCTAssertNil(change(#"{"error":{"param":"stream","message":"stream is not supported"}}"#, sent: sent))
+        // An optional parameter named the same way is still learned.
+        XCTAssertEqual(change(#"{"detail":[{"loc":["body","temperature"],"msg":"Extra inputs are not permitted","type":"extra_forbidden"}]}"#, sent: sent, status: 422),
+                       .drop("temperature"))
+        XCTAssertTrue(RequestBody.learnable("chat_template_kwargs.enable_thinking"))
+        XCTAssertFalse(RequestBody.learnable("messages"))
+        XCTAssertFalse(RequestBody.learnable("tools"))
+        XCTAssertFalse(RequestBody.learnable("some_new_field"))
+    }
+
+    func testTheStoreNeverLearnsOrKeepsADropOfWhatARequestNeeds() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("vision-adapt-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("request-adaptations.json")
+        // A file written by the earlier build, after a 422 about a message's content: messages and tools dropped.
+        try Data(#"""
+        {
+          "http://spark:8000/v1|qwen": {"dropped": ["messages", "tools", "temperature"], "renamed": {"model": "x"},
+                                        "minimal": false, "echoReasoning": false, "learnedAt": "2026-10-18T10:00:00Z"},
+          "http://spark:8000/v1|other": {"dropped": ["model"], "renamed": {}, "minimal": false, "echoReasoning": false,
+                                         "learnedAt": "2026-10-18T10:00:00Z"}
+        }
+        """#.utf8).write(to: file)
+        let store = RequestAdaptationStore(fileURL: file)
+        let kept = try XCTUnwrap(store.adaptation(for: "http://spark:8000/v1|qwen"))
+        XCTAssertEqual(kept.dropped, ["temperature"])
+        XCTAssertTrue(kept.renamed.isEmpty)
+        XCTAssertNil(store.adaptation(for: "http://spark:8000/v1|other"), "nothing left of it")
+        XCTAssertFalse(store.learn(.drop("messages"), for: "http://spark:8000/v1|qwen"))
+        XCTAssertFalse(store.learn(.drop("tools"), for: "http://spark:8000/v1|qwen"))
+        XCTAssertFalse(store.learn(.rename(from: "model", to: "model_id"), for: "http://spark:8000/v1|qwen"))
+        var body: [String: Any] = ["model": "qwen", "messages": [Any](), "tools": [Any](), "temperature": 0.6]
+        RequestBody.apply(kept, to: &body)
+        XCTAssertEqual(Set(body.keys), ["model", "messages", "tools"])
+    }
+
     // MARK: The safety net, end to end
 
     private func stubbed(_ replies: [(Int, String)]) -> @Sendable () -> [[String: Any]] {

@@ -73,6 +73,20 @@ public enum RequestBody {
         "max_tokens", "max_completion_tokens", "seed", "stop",
     ]
 
+    /// The keys a request can't go without. A refusal that names one of them ("Field required" at
+    /// `["body","messages",1,"content"]`, `{"error":{"param":"model"}}`) is about what was in it, never a parameter the
+    /// server doesn't take, so it is never learned as a drop.
+    public static let requiredKeys: Set<String> = ["model", "messages", "tools", "stream", "input", "prompt", "functions"]
+
+    /// Whether a lesson may leave `key` out or rename it: only the optional parameters Vision sends (`optionalKeys`,
+    /// the names `ParameterRejection` knows, and the parts of chat_template_kwargs). The same rule as Windows.
+    public static func learnable(_ key: String) -> Bool {
+        guard !requiredKeys.contains(key) else { return false }
+        if optionalKeys.contains(key) || ParameterRejection.candidates.contains(key) { return true }
+        let prefix = "chat_template_kwargs."
+        return key.hasPrefix(prefix) && key.count > prefix.count
+    }
+
     /// The body's parameter names, nested ones as "parent.child" (only the nested ones we ever set).
     public static func keys(_ body: [String: Any]) -> Set<String> {
         var keys = Set(body.keys)
@@ -136,10 +150,15 @@ public enum ParameterRejection {
         }
         // Structured errors name the parameter: OpenAI's {"error":{"param":"max_tokens"}}, FastAPI/vLLM's
         // {"detail":[{"loc":["body","chat_template_kwargs"]}]}.
+        var namesRequired = false
         for named in namedParameters(in: body) {
-            guard let key = match(named, sent: sent) else { continue }
-            return decide(key, lower: lower)
+            if let key = match(named, sent: sent) { return decide(key, lower: lower) }
+            let name = named.lowercased()
+            namesRequired = namesRequired || (RequestBody.requiredKeys.contains(name) && sent.contains(name))
         }
+        // The error points at the messages, tools or model: what was in them was wrong, and leaving any parameter out
+        // won't fix it (and leaving those out would break every later request).
+        if namesRequired { return nil }
         // Otherwise, a sent parameter the message names next to a refusal word.
         guard refusalCues.contains(where: { lower.contains($0) }) else { return nil }
         for key in candidates where sent.contains(key) || (key == "enable_thinking" && sent.contains("chat_template_kwargs.enable_thinking")) {
@@ -168,10 +187,11 @@ public enum ParameterRejection {
         return .drop(key)
     }
 
-    /// The sent key a structured error's parameter name refers to.
+    /// The sent, optional key a structured error's parameter name refers to (never model, messages, tools, stream or
+    /// another key a request needs).
     private static func match(_ named: String, sent: Set<String>) -> String? {
         let name = named.lowercased()
-        if sent.contains(name) { return name }
+        if sent.contains(name) { return RequestBody.learnable(name) ? name : nil }
         if name == "enable_thinking", sent.contains("chat_template_kwargs.enable_thinking") { return "chat_template_kwargs.enable_thinking" }
         if name.hasPrefix("thinking"), sent.contains("thinking") { return "thinking" }
         if name.hasPrefix("stream_options"), sent.contains("stream_options") { return "stream_options" }
@@ -290,6 +310,7 @@ public final class RequestAdaptationStore: @unchecked Sendable {
     /// Remember a lesson. Returns false when it was already known.
     @discardableResult
     public func learn(_ change: RequestChange, for key: String) -> Bool {
+        guard Self.isSafe(change) else { return false }
         let (changed, snapshot, target): (Bool, [String: RequestAdaptation], URL?) = lock.withLock {
             var entry = map[key] ?? RequestAdaptation()
             if entry.contains(change) { return (false, map, url) }
@@ -315,8 +336,25 @@ public final class RequestAdaptationStore: @unchecked Sendable {
         if let target { Self.write(snapshot, to: target) }
     }
 
+    /// A lesson that never strips or renames a key the request needs.
+    static func isSafe(_ change: RequestChange) -> Bool {
+        switch change {
+        case .drop(let key): RequestBody.learnable(key)
+        case .rename(let from, let to): RequestBody.learnable(from) && RequestBody.learnable(to)
+        case .minimal, .echoReasoning: true
+        }
+    }
+
+    /// A file written before lessons were checked may hold a drop of messages/tools/model: leave those out.
+    static func sanitised(_ entry: RequestAdaptation) -> RequestAdaptation {
+        var entry = entry
+        entry.dropped = entry.dropped.filter(RequestBody.learnable)
+        entry.renamed = entry.renamed.filter { RequestBody.learnable($0.key) && RequestBody.learnable($0.value) }
+        return entry
+    }
+
     private func load(_ fileURL: URL) {
-        let loaded: [String: RequestAdaptation]
+        var loaded: [String: RequestAdaptation]
         if let data = try? Data(contentsOf: fileURL) {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
@@ -324,6 +362,7 @@ public final class RequestAdaptationStore: @unchecked Sendable {
         } else {
             loaded = [:]
         }
+        loaded = loaded.mapValues(Self.sanitised).filter { !$0.value.isEmpty }
         lock.withLock {
             url = fileURL
             map = loaded
