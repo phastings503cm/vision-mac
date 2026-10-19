@@ -54,14 +54,50 @@ public enum PlanAssignment {
         let open = todos.filter { $0.status != .completed }
         guard !open.isEmpty else { return nil }
         let mine = significantWords(description + " " + prompt.prefix(400))
-        var best: (step: TodoItem, score: Int)?
-        for step in open {
-            let score = significantWords(step.content).intersection(mine).count
-            if score > 0, score > (best?.score ?? 0) { best = (step, score) }
+        let words = open.map { significantWords($0.content) }
+        let scores = words.map { $0.intersection(mine).count }
+        let bestScore = scores.max() ?? 0
+        if bestScore > 0 {
+            let tied = open.indices.filter { scores[$0] == bestScore }
+            if tied.count == 1 { return open[tied[0]].content }
+            // A tie ("Write the parser" and "Add tests for the parser" for "Write tests for the parser"): what only that
+            // step says decides; still tied, no step is shown rather than a wrong one (the agent tool's step argument
+            // says it).
+            let distinctive = tied.map { i in
+                words[i].filter { word in !words.indices.contains { j in j != i && words[j].contains(word) } }
+                    .intersection(mine).count
+            }
+            let top = distinctive.max() ?? 0
+            guard top > 0, distinctive.filter({ $0 == top }).count == 1, let at = distinctive.firstIndex(of: top) else { return nil }
+            return open[tied[at]].content
         }
-        if let best { return best.step.content }
         let inProgress = open.filter { $0.status == .inProgress }
         return inProgress.count == 1 ? inProgress[0].content : nil
+    }
+
+    /// The step a subagent was started on: the one its `step` argument names — the step's number in the plan (1 = the
+    /// first) or its text, whole or a part only that step has — else the best guess from its words.
+    public static func step(requested: String?, description: String, prompt: String = "", todos: [TodoItem]) -> String? {
+        named(requested, todos: todos) ?? step(description: description, prompt: prompt, todos: todos)
+    }
+
+    /// The step `requested` names, or nil when it names none (or more than one).
+    public static func named(_ requested: String?, todos: [TodoItem]) -> String? {
+        guard var text = requested?.trimmingCharacters(in: .whitespacesAndNewlines), !todos.isEmpty else { return nil }
+        while text.hasPrefix("#") { text.removeFirst() }
+        text = text.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty else { return nil }
+        if text.allSatisfy({ $0.isASCII && $0.isNumber }) {
+            guard let number = Int(text), number >= 1, number <= todos.count else { return nil }
+            return todos[number - 1].content
+        }
+        if let exact = todos.first(where: {
+            $0.content.trimmingCharacters(in: .whitespaces).caseInsensitiveCompare(text) == .orderedSame
+        }) {
+            return exact.content
+        }
+        let containing = todos.filter { $0.content.range(of: text, options: .caseInsensitive) != nil }
+        return containing.count == 1 ? containing[0].content : nil
     }
 
     static func significantWords(_ text: String) -> Set<String> {

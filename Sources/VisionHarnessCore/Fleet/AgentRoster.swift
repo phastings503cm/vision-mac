@@ -37,6 +37,8 @@ public struct AgentRun: Identifiable, Sendable, Hashable {
     public var placement: String?
     /// The plan step it is working (see `PlanAssignment`).
     public var assignment: String?
+    /// The plan step the agent tool's `step` argument named (a number or the step's text), as given.
+    public var requestedStep: String?
     /// Tokens its model calls used (known when it finishes).
     public var promptTokens: Int = 0
     public var completionTokens: Int = 0
@@ -119,12 +121,15 @@ public final class AgentRoster: @unchecked Sendable {
 
     /// Register a new run; its id.
     @discardableResult
-    public func begin(description: String, agentType: String, background: Bool, prompt: String? = nil) -> String {
+    public func begin(description: String, agentType: String, background: Bool, prompt: String? = nil,
+                      step: String? = nil) -> String {
         let run: AgentRun = lock.withLock {
             counter += 1
             let at = now()
             var run = AgentRun(id: "a\(counter)", description: description, agentType: agentType,
                                isBackground: background, startedAt: at, prompt: prompt.map { String($0.prefix(2_000)) })
+            let requested = step?.trimmingCharacters(in: .whitespacesAndNewlines)
+            run.requestedStep = (requested?.isEmpty ?? true) ? nil : requested
             run.log.append(AgentRunLine(at: at, text: "Started (\(agentType)\(background ? ", in the background" : ""))"))
             runs.append(run)
             // Keep the list bounded: the oldest finished runs go first.

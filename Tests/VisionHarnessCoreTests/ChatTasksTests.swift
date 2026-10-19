@@ -146,6 +146,53 @@ final class ChatTasksTests: XCTestCase {
         XCTAssertNil(PlanAssignment.step(description: "anything", todos: []))
     }
 
+    /// The same cases Windows pins: a tie is never guessed, and the agent tool's step argument names the step.
+    func testATieIsNeverGuessedAndTheStepArgumentNamesTheStep() {
+        let plan = [TodoItem(id: "1", content: "Write the parser", status: .inProgress),
+                    TodoItem(id: "2", content: "Add tests for the parser", status: .pending)]
+        // Both steps share two words with the subagent; the first used to win.
+        XCTAssertNil(PlanAssignment.step(description: "Write tests for parser",
+                                         prompt: "Write unit tests covering the parser's edge cases", todos: plan))
+        // What only one step says still decides a tie.
+        let distinct = [TodoItem(id: "1", content: "Parse the config", status: .inProgress),
+                        TodoItem(id: "2", content: "Parse the command line", status: .pending),
+                        TodoItem(id: "3", content: "Validate the config", status: .pending)]
+        XCTAssertEqual(PlanAssignment.step(description: "Parse", prompt: "the command config", todos: distinct),
+                       "Parse the command line")
+        // The step argument: a number (1 = first), the step's text, or a part only that step has.
+        XCTAssertEqual(PlanAssignment.step(requested: "2", description: "Write tests for parser", prompt: "…", todos: plan),
+                       "Add tests for the parser")
+        XCTAssertEqual(PlanAssignment.step(requested: "#2", description: "x", prompt: "y", todos: plan), "Add tests for the parser")
+        XCTAssertEqual(PlanAssignment.step(requested: "add tests for the parser", description: "x", prompt: "y", todos: plan),
+                       "Add tests for the parser")
+        XCTAssertEqual(PlanAssignment.step(requested: "tests for", description: "x", prompt: "y", todos: plan),
+                       "Add tests for the parser")
+        // Naming nothing (or two steps) falls back to the guess.
+        XCTAssertNil(PlanAssignment.named("parser", todos: plan))
+        XCTAssertNil(PlanAssignment.named("9", todos: plan))
+        XCTAssertEqual(PlanAssignment.step(requested: "9", description: "scan", prompt: "look around", todos: plan),
+                       "Write the parser", "the one in progress")
+        XCTAssertEqual(PlanAssignment.step(requested: nil, description: "tests", prompt: "add some tests", todos: plan),
+                       "Add tests for the parser")
+    }
+
+    func testTheStepArgumentIsReadAsANumberOrText() throws {
+        func arg(_ json: String) -> String? {
+            AgentTool.stepArgument(JSONArgs.dictionary(JSONString(json))["step"])
+        }
+        XCTAssertEqual(arg(#"{"step":2}"#), "2")
+        XCTAssertEqual(arg(#"{"step":3.0}"#), "3")
+        XCTAssertEqual(arg(#"{"step":"  Add tests "}"#), "Add tests")
+        XCTAssertNil(arg(#"{"step":""}"#))
+        XCTAssertNil(arg(#"{"step":true}"#))
+        XCTAssertNil(arg("{}"))
+        XCTAssertTrue(AgentTool.spec(for: .default).parameters.contains(#""step""#))
+        XCTAssertTrue(DelegateTool.spec(for: .default).parameters.contains(#""step""#))
+        let roster = AgentRoster()
+        let id = roster.begin(description: "tests", agentType: "general", background: false, prompt: "add tests", step: "2")
+        XCTAssertEqual(roster.run(id)?.requestedStep, "2")
+    }
+
     // MARK: git status
 
     func testGitStatusIsRead() {

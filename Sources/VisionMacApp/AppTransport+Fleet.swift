@@ -106,9 +106,11 @@ extension AppTransport {
                 let isNew = !run.id.isEmpty && !vm.agentRuns.contains(where: { $0.id == run.id })
                 vm.upsertAgent(run)
                 // A subagent that just started works one of the plan's steps: say which, so the plan can show who is
-                // working it (name and model).
+                // working it (name and model). The agent tool's step argument names it; without one, the best guess
+                // from its words (none on a tie).
                 if isNew, run.assignment == nil,
-                   let step = PlanAssignment.step(description: run.description, prompt: run.prompt ?? "", todos: vm.todos) {
+                   let step = PlanAssignment.step(requested: run.requestedStep, description: run.description,
+                                                  prompt: run.prompt ?? "", todos: vm.todos) {
                     roster?.setAssignment(run.id, step)
                 }
             }

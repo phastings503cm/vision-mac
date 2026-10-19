@@ -32,7 +32,8 @@ public struct DelegateTool: ToolExecutor {
         return ToolSpec(
             name: name,
             description: description,
-            parameters: #"{"type":"object","properties":{"tasks":{"type":"array","minItems":1,"maxItems":12,"items":{"type":"object","properties":{"description":{"type":"string","description":"A short name for the subtask"},"prompt":{"type":"string","description":"The complete task"},"agent_type":{"type":"string","description":"The kind of subagent (default: general)"},"sensitive":{"type":"boolean","description":""#
+            parameters: #"{"type":"object","properties":{"tasks":{"type":"array","minItems":1,"maxItems":12,"items":{"type":"object","properties":{"description":{"type":"string","description":"A short name for the subtask"},"prompt":{"type":"string","description":"The complete task"},"agent_type":{"type":"string","description":"The kind of subagent (default: general)"},"step":{"type":"string","description":""#
+                + AgentTool.stepParameter + #""},"sensitive":{"type":"boolean","description":""#
                 + sensitive + #" (This task only.)"}},"required":["description","prompt"]},"description":"The subtasks to run in parallel"},"max_parallel":{"type":"integer","description":"At most this many at once (default 6)"},"sensitive":{"type":"boolean","description":""#
                 + sensitive + #" (Every task.)"}},"required":["tasks"]}"#
         )
@@ -43,6 +44,7 @@ public struct DelegateTool: ToolExecutor {
         let prompt: String
         let definition: AgentDefinition
         let sensitive: Bool
+        let step: String?
     }
 
     public func execute(args: JSONString, in context: ToolContext) async -> ToolResult {
@@ -81,7 +83,8 @@ public struct DelegateTool: ToolExecutor {
             let description = ((item["description"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             tasks.append(Subtask(description: description.isEmpty ? "task \(index)" : description,
                                  prompt: prompt, definition: definition,
-                                 sensitive: (item["sensitive"] as? Bool) ?? allSensitive))
+                                 sensitive: (item["sensitive"] as? Bool) ?? allSensitive,
+                                 step: AgentTool.stepArgument(item["step"])))
         }
 
         let parallel = min(max(JSONArgs.int(args, "max_parallel", default: Self.defaultParallel), 1), Self.maxTasks)
@@ -113,7 +116,8 @@ public struct DelegateTool: ToolExecutor {
                 let task = tasks[index]
                 group.addTask {
                     (index, try await AgentTool.runCore(prompt: task.prompt, description: task.description, definition: task.definition,
-                                                        background: false, sensitive: task.sensitive, context: context))
+                                                        background: false, sensitive: task.sensitive, step: task.step,
+                                                        context: context))
                 }
             }
             while let (finished, outcome) = try await group.next() { outcomes[finished] = outcome }

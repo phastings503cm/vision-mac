@@ -40,9 +40,30 @@ public struct AgentTool: ToolExecutor {
         return ToolSpec(
             name: name,
             description: description,
-            parameters: #"{"type":"object","properties":{"description":{"type":"string","description":"What to name this subagent"},"prompt":{"type":"string","description":"The complete task for the subagent. It cannot ask you questions and cannot see this conversation — everything it needs goes here."},"agent_type":{"type":"string","description":"The kind of subagent (default: general)"},"run_in_background":{"type":"boolean","description":"Start it in the background and return at once (default false: wait for its report)"},"sensitive":{"type":"boolean","description":""#
+            parameters: #"{"type":"object","properties":{"description":{"type":"string","description":"What to name this subagent"},"prompt":{"type":"string","description":"The complete task for the subagent. It cannot ask you questions and cannot see this conversation — everything it needs goes here."},"agent_type":{"type":"string","description":"The kind of subagent (default: general)"},"run_in_background":{"type":"boolean","description":"Start it in the background and return at once (default false: wait for its report)"},"step":{"type":"string","description":""#
+                + stepParameter + #""},"sensitive":{"type":"boolean","description":""#
                 + SubagentServers.sensitiveParameter + #""}},"required":["description","prompt"]}"#
         )
+    }
+
+    /// The `step` argument of agent and delegate's tasks: which plan step the subagent works, so the plan, the Tasks
+    /// tab and the activity menu show it there (the same words on Windows).
+    public static let stepParameter =
+        "Which step of your plan (todo_write) this subagent works: its number in the plan (1 = the first) or its text. Shown on that step."
+
+    /// The step argument as text (models send a number or a string).
+    static func stepArgument(_ value: Any?) -> String? {
+        switch value {
+        case let text as String:
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        case let number as NSNumber where CFGetTypeID(number) != CFBooleanGetTypeID():
+            let double = number.doubleValue
+            guard double.isFinite else { return nil }
+            return String(Int64(double.rounded()))
+        default:
+            return nil
+        }
     }
 
     public func execute(args: JSONString, in context: ToolContext) async -> ToolResult {
@@ -60,6 +81,7 @@ public struct AgentTool: ToolExecutor {
             return ToolResult(output: "Error: unknown agent_type '\(typeName ?? "")'. Available: \(types.describe()).")
         }
         let sensitive = JSONArgs.bool(args, "sensitive", default: false)
+        let step = Self.stepArgument(JSONArgs.dictionary(args)["step"])
 
         if JSONArgs.bool(args, "run_in_background", default: false) {
             guard let pool = context.backgroundAgents else {
@@ -68,7 +90,7 @@ public struct AgentTool: ToolExecutor {
             // The background run belongs to the pool (stop / agent_stop cancel it), not to this call.
             let launched = pool.launch(description: desc, work: {
                 let outcome = try await Self.runCore(prompt: prompt, description: desc, definition: definition,
-                                                     background: true, sensitive: sensitive, context: context)
+                                                     background: true, sensitive: sensitive, step: step, context: context)
                 return (outcome.ok, outcome.report)
             })
             switch launched {
@@ -81,7 +103,7 @@ public struct AgentTool: ToolExecutor {
 
         do {
             let outcome = try await Self.runCore(prompt: prompt, description: desc, definition: definition,
-                                                 background: false, sensitive: sensitive, context: context)
+                                                 background: false, sensitive: sensitive, step: step, context: context)
             return ToolResult(output: Self.present(description: desc, outcome: outcome))
         } catch {
             return ToolResult(output: "Error: cancelled by user.")
@@ -113,10 +135,11 @@ public struct AgentTool: ToolExecutor {
     /// roster current. Throws only `CancellationError` (the run was stopped); every other way it can end is
     /// an outcome.
     static func runCore(prompt firstPrompt: String, description: String, definition: AgentDefinition,
-                        background: Bool, sensitive: Bool = false, context: ToolContext) async throws -> SubagentOutcome {
+                        background: Bool, sensitive: Bool = false, step: String? = nil,
+                        context: ToolContext) async throws -> SubagentOutcome {
         let roster = context.roster
         let runID = roster?.begin(description: description, agentType: definition.name, background: background,
-                                  prompt: firstPrompt)
+                                  prompt: firstPrompt, step: step)
         let clock = ContinuousClock()
         let started = clock.now
         func elapsed() -> TimeInterval {
