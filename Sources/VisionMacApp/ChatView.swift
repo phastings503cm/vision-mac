@@ -84,6 +84,20 @@ struct ChatView: View {
         }
         // The chips say how each file goes to the chat's own model: a new model, a new answer (and a new window).
         .onChange(of: session.routeID) { _, _ in refreshParts() }
+        // Each chat keeps its own draft and attachments: the composer is shared by the window, its contents are not.
+        .onChange(of: session.id) { old, new in
+            if draft.isEmpty, staged.isEmpty {
+                model.composerDrafts[old] = nil
+            } else {
+                model.composerDrafts[old] = ComposerDraft(text: draft, staged: staged)
+            }
+            let next = model.composerDrafts.removeValue(forKey: new)
+            previewing = nil
+            draft = next?.text ?? ""
+            staged = next?.staged ?? []
+            composerHeight = ComposerField.minHeight
+            refreshParts()
+        }
         .onChange(of: model.pendingAttachmentPreview) { _, name in
             guard let name else { return }
             previewing = staged.first { $0.attachment.name == name }
@@ -419,7 +433,16 @@ struct ChatView: View {
         let id = item.id
         Task {
             let read = await Task.detached(priority: .userInitiated) { AttachmentReader.digested(attachment) }.value
-            guard let index = staged.firstIndex(where: { $0.id == id }) else { return }
+            guard let index = staged.firstIndex(where: { $0.id == id }) else {
+                // Its chat was switched away while it was read: finish it where that chat's draft waits.
+                for (chatID, var saved) in model.composerDrafts {
+                    guard let at = saved.staged.firstIndex(where: { $0.id == id }) else { continue }
+                    saved.staged[at].attachment = read
+                    saved.staged[at].reading = false
+                    model.composerDrafts[chatID] = saved
+                }
+                return
+            }
             staged[index].attachment = read
             staged[index].reading = false
             refreshParts()

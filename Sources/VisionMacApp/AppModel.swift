@@ -21,6 +21,12 @@ enum RunPanelTab: String, CaseIterable, Identifiable {
     var icon: String { self == .tasks ? "checklist" : "clock.arrow.circlepath" }
 }
 
+/// A chat's composer while it isn't on screen.
+struct ComposerDraft {
+    var text: String
+    var staged: [StagedAttachment]
+}
+
 /// "Jump to this prompt in its chat": the chat scrolls to the row and flashes it.
 struct PromptJump: Equatable {
     var sessionID: String
@@ -82,6 +88,9 @@ final class AppModel {
     /// preview it wants opened. ChatView picks them up like `pendingComposerText`.
     var pendingComposerAttachments: [MessageAttachment]?
     var pendingAttachmentPreview: String?
+    /// Each chat's unsent draft and attachments while another chat is on screen: switching chats never carries them
+    /// into the other chat (or to its model).
+    var composerDrafts: [String: ComposerDraft] = [:]
     /// The Guardian connection: sign-in state, prompt sync, skills, chats.
     let guardian = GuardianService(appSupport: AppPaths.support)
     /// The folder both modes operate in.
