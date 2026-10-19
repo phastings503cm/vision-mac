@@ -757,7 +757,7 @@ VisionMacApp/              SwiftUI
 swift test
 ```
 
-1,771 tests (1,498 on the harness core, 273 on the app host): the engine loop (tool round-trips, denials, iteration budget, usage accounting,
+1,805 tests (1,529 on the harness core, 276 on the app host): the engine loop (tool round-trips, denials, iteration budget, usage accounting,
 cancellation), permission containment, the Qwen XML fallback, glob, markdown, plugin interpolation
 and quoting, prompt assembly, editor-buffer conflict resolution, 34 over the terminal emulator, and 8
 that spawn a real shell on a real pty and assert on what lands on the screen — plus the fleet (server
@@ -776,11 +776,14 @@ timeline (every ending, timing against the estimate, search, the composer quote,
 backfill of old chats, the file), chat tasks end to end (in order after the current work, paused by a Stop or
 a failure and at launch, goals and commands as tasks), and which model, route and settings a subagent really
 uses, checked on the wire. Also: each model's request rules and the safety net against the providers' own
-error bodies, Z.ai's errors and key diagnosis, each chat's own model with two chats at once, attachments read
-from real PDFs (text and scanned), Office files and pictures and the exact payload each kind of server gets,
-a 10,000-line paste sent in parts and queued with a task, the paste rule through AppKit's own paste path,
-the paged transcript (pages loading by scroll and by click, the reader's row kept in place, following the end,
-jumps) and Copy (a prompt exactly as sent, its pastes, goals and their rounds, ⇧⌘C),
+error bodies, Z.ai's errors and key diagnosis, DeepSeek's thinking switch, reasoning echo and errors (its real
+401 bodies pinned), the Anthropic Messages API against a scripted server (the request, thinking, caching,
+replay, server-side fallback, every error, and a request's shared room for pictures and PDFs), Guardian's
+models in every chat's menu (read at launch, on Refresh, signed out and back in), each chat's own model with
+two chats at once, attachments read from real PDFs (text and scanned), Office files and pictures and the exact
+payload each kind of server gets, a 10,000-line paste sent in parts and queued with a task, the paste rule
+through AppKit's own paste path, the paged transcript (pages loading by scroll and by click, the reader's row
+kept in place, following the end, jumps) and Copy (a prompt exactly as sent, its pastes, goals and their rounds, ⇧⌘C),
 validation sending a goal back and the no-progress stop, screen control's planner and arbiter against a fake
 machine, OpenClaw import and export against made-up installs (and read-only against a real one), and the
 Guardian contract — browser sign-in with PKCE through the loopback, organizations, limits, refusals, the
@@ -803,11 +806,11 @@ Verified on macOS 14+ / Apple Silicon:
 
 - **The terminal is a subset, not a full VT.** Shells, build logs, `git`, and `less` are fine; a
   full-screen curses app that relies on mouse reporting or sixel is not.
-- **Amazon Bedrock, the multi-server fleet, backups, the subscription plans (Kimi and Z.ai included),
-  attachments and Guardian are covered by tests against fakes** (a scripted AWS CLI, stubbed HTTP, fake
-  model servers, a scripted Guardian built to its contract); the Swapper client was also run against a local
-  Swapper 2.0 demo. The first run against real AWS, a real Kimi or Z.ai key, real vLLM/llama.cpp with a PDF,
-  the live Guardian, and a real second box is yours.
+- **Amazon Bedrock, the multi-server fleet, backups, the subscription plans (Kimi, Z.ai, DeepSeek and the
+  Anthropic API included), attachments and Guardian are covered by tests against fakes** (a scripted AWS CLI,
+  stubbed HTTP, fake model servers, a scripted Guardian built to its contract); the Swapper client was also run
+  against a local Swapper 2.0 demo. The first run against real AWS, a real Kimi, Z.ai, DeepSeek or Anthropic
+  key, real vLLM/llama.cpp with a PDF, the live Guardian, and a real second box is yours.
 - **Screen control through Accessibility can't run in the test process** (macOS doesn't trust it); its
   decisions — which route, who waits, who has the mouse — are tested, and the live paths need a person.
 - **The shield masks what it recognises** — the patterns above and your own terms — not every name or

@@ -12,6 +12,25 @@ prompt on first launch — right-click the app and choose **Open**, or run:
 xattr -d com.apple.quarantine /Applications/Vision.app
 ```
 
+## What's new in 0.16.3 — DeepSeek, Claude with an API key, and Guardian's models in every chat
+
+- **DeepSeek has its own card.** Choose **DeepSeek — API key** in the wizard (or **Settings ▸ AI Models ▸ Add ▸
+  DeepSeek…**), paste a key from platform.deepseek.com, and pick **V4 Pro** or **V4.1 Flash** — both with a 1M
+  context. The thinking menu (Off, Low, High, Max) and tools work; a refused key or an empty balance is said in
+  plain words instead of retried. DeepSeek's servers are in China, so the route starts out not private and the
+  shield masks sensitive details before sending.
+- **Claude with an Anthropic API key.** **Anthropic API (Claude) — API key** in the wizard (or **Add ▸ Anthropic
+  API (key)…**) talks to Claude directly: streaming, tools, pictures, PDFs, thinking, prompt caching, and
+  Anthropic's hand-over to another Claude model when one declines, with a line saying so. Paste a Claude Pro or
+  Max sign-in token by mistake and the guide tells you it isn't an API key.
+- **Guardian's models are in every chat's model menu.** Signed in to Guardian, its models appear by themselves
+  under **Guardian** in each chat's menu — no button to press. The list is read at launch, at sign-in, on an
+  organization switch, every 15 minutes and by **Settings ▸ Guardian ▸ Refresh**. Sign out and they leave the
+  menus; a chat that was on one says *Sign in to Guardian to use this model.* and works again as soon as you sign
+  back in. The **Use Guardian's Models** button is gone.
+- Guardian routes no longer ask for model-server details before every turn, and the badges under a sent message
+  say exactly how each file went — "sent as text" when a request is past Anthropic's room for pictures and PDFs.
+
 ## What's new in 0.16.2 — copy any prompt, long chats load a page at a time
 
 - **Copy any prompt or reply.** Hover a message for its copy button, right-click it for **Copy Prompt** or **Copy
