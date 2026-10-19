@@ -234,6 +234,29 @@ final class GuardianHarnessTests: XCTestCase {
         XCTAssertTrue(wrapped?.detail().contains("Sign out and sign in again") == true)
     }
 
+    /// The words Windows added and the Mac now shares: a storage cap (409 with the limit shape), two more reasons, and
+    /// Guardian's Retry-After.
+    func testStorageCapsMoreReasonsAndRetryAfterReadLikeWindows() throws {
+        let storage = try XCTUnwrap(GuardianProblem.parse(status: 409, body: Data(
+            #"{"error":"limit_reached","limit":{"kind":"storage","used":4294967296,"max":4294967296},"message":"Your Guardian storage is full."}"#.utf8)))
+        XCTAssertEqual(storage.title, "Guardian storage limit reached")
+        XCTAssertTrue(storage.detail().contains("Storage: 4 GB of 4 GB."), storage.detail())
+        let owner = try XCTUnwrap(GuardianProblem.parse(status: 403, body: Data(
+            #"{"error":"forbidden","reason":"not_owner","needed":"project","message":"m"}"#.utf8)))
+        XCTAssertTrue(owner.detail().contains("Missing: “project” — only the owner of that item can do this. An admin of your Guardian organization can grant it."), owner.detail())
+        let model = try XCTUnwrap(GuardianProblem.parse(status: 403, body: Data(
+            #"{"error":"forbidden","reason":"model_not_allowed","needed":"glm-5.3"}"#.utf8)))
+        XCTAssertTrue(model.detail().contains("— that model isn't available to you in this organization."), model.detail())
+        let odd = try XCTUnwrap(GuardianProblem.parse(status: 403, body: Data(#"{"error":"forbidden","reason":"brand_new"}"#.utf8)))
+        XCTAssertTrue(odd.detail().contains("Missing: access (brand_new)."), odd.detail())
+        let slow = try XCTUnwrap(GuardianProblem.parse(status: 429, body: Data(#"{"error":"rate_limited","message":"Slow down."}"#.utf8),
+                                                       headers: ["Retry-After": "12"]))
+        XCTAssertEqual(slow.retryAfter, 12)
+        XCTAssertEqual(slow.detail(), "Slow down.\n\nTry again in 12 s.")
+        XCTAssertNil(try XCTUnwrap(GuardianProblem.parse(status: 402, body: Data(#"{"error":"budget_exceeded"}"#.utf8),
+                                                         headers: ["Retry-After": "12"])).retryAfter, "only a rate limit waits")
+    }
+
     func testTheModelProxyTurnsRefusalsIntoErrorsThatAreNotRetried() throws {
         let url = URL(string: "https://guardian.503cm.com/api/harness/v1/chat/completions")!
         let spent = HTTPURLResponse(url: url, statusCode: 402, httpVersion: nil, headerFields: [:])!

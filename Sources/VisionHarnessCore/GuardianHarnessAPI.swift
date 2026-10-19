@@ -381,7 +381,7 @@ extension GuardianClient {
             }
         }
         return raw.map { item in
-            GuardianLimit(kind: item["kind"] as? String ?? "spend", window: item["window"] as? String ?? "day",
+            GuardianLimit(kind: item["kind"] as? String ?? "spend", window: item["window"] as? String ?? "",
                           used: GuardianProblem.number(item["used"]), max: GuardianProblem.number(item["max"]),
                           unit: item["unit"] as? String, resetsAt: item["resetsAt"].flatMap(GuardianProblem.date))
         }

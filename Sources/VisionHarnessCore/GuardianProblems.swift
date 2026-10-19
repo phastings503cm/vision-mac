@@ -50,13 +50,17 @@ public struct GuardianLimit: Codable, Hashable, Sendable {
         case "spend": "Spend"
         case "tokens": "Tokens"
         case "requests": "Requests"
+        case "storage": "Storage"
         default: kind.prefix(1).uppercased() + kind.dropFirst()
         }
-        return what + " " + Self.windowPhrase(window)
+        // A limit with no window (a storage cap) is just its kind.
+        let phrase = Self.windowPhrase(window)
+        return phrase.isEmpty ? what : what + " " + phrase
     }
 
     static func windowPhrase(_ window: String) -> String {
         switch window.lowercased() {
+        case "", "total": ""
         case "day": "today"
         case "week": "this week"
         case "month": "this month"
@@ -71,16 +75,17 @@ public struct GuardianLimit: Codable, Hashable, Sendable {
     public var usage: String? {
         guard let used else { return nil }
         let max = self.max
-        let unit = (self.unit ?? (kind == "spend" ? "usd" : kind)).lowercased()
+        let unit = (self.unit ?? (kind == "spend" ? "usd" : kind == "storage" ? "bytes" : kind)).lowercased()
         func amount(_ value: Double) -> String {
             switch unit {
             case "usd", "$", "dollars": return String(format: "$%.2f", value)
             case "tokens": return Self.compact(value)
+            case "bytes", "b": return Self.bytes(value)
             default: return value.rounded() == value ? String(Int(value)) : String(format: "%.2f", value)
             }
         }
         let suffix: String = switch unit {
-        case "usd", "$", "dollars": ""
+        case "usd", "$", "dollars", "bytes", "b": ""
         case "tokens": " tokens"
         case "requests": " requests"
         case "streams": " streams"
@@ -88,6 +93,14 @@ public struct GuardianLimit: Codable, Hashable, Sendable {
         }
         if let max { return "\(amount(used)) of \(amount(max))\(suffix)" }
         return "\(amount(used))\(suffix) used"
+    }
+
+    /// "4 GB", "512.5 MB", "300 KB" (Windows' storage words).
+    static func bytes(_ value: Double) -> String {
+        let gib = 1_073_741_824.0, mib = 1_048_576.0
+        if value >= gib { return trim(value / gib) + " GB" }
+        if value >= mib { return trim(value / mib) + " MB" }
+        return String(Int((value / 1024).rounded())) + " KB"
     }
 
     static func compact(_ value: Double) -> String {
@@ -118,15 +131,31 @@ public struct GuardianProblem: Error, Hashable, Sendable, Identifiable {
     public var needed: String?
     public var message: String?
     public var limit: GuardianLimit?
+    /// 429: how long Guardian asks to wait (its Retry-After header), in seconds.
+    public var retryAfter: TimeInterval?
 
     public init(status: Int, error: String, reason: String? = nil, needed: String? = nil, message: String? = nil,
-                limit: GuardianLimit? = nil) {
+                limit: GuardianLimit? = nil, retryAfter: TimeInterval? = nil) {
         self.status = status
         self.error = error
         self.reason = reason
         self.needed = needed
         self.message = message
         self.limit = limit
+        self.retryAfter = retryAfter
+    }
+
+    /// The reason code in words, for the reasons the dialog's own lines don't name (the same words as Windows).
+    public static func reasonPhrase(_ reason: String?) -> String? {
+        switch reason {
+        case "module_disabled": "that module is switched off for you"
+        case "permission_missing": "your role doesn't include that permission"
+        case "scope_missing": "this sign-in doesn't carry that scope"
+        case "org_not_member": "you aren't a member of that organization"
+        case "not_owner": "only the owner of that item can do this"
+        case "model_not_allowed": "that model isn't available to you in this organization"
+        default: nil
+        }
     }
 
     public var isLimit: Bool { ["budget_exceeded", "limit_reached", "rate_limited"].contains(error) || status == 402 }
@@ -146,6 +175,7 @@ public struct GuardianProblem: Error, Hashable, Sendable, Identifiable {
                 case "spend": return "Guardian spend limit reached"
                 case "tokens": return "Guardian token limit reached"
                 case "requests": return "Guardian request limit reached"
+                case "storage": return "Guardian storage limit reached"
                 default: return "Guardian limit reached"
                 }
             }
@@ -173,7 +203,8 @@ public struct GuardianProblem: Error, Hashable, Sendable, Identifiable {
             case "org_not_member":
                 lines.append("You aren't a member of that organization. Pick another one in Settings ▸ Guardian, or ask its admin to add you.")
             default:
-                lines.append("Missing: \(what)" + (reason.map { " (\($0))" } ?? "") + ". An admin of your Guardian organization can grant it.")
+                let why = Self.reasonPhrase(reason).map { " — \($0)" } ?? reason.map { " (\($0))" } ?? ""
+                lines.append("Missing: \(what)" + why + ". An admin of your Guardian organization can grant it.")
             }
         default:
             if let limit {
@@ -186,9 +217,10 @@ public struct GuardianProblem: Error, Hashable, Sendable, Identifiable {
                 } else {
                     lines.append("Your Guardian organization's admin can raise the limit; otherwise it frees up when it resets.")
                 }
-            } else if isLimit {
+            } else if isLimit, error != "rate_limited" {
                 lines.append("Your Guardian organization's admin can raise the limit.")
             }
+            if let retryAfter, retryAfter > 0 { lines.append("Try again in \(Int(retryAfter.rounded(.up))) s.") }
         }
         if lines.isEmpty { lines.append("Guardian answered HTTP \(status).") }
         return lines.joined(separator: "\n\n")
@@ -213,6 +245,18 @@ public struct GuardianProblem: Error, Hashable, Sendable, Identifiable {
             return object
         }()
         let lowered = Dictionary(headers.map { ($0.key.lowercased(), $0.value) }, uniquingKeysWith: { first, _ in first })
+        // Retry-After: seconds, or an HTTP date.
+        let retryAfter: TimeInterval? = lowered["retry-after"].flatMap { value -> TimeInterval? in
+            let trimmed = value.trimmingCharacters(in: .whitespaces)
+            if let seconds = Double(trimmed) { return seconds > 0 ? seconds : nil }
+            let http = DateFormatter()
+            http.locale = Locale(identifier: "en_US_POSIX")
+            http.timeZone = TimeZone(identifier: "GMT")
+            http.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+            guard let date = http.date(from: trimmed) else { return nil }
+            let wait = date.timeIntervalSinceNow
+            return wait > 0 ? wait : nil
+        }
         let headerLimit: GuardianLimit? = lowered["x-guardian-limit-kind"].map { kind in
             GuardianLimit(kind: kind, window: lowered["x-guardian-limit-window"] ?? "day",
                           resetsAt: lowered["x-guardian-limit-reset"].flatMap(Self.date))
@@ -220,7 +264,8 @@ public struct GuardianProblem: Error, Hashable, Sendable, Identifiable {
         guard let error = root?["error"] as? String else {
             // A bare 402/429 with Guardian's headers is still a limit.
             if let headerLimit, status == 402 || status == 429 {
-                return GuardianProblem(status: status, error: status == 429 ? "rate_limited" : "limit_reached", limit: headerLimit)
+                return GuardianProblem(status: status, error: status == 429 ? "rate_limited" : "limit_reached", limit: headerLimit,
+                                       retryAfter: retryAfter)
             }
             return nil
         }
@@ -229,14 +274,15 @@ public struct GuardianProblem: Error, Hashable, Sendable, Identifiable {
         var limit: GuardianLimit?
         if let raw = root?["limit"] as? [String: Any] {
             limit = GuardianLimit(kind: raw["kind"] as? String ?? headerLimit?.kind ?? "spend",
-                                  window: raw["window"] as? String ?? headerLimit?.window ?? "day",
+                                  window: raw["window"] as? String ?? headerLimit?.window ?? "",
                                   used: number(raw["used"]), max: number(raw["max"]), unit: raw["unit"] as? String,
                                   resetsAt: (raw["resetsAt"]).flatMap(date) ?? headerLimit?.resetsAt)
         } else {
             limit = headerLimit
         }
         return GuardianProblem(status: status, error: error, reason: root?["reason"] as? String, needed: root?["needed"] as? String,
-                               message: root?["message"] as? String, limit: limit)
+                               message: root?["message"] as? String, limit: limit,
+                               retryAfter: error == "rate_limited" || status == 429 ? retryAfter : nil)
     }
 
     static func number(_ value: Any?) -> Double? {
