@@ -188,7 +188,8 @@ pick the model, asks how Vision should use it, and says hello through it.
   (no balance, plan expired, usage limit used up until …) are explained in plain words and not retried.
 - **GLM-5.3 always thinks.** Vision never asks it not to; the thinking menu maps to its `low` / `high` / `max`.
 - **DeepSeek has its own card** in the wizard and **Add ▸ DeepSeek…**. The thinking menu maps to DeepSeek's
-  `reasoning_effort` (`none` turns thinking off, then `low` / `high` / `max`); with tools, every earlier answer's
+  switch and effort: *Off* sends `thinking: {"type": "disabled"}`, *Low* / *High* / *Max* send `"enabled"` with
+  `reasoning_effort` `low` / `high` / `max` (*Medium* is `high`, as DeepSeek maps it); with tools, every earlier answer's
   reasoning goes back with the conversation, as DeepSeek requires; a key it refuses, an empty balance (402) and
   its rate limit are said in plain words, and only the last is retried. DeepSeek's servers are in China — the
   route starts out not private, so the shield masks before sending.

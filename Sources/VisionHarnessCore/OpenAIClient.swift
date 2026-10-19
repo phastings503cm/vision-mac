@@ -635,11 +635,12 @@ public struct OpenAIClient: LLMClient {
         let learned = adaptations.adaptation(for: adaptationKey(request))
         let echo = rules.echoReasoning || (learned?.echoReasoning ?? false)
         // A stand-in is only needed while the model thinks (K2.6 with thinking switched off wants none; nor does
-        // DeepSeek with reasoning_effort "none").
+        // DeepSeek with thinking.type "disabled", nor Kimi Code with reasoning_effort "none").
         let thinkingOff: Bool = {
             switch rules.thinking {
             case .toggle: return thinkingLevel(for: request) == .off
-            case .effort(let words, _): return words[.off] != nil && thinkingLevel(for: request) == .off
+            case .effort(let words, _, let withToggle):
+                return (withToggle || words[.off] != nil) && thinkingLevel(for: request) == .off
             default: return false
             }
         }()
@@ -800,7 +801,9 @@ public struct OpenAIClient: LLMClient {
             }
         case .effortField:
             if let effort { body["reasoning_effort"] = effort }
-        case .effort(_, let inTemplate):
+        case .effort(_, let inTemplate, let withToggle):
+            // DeepSeek: thinking on or off beside the effort word (Off sends "disabled" and no word).
+            if withToggle { body["thinking"] = ["type": rules.turnsThinkingOff(level) ? "disabled" : "enabled"] }
             // A model that always thinks is never told not to (that fails the request): only how hard.
             if let effort {
                 body["reasoning_effort"] = effort

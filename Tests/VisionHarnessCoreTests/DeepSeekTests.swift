@@ -35,20 +35,30 @@ final class DeepSeekTests: XCTestCase {
 
     // MARK: Rules
 
-    /// reasoning_effort none / low / high / max (medium is high, as DeepSeek maps it); never a `thinking` toggle
-    /// beside it, and no chat-template fields (a hosted API).
-    func testThinkingLevelsBecomeDeepSeeksEffortWords() throws {
-        let expected: [ThinkingLevel: String] = [.off: "none", .low: "low", .medium: "high", .high: "high", .max: "max"]
+    /// DeepSeek's OpenAI format: Off is `thinking.type` "disabled" with no `reasoning_effort` (DeepSeek documents no
+    /// "none" there); Low / High / Max are "enabled" plus low / high / max (medium is high, as DeepSeek maps it). No
+    /// chat-template fields (a hosted API), and no level sends nothing (DeepSeek's default: thinking, high).
+    func testThinkingLevelsBecomeDeepSeeksSwitchAndEffort() throws {
+        let off = try body(route("deepseek-v4-pro"), thinking: .off)
+        XCTAssertEqual((off["thinking"] as? [String: Any])?["type"] as? String, "disabled")
+        XCTAssertNil(off["reasoning_effort"], "Off says no effort word")
+        XCTAssertNil(off["chat_template_kwargs"])
+        let expected: [ThinkingLevel: String] = [.low: "low", .medium: "high", .high: "high", .max: "max"]
         for (level, word) in expected {
             let b = try body(route("deepseek-v4-pro"), thinking: level)
+            XCTAssertEqual((b["thinking"] as? [String: Any])?["type"] as? String, "enabled", "\(level)")
             XCTAssertEqual(b["reasoning_effort"] as? String, word, "\(level)")
-            XCTAssertNil(b["thinking"])
             XCTAssertNil(b["chat_template_kwargs"])
         }
-        XCTAssertNil(try body(route("deepseek-v4-pro"))["reasoning_effort"], "no level: DeepSeek's default (thinking, high)")
+        let none = try body(route("deepseek-v4-pro"))
+        XCTAssertNil(none["reasoning_effort"], "no level: DeepSeek's default (thinking, high)")
+        XCTAssertNil(none["thinking"])
         let rules = ModelRequestRules.for(route("deepseek-flash"), model: "deepseek-flash")
         XCTAssertEqual(rules.provider, .deepseek)
         XCTAssertEqual(rules.thinkingLevels, [.off, .low, .high, .max])
+        XCTAssertFalse(rules.alwaysThinks)
+        XCTAssertTrue(rules.turnsThinkingOff(.off))
+        XCTAssertFalse(rules.turnsThinkingOff(.low))
         XCTAssertFalse(rules.forcedToolChoice, "tool_choice required / named is a 400 in thinking mode")
     }
 
