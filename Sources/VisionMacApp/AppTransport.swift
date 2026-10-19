@@ -1763,19 +1763,60 @@ public final class AppTransport {
     /// what the harness can see on its own — the plan's steps against what
     /// happened — never the model's word alone.
     static func validationFailures(state: TurnPhaseState, reply: String) -> [String] {
-        var failures: [String] = []
-        // A turn that ended in an error message didn't complete its work.
-        for marker in ["Error:", "error: ", "Traceback (most recent call last)", "Build FAILED"] {
-            if reply.contains(marker) {
-                failures.append("the reply reports an error (\(marker.trimmingCharacters(in: .whitespaces)))")
-                break
-            }
+        TurnValidation.failures(state: state, reply: reply)
+    }
+
+    /// A /goal (or a queue task's goal) the model declared complete: validate before accepting it. Nil when it passes
+    /// (the turn moves to results); otherwise the failure, and either the turn is back in execution for another round
+    /// (`accept` false) or — at the cap, or after the no-progress check — it finishes with issues (`accept` true).
+    private func phasesValidateGoal(_ vm: SessionVM, reply: String, last: inout GoalValidation, accept: inout Bool) -> String? {
+        accept = true
+        guard var state = vm.turnPhase, !state.isOver else { return nil }
+        if state.phase == .planning {
+            phasesPlanSettled(vm)
+            state = vm.turnPhase ?? state
         }
-        // An empty reply after executing is not an answer.
-        if reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, state.plan != nil || state.filesChanged > 0 {
-            failures.append("the turn ended without a summary")
+        let done = vm.todos.filter { $0.status == .completed }.count
+        // Only what the harness can see: an error the closing words report.
+        guard let marker = TurnValidation.reportedError(reply) else {
+            last = GoalValidation(failure: nil, done: done, streak: 0)
+            // An earlier attempt's failure is fixed now: the card and the record say it passed.
+            state.lastValidationFailure = nil
+            gatherEvidence(vm, into: &state, reply: reply)
+            state.beginResults(summary: vm.todos.isEmpty
+                ? "Validated: the reply matches what was asked."
+                : "Validated against the plan: \(done) of \(vm.todos.count) steps done.")
+            vm.turnPhase = state
+            phasesFinish(vm, completed: true)
+            return nil
         }
-        return failures
+        let failure = "the reply reports an error (\(marker.trimmingCharacters(in: .whitespaces)))"
+        let streak = TurnValidation.madeNoProgress(previousFailure: last.failure, failure: failure,
+                                                   stepsDoneBefore: last.done, stepsDoneNow: done) ? last.streak + 1 : 0
+        last = GoalValidation(failure: failure, done: done, streak: streak)
+        if streak < TurnValidation.noProgressLimit, state.loopBack(reason: failure) {
+            accept = false
+            vm.turnPhase = state
+            return failure
+        }
+        // Capped, or going nowhere: finish with what was achieved, and say what didn't pass.
+        state.lastValidationFailure = failure
+        gatherEvidence(vm, into: &state, reply: reply)
+        state.addEvidence(.init(kind: .note,
+                                title: streak >= TurnValidation.noProgressLimit
+                                    ? "Validation stopped: no progress in two attempts" : "Validation hit the retry cap",
+                                detail: "Last failure: " + failure))
+        state.beginResults(summary: "Finished with issues: \(failure)")
+        vm.turnPhase = state
+        phasesFinish(vm, completed: false)
+        return failure
+    }
+
+    /// The last goal validation: its failure, the plan steps done then, and how many attempts in a row made no progress.
+    struct GoalValidation {
+        var failure: String?
+        var done = 0
+        var streak = 0
     }
 
     private func runTurn(_ vm: SessionVM, text: String, attachments: [MessageAttachment] = [],
@@ -1951,6 +1992,8 @@ public final class AppTransport {
         var errorsInARow = 0
         var emptyInARow = 0          // rounds with no reply at all
         var markerMisplaced = false
+        var validation = GoalValidation()
+        var validationFailure: String?   // sends the next round back to fix what validation found
         while true {
             if Task.isCancelled { return .stopped }
             // The primary became an interactive-only plan while the goal ran (the user switched it): no more
@@ -1970,6 +2013,10 @@ public final class AppTransport {
                     modelText = resuming ? GoalProtocol.resume(goal) : GoalProtocol.kickoff(goal)
                     displayText = resuming ? "🎯 /goal (resuming) \(goal)" : "🎯 /goal \(goal)"
                 }
+            } else if let failure = validationFailure {
+                let attempt = (vm.turnPhase?.loopbacks ?? 0) + 1
+                modelText = TurnValidation.loopBackMessage(failure, attempt: attempt)
+                displayText = TurnValidation.loopBackDisplay(attempt: attempt)
             } else {
                 modelText = auto
                     ? GoalProtocol.continuationAuto(goal, round: round, hitIterationLimit: hitLimit, error: lastError,
@@ -1978,6 +2025,7 @@ public final class AppTransport {
                                                 markerMisplaced: markerMisplaced)
                 displayText = lastError == nil ? "↻ round \(round): keep going" : "↻ round \(round): recover and keep going"
             }
+            validationFailure = nil
 
             do {
                 let result = try await turn(vm, modelText: modelText, displayText: displayText, attachments: [])
@@ -1990,7 +2038,21 @@ public final class AppTransport {
                 if !result.hitIterationLimit {
                     switch GoalProtocol.status(of: result.lastReplyText) {
                     case .complete:
-                        if !auto { notice("✅ Goal complete after \(round) round\(round == 1 ? "" : "s").") }
+                        // Validation first: an error the closing words report sends it back to work (unlimited by
+                        // default, cappable, and stopped by the no-progress check).
+                        var accept = true
+                        let failed = phasesValidateGoal(vm, reply: result.lastReplyText, last: &validation, accept: &accept)
+                        if let failed, !accept {
+                            validationFailure = failed
+                            notice("⚠️ Validation failed: \(failed) — working on it again"
+                                   + (vm.turnPhase?.loopbackCap.map { " (capped at \($0) retries)." } ?? "."))
+                            if let taskID = queueSessions[vm.id] { queue.note(taskID, "Validation failed (\(failed)) — another round.") }
+                            break
+                        }
+                        if !auto {
+                            notice("✅ Goal complete after \(round) round\(round == 1 ? "" : "s")"
+                                   + (failed.map { " — but validation still found a problem: \($0)." } ?? "."))
+                        }
                         return .complete
                     case .blocked(let why):
                         if !auto {

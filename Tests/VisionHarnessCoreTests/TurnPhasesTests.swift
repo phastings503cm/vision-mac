@@ -190,3 +190,34 @@ final class TurnPhasesTests: XCTestCase {
         XCTAssertFalse(state.steps.isEmpty)
     }
 }
+
+/// Validation's own checks, the same as Windows': a marker counts at the start of a line outside code fences, and the
+/// no-progress rule stops an unlimited loop-back.
+final class TurnValidationTests: XCTestCase {
+    func testAnErrorCountsOnlyAtTheStartOfALineOutsideFences() {
+        XCTAssertEqual(TurnValidation.reportedError("Done.\nError: the build failed"), "Error:")
+        XCTAssertEqual(TurnValidation.reportedError("  - Traceback (most recent call last):"), "Traceback (most recent call last)")
+        XCTAssertEqual(TurnValidation.reportedError("> Build FAILED in 3s"), "Build FAILED")
+        XCTAssertNil(TurnValidation.reportedError("The old code printed Error: x, which I fixed."), "quoted mid-line")
+        XCTAssertNil(TurnValidation.reportedError("Before:\n```\nError: boom\n```\nNow it passes."), "inside a fence")
+        XCTAssertNil(TurnValidation.reportedError("errors: none"))
+        var state = TurnPhaseState()
+        XCTAssertTrue(TurnValidation.failures(state: state, reply: "").isEmpty, "no plan, no files: an empty reply is fine")
+        state.filesChanged = 2
+        XCTAssertEqual(TurnValidation.failures(state: state, reply: " "), ["the turn ended without a summary"])
+    }
+
+    func testTheNoProgressRuleAndTheLoopBackWords() {
+        XCTAssertFalse(TurnValidation.madeNoProgress(previousFailure: nil, failure: "x", stepsDoneBefore: 0, stepsDoneNow: 0))
+        XCTAssertTrue(TurnValidation.madeNoProgress(previousFailure: "x", failure: "x", stepsDoneBefore: 2, stepsDoneNow: 2))
+        XCTAssertFalse(TurnValidation.madeNoProgress(previousFailure: "x", failure: "x", stepsDoneBefore: 2, stepsDoneNow: 3), "a step got done")
+        XCTAssertFalse(TurnValidation.madeNoProgress(previousFailure: "x", failure: "y", stepsDoneBefore: 2, stepsDoneNow: 2), "a new failure")
+        XCTAssertEqual(TurnValidation.noProgressLimit, 2)
+        XCTAssertEqual(TurnValidation.loopBackDisplay(attempt: 2), "↻ validation: fix and check again (attempt 2)")
+        XCTAssertTrue(TurnValidation.loopBackMessage("the reply reports an error (Error:)", attempt: 2)
+            .hasPrefix("(Automatic — not from the user.) Validation of your work found a problem: the reply reports an error (Error:). This is attempt 2."))
+        var capped = TurnPhaseState(loopbackCap: 1)
+        XCTAssertTrue(capped.loopBack(reason: "x"))
+        XCTAssertFalse(capped.loopBack(reason: "x"), "the optional cap")
+    }
+}

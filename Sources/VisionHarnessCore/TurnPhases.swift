@@ -491,3 +491,67 @@ public final class TurnPhaseRunner: @unchecked Sendable {
         try? data.write(to: fileURL, options: .atomic)
     }
 }
+
+// MARK: - Validation
+
+/// What the harness checks at the end of a turn on its own — what it can see, never the model's word alone — and the
+/// no-progress rule that stops an unlimited loop-back (Patrick's answer to Q1: no retry cap by default; the person's
+/// budget and this check are the only always-on stops). The same rules and words as Vision for Windows.
+public enum TurnValidation {
+    /// A line that begins with one of these reports a failure.
+    static let markers = ["Error:", "error: ", "Traceback (most recent call last)", "Build FAILED"]
+
+    /// Why validation fails this turn (empty: it passes). `reply` is the turn's closing words.
+    public static func failures(state: TurnPhaseState, reply: String) -> [String] {
+        var failures: [String] = []
+        if let marker = reportedError(reply) {
+            failures.append("the reply reports an error (\(marker.trimmingCharacters(in: .whitespaces)))")
+        }
+        if reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, state.plan != nil || state.filesChanged > 0 {
+            failures.append("the turn ended without a summary")
+        }
+        return failures
+    }
+
+    /// The first failure marker the reply reports, or nil. A marker counts only at the start of a line (after
+    /// indentation or a list marker) and outside code fences, so a reply that quotes an error while explaining it
+    /// doesn't fail.
+    public static func reportedError(_ reply: String) -> String? {
+        var inFence = false
+        for raw in reply.split(separator: "\n", omittingEmptySubsequences: false) {
+            var line = Substring(raw.hasSuffix("\r") ? raw.dropLast() : raw)
+            line = line.drop { $0 == " " || $0 == "\t" }
+            if line.hasPrefix("```") || line.hasPrefix("~~~") {
+                inFence.toggle()
+                continue
+            }
+            if inFence { continue }
+            while line.count > 1, let first = line.first, "-*>•".contains(first),
+                  let second = line.dropFirst().first, second.isWhitespace {
+                line = line.dropFirst(2).drop { $0 == " " || $0 == "\t" }
+            }
+            if let marker = markers.first(where: { line.hasPrefix($0) }) { return marker }
+        }
+        return nil
+    }
+
+    /// The no-progress check (always on): after a failed validation, this attempt made no progress when it fails the
+    /// same way as the attempt before it and finished no new plan step.
+    public static func madeNoProgress(previousFailure: String?, failure: String, stepsDoneBefore: Int, stepsDoneNow: Int) -> Bool {
+        previousFailure != nil && previousFailure == failure && stepsDoneNow <= stepsDoneBefore
+    }
+
+    /// How many attempts in a row may make no progress before the loop-back stops: two.
+    public static let noProgressLimit = 2
+
+    /// What a goal round is told after validation sends it back.
+    public static func loopBackMessage(_ failure: String, attempt: Int) -> String {
+        "(Automatic — not from the user.) Validation of your work found a problem: \(failure). This is attempt \(attempt). "
+            + "Fix it — run what proves it works — and only then declare the goal complete, with a closing summary of what you did and how you checked it."
+    }
+
+    /// The transcript row of a loop-back (one of the harness's own rows, never a prompt of the person's).
+    public static func loopBackDisplay(attempt: Int) -> String {
+        "↻ validation: fix and check again (attempt \(attempt))"
+    }
+}

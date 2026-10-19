@@ -138,6 +138,38 @@ final class RunsHostTests: XCTestCase {
         XCTAssertEqual(record.entryText, "🎯 /goal Make it work")
     }
 
+    /// Patrick's Q1, "truly unlimited": a goal that declares itself complete while its closing words report an error is
+    /// sent back to fix it (no retry cap by default), and passes once the error is gone — two attempts on its record.
+    func testAGoalWhoseClosingWordsReportAnErrorIsSentBackUntilItPasses() async throws {
+        FakeModelServer.reset { seen, index in
+            if seen.lastUser.hasPrefix("(Automatic — not from the user.) Validation of your work found a problem") {
+                return .text("Fixed the build and ran it again: it passes.\nGOAL_COMPLETE")
+            }
+            return .text("Done.\nError: the build failed with 2 errors\nGOAL_COMPLETE")
+        }
+        let vm = transport.newSession(cwd: project.path)
+        transport.send("/goal Make the build pass", sessionID: vm.id)
+        try await waitUntil("goal done") { vm.promptHistory.last?.outcome == .completed && idle(vm) }
+        let record = try XCTUnwrap(vm.promptHistory.last)
+        XCTAssertEqual(record.attempts, 2, "sent back once")
+        XCTAssertTrue(vm.entries.contains { $0.message?.text == "↻ validation: fix and check again (attempt 2)" })
+        XCTAssertTrue(vm.entries.contains { $0.message?.text.hasPrefix("⚠️ Validation failed: the reply reports an error (Error:) — working on it again.") == true })
+        XCTAssertNil(vm.turnPhase?.lastValidationFailure, "the fixed attempt passed")
+    }
+
+    /// The always-on no-progress check: the same failure with no plan step newly done stops the loop-back after two
+    /// attempts in a row went nowhere; the goal ends "Finished with issues".
+    func testALoopBackThatMakesNoProgressStops() async throws {
+        FakeModelServer.reset { _, _ in .text("Error: still failing\nGOAL_COMPLETE") }
+        let vm = transport.newSession(cwd: project.path)
+        transport.send("/goal Fix it", sessionID: vm.id)
+        try await waitUntil("goal over") { vm.promptHistory.last?.outcome == .issues && idle(vm) }
+        let record = try XCTUnwrap(vm.promptHistory.last)
+        XCTAssertEqual(record.attempts, 3)
+        XCTAssertTrue(vm.turnPhase?.evidence.contains { $0.title == "Validation stopped: no progress in two attempts" } == true)
+        XCTAssertTrue(vm.entries.contains { $0.message?.text.hasPrefix("✅ Goal complete after 3 rounds — but validation still found a problem: the reply reports an error (Error:).") == true })
+    }
+
     func testAChatFromBeforeTheTimelineIsBackfilledOnce() async throws {
         let id = UUID().uuidString
         let t0 = Date().addingTimeInterval(-3_600)
