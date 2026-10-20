@@ -273,7 +273,7 @@ struct FleetCard: View {
                 } else {
                     Label("Each chat's own model leads · subagents can run on:", systemImage: "point.3.connected.trianglepath.dotted")
                         .font(.callout.weight(.semibold))
-                    FlowChips(items: enlisted.map { "\(AppTransport.routeLabel($0)) · \($0.subagentParallel ?? 2) at a time" })
+                    FlowChips(items: Self.chips(enlisted))
                     Toggle("When those are all busy, let subagents use the chat's own model too",
                            isOn: Binding(get: { config.subagentsUsePrimary },
                                          set: { config.subagentsUsePrimary = $0 }))
@@ -297,6 +297,11 @@ struct FleetCard: View {
             .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.corner))
             .overlay(RoundedRectangle(cornerRadius: Theme.corner).strokeBorder(Theme.hairline))
         }
+    }
+
+    /// "DGX Spark · 2 at a time" for each enlisted route.
+    static func chips(_ routes: [ProviderProfile]) -> [String] {
+        routes.map { route in AppTransport.routeLabel(route) + " · \(route.subagentParallel ?? 2) at a time" }
     }
 
     static let emptyText = "Each chat's own model leads. Tick “Subagent” on other models — a second DGX Spark, Amazon Bedrock, Guardian, Claude Code — and a chat's model can hand side tasks to them, choosing one by name or letting Vision pick the least busy."

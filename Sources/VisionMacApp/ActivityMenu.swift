@@ -224,15 +224,20 @@ private struct ServersFooter: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             ForEach(enlisted) { server in
-                row(server, role: "subagents",
-                    counts: "\(server.inFlight)/\(server.maxParallel) busy · \(server.completed) done"
-                        + (server.failed > 0 ? " · \(server.failed) failed" : "")
-                        + (server.healthy ? "" : " · not answering"))
+                row(server, role: "subagents", counts: Self.counts(server))
             }
             ForEach(homes) { home in
                 row(home, role: "a chat's own model", counts: "\(home.inFlight)/\(home.maxParallel) busy")
             }
         }
+    }
+
+    /// "1/2 busy · 14 done · 1 failed · not answering"
+    static func counts(_ server: FleetStatus) -> String {
+        var text = "\(server.inFlight)/\(server.maxParallel) busy · \(server.completed) done"
+        if server.failed > 0 { text += " · \(server.failed) failed" }
+        if !server.healthy { text += " · not answering" }
+        return text
     }
 
     private func row(_ server: FleetStatus, role: String, counts: String) -> some View {
@@ -268,8 +273,7 @@ struct AgentLogView: View {
                     Text("\(run.agentType) agent\(run.isBackground ? " · background" : "") · \(run.status.rawValue) · \(run.elapsed().formattedDuration)")
                         .font(.caption).foregroundStyle(.secondary)
                     if let placement = run.placementLabel {
-                        Label(placement + (SubagentPlacement.Reason.label(run.placementReason).map { " · \($0)" } ?? ""),
-                              systemImage: "cpu").font(.callout).foregroundStyle(Color.accentColor)
+                        Label(placement + run.reasonSuffix, systemImage: "cpu").font(.callout).foregroundStyle(Color.accentColor)
                     }
                     if let note = run.placement {
                         Text(note).font(.caption).foregroundStyle(Theme.noticeTint)

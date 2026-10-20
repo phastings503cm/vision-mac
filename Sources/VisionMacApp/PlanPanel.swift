@@ -162,8 +162,7 @@ struct PlanPanel: View {
                                         .font(.caption).foregroundStyle(.secondary).monospacedDigit()
                                 }
                             }
-                            Text([run.server ?? (model.transport.fleet.servers.isEmpty ? nil : "waiting for a server"), run.activity]
-                                .compactMap { $0 }.joined(separator: " · "))
+                            Text(Self.runLine(run, waitingForServer: !model.transport.fleet.servers.isEmpty))
                                 .font(.caption).foregroundStyle(.secondary)
                                 .lineLimit(1).truncationMode(.tail)
                         }
@@ -209,6 +208,21 @@ struct PlanPanel: View {
 
 /// The right column (Tasks · Prompts, see `RunPanel`) beside the window's content, with a handle on its edge to make
 /// it wider or narrower (the width is remembered).
+extension PlanPanel {
+    /// "Spark 2 · grep: TODO" — where a running subagent is and what it is doing ("waiting for a server" before it
+    /// has one, when there are subagent servers to wait for).
+    static func runLine(_ run: AgentRun, waitingForServer: Bool) -> String {
+        var parts: [String] = []
+        if let server = run.server {
+            parts.append(server)
+        } else if waitingForServer {
+            parts.append("waiting for a server")
+        }
+        parts.append(run.activity)
+        return parts.joined(separator: " · ")
+    }
+}
+
 struct PlanPanelColumn: View {
     @Environment(AppModel.self) private var model
     @State private var dragStart: Double?

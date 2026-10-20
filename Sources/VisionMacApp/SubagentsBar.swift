@@ -45,9 +45,7 @@ struct SubagentsBar: View {
                                 .font(.system(size: 11, weight: .medium))
                                 .foregroundStyle(run.placementLabel == nil ? Color.secondary : Color.accentColor)
                                 .lineLimit(1).truncationMode(.middle)
-                                .help((run.placementLabel ?? "waiting for a server")
-                                      + (SubagentPlacement.Reason.label(run.placementReason).map { " · \($0)" } ?? "")
-                                      + (run.placement.map { "\n\($0)" } ?? ""))
+                                .help(run.placementDetail)
                             Text("“\(run.description)” — \(run.activity)")
                                 .font(.system(size: 11)).foregroundStyle(.secondary)
                                 .lineLimit(1).truncationMode(.tail)
@@ -99,5 +97,21 @@ struct SubagentsBar: View {
         .menuStyle(.borderlessButton)
         .fixedSize()
         .help("Stop background agents")
+    }
+}
+
+extension AgentRun {
+    /// " · picked by the primary" — how its server was chosen, for tooltips ("" when there was no choice).
+    var reasonSuffix: String {
+        guard let label = SubagentPlacement.Reason.label(placementReason) else { return "" }
+        return " · " + label
+    }
+
+    /// "qwen3 on DGX Spark · fallback\nspark-2 stayed busy for 2 minutes" — where it runs, why, and the note.
+    var placementDetail: String {
+        var text = placementLabel ?? "waiting for a server"
+        text += reasonSuffix
+        if let note = placement { text += "\n" + note }
+        return text
     }
 }

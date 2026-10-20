@@ -38,14 +38,19 @@ struct RouteMenuSections: View {
                 ForEach(enlistable, id: \.routeID) { provider in
                     Toggle(isOn: Binding(get: { provider.isSubagentWorker },
                                          set: { config.setSubagentWorker(provider.routeID, $0) })) {
-                        Text(provider.kind == .guardian && config.isGuardianModel(provider.routeID)
-                             ? "Guardian · " + config.guardianMenuLabel(provider.routeID) : provider.displayName)
+                        Text(Self.subagentMenuName(provider, config: config))
                     }
                 }
             }
         }
         bedrockSection(config)
         claudeCodeSection(config)
+    }
+
+    /// How a route is named in "Use for Subagents" (one of Guardian's live models: "Guardian · <its label>").
+    static func subagentMenuName(_ route: ProviderProfile, config: AppConfig) -> String {
+        guard route.kind == .guardian, config.isGuardianModel(route.routeID) else { return route.displayName }
+        return "Guardian · " + config.guardianMenuLabel(route.routeID)
     }
 
     @ViewBuilder
