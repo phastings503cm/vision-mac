@@ -50,12 +50,18 @@ Grab the latest build from [Releases](https://github.com/phastings503cm/vision-m
 Vision was previously called DSH: its first launch brings over your chats, settings, keys and vault, and a
 project's `.dsh` folder and `DSH.md` keep working.
 
-> Releases are ad-hoc-signed for Apple Silicon (arm64), macOS 14+. Gatekeeper will prompt on first
-> launch — right-click the app and choose **Open**, or run:
+> Releases are built for Apple Silicon (arm64), macOS 14+, and signed with Vision's own release certificate
+> (the same one every version), so macOS keeps Screen Recording, Accessibility and Automation permissions
+> across updates. The certificate isn't Apple-issued, so Gatekeeper prompts on first launch — right-click the
+> app and choose **Open**, or run:
 >
 > ```bash
 > xattr -d com.apple.quarantine /Applications/Vision.app
 > ```
+>
+> Coming from 0.16.7 or earlier (ad-hoc signed, a new identity every update)? If Vision is refused Screen
+> Recording or Accessibility although its switch is on, press **Reset…** in Settings ▸ Computer once and allow it
+> again.
 
 ## Build
 

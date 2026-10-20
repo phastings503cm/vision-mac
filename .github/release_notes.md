@@ -5,12 +5,24 @@
   builds were published from an older repository; from 0.16.0 they are all
   here).
 
-Builds are ad-hoc-signed for Apple Silicon (arm64), macOS 14+. Gatekeeper will
+Builds are for Apple Silicon (arm64), macOS 14+, signed with Vision's own release certificate. Gatekeeper will
 prompt on first launch — right-click the app and choose **Open**, or run:
 
 ```bash
 xattr -d com.apple.quarantine /Applications/Vision.app
 ```
+
+## What's new in 0.16.8 — permissions that survive updates
+
+- **Screen Recording, Accessibility and Automation now stay allowed after an update.** macOS ties those
+  permissions to the app's signature, and builds up to 0.16.7 had a new signature every release — so the switch in
+  System Settings showed on while macOS quietly refused Vision. From this release every build is signed with the same
+  "Vision Release Signing" certificate.
+- **One last time:** after installing 0.16.8, open **Settings ▸ Computer** and press **Reset…** next to Screen
+  Recording (and Accessibility if screen control doesn't work), then allow Vision when macOS asks and choose
+  **Quit & Reopen**. Later updates keep the permission.
+- Settings ▸ Computer shows whether Screen Recording is allowed, beside Accessibility, each with **Open Settings…**
+  and **Reset…**; a screenshot that comes back empty now says how to fix it.
 
 ## What's new in 0.16.7 — your chat's model leads its own team of subagents
 

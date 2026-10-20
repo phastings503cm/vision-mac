@@ -183,7 +183,7 @@ public struct ScreenshotTool: ToolExecutor {
             try? FileManager.default.removeItem(at: file)
             let why = String(decoding: result.err, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
             let reason = result.status == 0 ? "capture produced no image" : "screencapture exit \(result.status): \(why.prefix(200))"
-            return .init(output: "Error: \(reason).\nIf nothing was captured: System Settings → Privacy & Security → Screen Recording — enable Vision, then relaunch it.")
+            return .init(output: "Error: \(reason).\nIf nothing was captured: System Settings → Privacy & Security → Screen & System Audio Recording — enable Vision, then relaunch it. If it is already on there, the entry belongs to an older build: Settings ▸ Computer ▸ Screen Recording ▸ Reset… fixes it.")
         }
         let note = Self.string(args, "description")
         return .init(output: "Captured \(what) (\(data.count / 1024) KB)\(note.map { " — looking for: \($0)" } ?? ""). It is shown below; describe what you see before deciding the next step.",

@@ -12,6 +12,8 @@ import VisionHarnessCore
 struct ComputerSettings: View {
     @Environment(AppModel.self) private var model
     @State private var trusted = AXIsProcessTrusted()
+    @State private var canCapture = MacPermissions.screenRecordingAllowed
+    @State private var confirmReset: MacPermissions.Service?
 
     var body: some View {
         @Bindable var config = model.config
@@ -62,28 +64,58 @@ struct ComputerSettings: View {
             }
 
             Section("Permission") {
-                LabeledContent("Accessibility") {
-                    HStack(spacing: 8) {
-                        Image(systemName: trusted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                            .foregroundStyle(trusted ? .green : .orange)
-                        Text(trusted ? "Allowed" : "Not allowed yet")
-                        if !trusted {
-                            Button("Open Settings…") { Self.openAccessibilitySettings() }
-                        }
-                    }
-                }
+                permissionRow(.screenRecording, allowed: canCapture)
+                Text(canCapture
+                     ? "\(AppIdentity.name) can take screenshots and watch windows."
+                     : "Without it, screenshots come back empty. System Settings ▸ Privacy & Security ▸ Screen & System Audio Recording ▸ \(AppIdentity.name).")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                permissionRow(.accessibility, allowed: trusted)
                 Text(trusted
                      ? "\(AppIdentity.name) can press controls and read apps' accessibility trees directly."
                      : "Without it, \(AppIdentity.name) can only use the real mouse and keyboard, and ui_action can't work. System Settings ▸ Privacy & Security ▸ Accessibility ▸ \(AppIdentity.name).")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                Text("Switch already on in System Settings but still refused? That entry belongs to an older build of \(AppIdentity.name) (builds before 0.16.8 had a new signature with every update). Reset removes it and reopens \(AppIdentity.name); allow it once more when macOS asks, and later updates keep it.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .formStyle(.grouped)
-        .onAppear { trusted = AXIsProcessTrusted() }
+        .onAppear { refreshPermissions() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            trusted = AXIsProcessTrusted()
+            refreshPermissions()
         }
+        .confirmationDialog(confirmReset.map { "Reset \($0.title) for \(AppIdentity.name)?" } ?? "",
+                            isPresented: Binding(get: { confirmReset != nil }, set: { if !$0 { confirmReset = nil } }),
+                            titleVisibility: .visible) {
+            if let service = confirmReset {
+                Button("Reset and Reopen") { MacPermissions.resetAndRelaunch(service) }
+                Button("Cancel", role: .cancel) { confirmReset = nil }
+            }
+        } message: {
+            Text("\(AppIdentity.name) quits and reopens. The next time it needs this permission, macOS asks again — choose Allow, then Quit & Reopen.")
+        }
+    }
+
+    @ViewBuilder
+    private func permissionRow(_ service: MacPermissions.Service, allowed: Bool) -> some View {
+        LabeledContent(service.title) {
+            HStack(spacing: 8) {
+                Image(systemName: allowed ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(allowed ? .green : .orange)
+                Text(allowed ? "Allowed" : "Not allowed yet")
+                if !allowed {
+                    Button("Open Settings…") { MacPermissions.openSettings(service) }
+                }
+                Button("Reset…") { confirmReset = service }
+            }
+        }
+    }
+
+    private func refreshPermissions() {
+        trusted = AXIsProcessTrusted()
+        canCapture = MacPermissions.screenRecordingAllowed
     }
 
     static func label(_ seconds: TimeInterval) -> String {
@@ -91,9 +123,4 @@ struct ComputerSettings: View {
             ? "\(Int(seconds / 60)) minute\(seconds == 60 ? "" : "s")" : "\(Int(seconds)) seconds"
     }
 
-    static func openAccessibilitySettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-            NSWorkspace.shared.open(url)
-        }
-    }
 }

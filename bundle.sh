@@ -32,8 +32,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <!-- The settings file is named after the identifier (AppIdentity.bundleIdentifier). The first launch brings
        over the settings, data folder and Keychain items of the build before the rename (LaunchMigration). -->
   <key>CFBundleIdentifier</key>      <string>com.503cm.vision.mac</string>
-  <key>CFBundleVersion</key>         <string>25</string>
-  <key>CFBundleShortVersionString</key> <string>0.16.7</string>
+  <key>CFBundleVersion</key>         <string>26</string>
+  <key>CFBundleShortVersionString</key> <string>0.16.8</string>
   <key>CFBundlePackageType</key>     <string>APPL</string>
   <key>CFBundleExecutable</key>      <string>Vision</string>
   <key>CFBundleIconFile</key>        <string>AppIcon</string>
@@ -67,8 +67,24 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-# Ad-hoc sign so the app launches without a developer identity.
-codesign --force --deep --sign - "$APP" 2>/dev/null || echo "   (unsigned — Gatekeeper may prompt on first launch)"
+# Sign. macOS ties Screen Recording, Accessibility and Automation grants to the app's designated
+# requirement. An ad-hoc signature's requirement is the build's own hash, which every update changes,
+# so grants silently stopped working after each update (up to 0.16.7). Releases are therefore signed
+# with one long-lived certificate (SIGN_IDENTITY, imported by the release workflow), whose requirement
+# — identifier + certificate root — stays the same across updates. Local builds without it stay ad-hoc.
+if [[ -n "${SIGN_IDENTITY:-}" ]]; then
+  echo "==> signing with: $SIGN_IDENTITY"
+  codesign --force --deep --timestamp=none ${SIGN_KEYCHAIN:+--keychain "$SIGN_KEYCHAIN"} --sign "$SIGN_IDENTITY" "$APP"
+  DR="$(codesign -d -r- "$APP" 2>&1 | grep designated || true)"
+  echo "    $DR"
+  if [[ -n "${EXPECT_CERT_ROOT:-}" && "$DR" != *"certificate root = H\"$EXPECT_CERT_ROOT\""* ]]; then
+    echo "error: the app is not signed by the release certificate (expected root $EXPECT_CERT_ROOT)." >&2
+    echo "       A different certificate would break every user's macOS permissions again." >&2
+    exit 1
+  fi
+else
+  codesign --force --deep --sign - "$APP" 2>/dev/null || echo "   (unsigned — Gatekeeper may prompt on first launch)"
+fi
 
 # Build a distributable DMG (app + an Applications drag target).
 DMG="$ROOT/build/Vision.dmg"

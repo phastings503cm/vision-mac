@@ -38,8 +38,44 @@ jobs:
           # computed with git describe + git log.
           fetch-depth: 0
 
+      # Every release is signed with the same self-signed certificate ("Vision Release Signing"), so the
+      # app's designated requirement — identifier + certificate root — is the same in every version and
+      # macOS keeps Screen Recording / Accessibility / Automation grants across updates. (Ad-hoc builds,
+      # up to 0.16.7, changed identity every release and lost them.) The certificate lives in the repo
+      # secrets; there is no fallback to ad-hoc signing.
+      - name: Import the release signing certificate
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$MACOS_CERTIFICATE_P12" ] || [ -z "$MACOS_CERTIFICATE_PASSWORD" ] || [ -z "$MACOS_SIGN_IDENTITY" ]; then
+            echo "::error::The release signing certificate secrets are missing; refusing to ship an ad-hoc build."
+            exit 1
+          fi
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "$MACOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          rm "$RUNNER_TEMP/cert.p12"
+          echo "SIGN_IDENTITY=$MACOS_SIGN_IDENTITY" >> "$GITHUB_ENV"
+          echo "SIGN_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+
       - name: Build the app bundle + DMG
+        env:
+          # SHA-1 of the "Vision Release Signing" certificate. bundle.sh fails if the app's designated
+          # requirement names any other root — a new certificate would break every user's grants again.
+          EXPECT_CERT_ROOT: 4c89dadbc2386ca4aac2f8b8f27790cb673ef7a6
         run: bash bundle.sh release
+
+      - name: Remove the signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
 
       - name: Read version from Info.plist
         id: meta
